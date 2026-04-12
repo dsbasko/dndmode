@@ -69,6 +69,7 @@ func Parse(s string) (Spec, error) {
 
 	var spec Spec
 	keyToken := ""
+	keyTokenSet := false
 	seen := map[string]bool{}
 
 	for _, t := range tokens {
@@ -85,24 +86,29 @@ func Parse(s string) (Spec, error) {
 			spec.Modifiers |= mod
 			continue
 		}
-		if keyToken != "" {
+		// Non-modifier token: must resolve to a known key. If it does not,
+		// surface ErrUnknownToken immediately — otherwise an unknown alias
+		// like "alt" would be silently accepted as a key name and a later
+		// real key (e.g. "x") would produce a misleading "two keys" error.
+		code, ok := keyCodeTable[t]
+		if !ok {
+			return Spec{}, fmt.Errorf("%w: %q (US-ANSI key names only, e.g. 'x', 'f1', 'space')",
+				ErrUnknownToken, t)
+		}
+		if keyTokenSet {
 			return Spec{}, fmt.Errorf("%w: more than one non-modifier key (%q and %q)",
 				ErrInvalidHotkey, keyToken, t)
 		}
 		keyToken = t
+		keyTokenSet = true
+		spec.KeyCode = code
 	}
 
-	if keyToken == "" {
+	if !keyTokenSet {
 		return Spec{}, ErrModifierOnly
 	}
-	code, ok := keyCodeTable[keyToken]
-	if !ok {
-		return Spec{}, fmt.Errorf("%w: %q (US-ANSI key names only, e.g. 'x', 'f1', 'space')",
-			ErrUnknownToken, keyToken)
-	}
-	spec.KeyCode = code
 	if spec.Modifiers == 0 {
-		// Defensive: unreachable given len(tokens) >= 2 + keyToken set.
+		// Defensive: unreachable given len(tokens) >= 2 + keyTokenSet.
 		return Spec{}, fmt.Errorf("%w: at least one modifier required", ErrInvalidHotkey)
 	}
 	return spec, nil
