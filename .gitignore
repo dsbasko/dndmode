@@ -2,4 +2,8 @@
 .DS_Store
 Thumbs.db
 
+# Build artefacts
+/dndmode
+coverage.out
+
 !.gitignore
