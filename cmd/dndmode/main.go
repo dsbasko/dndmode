@@ -26,6 +26,7 @@ import (
 	"path/filepath"
 
 	"github.com/dsbasko/dndmode/internal/config"
+	"github.com/dsbasko/dndmode/internal/config/hotkey"
 	"github.com/dsbasko/dndmode/internal/state"
 	"github.com/dsbasko/dndmode/internal/supervisor"
 )
@@ -94,6 +95,15 @@ func run() int {
 	if err != nil {
 		// CFG-03: pretty error with line:col already formatted by Loader.
 		fmt.Fprintln(os.Stderr, err)
+		return exitConfigErr
+	}
+
+	// --- Step 5b: Validate hotkey grammar (CFG-04, CFG-05). Phase 4 will
+	// reuse the parsed Spec for CGEventTap matching; Phase 1 only needs the
+	// validation side-effect so a modifier-only or unknown-key config fails
+	// fast with exit 1 (ROADMAP SC4). ---
+	if _, err := hotkey.Parse(cfg.Hotkey); err != nil {
+		fmt.Fprintf(os.Stderr, "dndmode: invalid hotkey %q: %v\n", cfg.Hotkey, err)
 		return exitConfigErr
 	}
 

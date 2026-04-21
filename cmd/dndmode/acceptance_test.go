@@ -250,6 +250,35 @@ func TestAcceptance_InvalidYAML_ExitOneWithLineCol(t *testing.T) {
 	}
 }
 
+func TestAcceptance_ModifierOnlyHotkey_ExitOne(t *testing.T) {
+	tmpHome := t.TempDir()
+	cfgDir := filepath.Join(tmpHome, ".config", "dndmode")
+	if err := os.MkdirAll(cfgDir, 0o700); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	cfgPath := filepath.Join(cfgDir, "config.yml")
+	if err := os.WriteFile(cfgPath, []byte("hotkey: Ctrl+Cmd\n"), 0o600); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	cmd, _, stderr := dndmodeCmd(t, ctx, tmpHome)
+	if err := cmd.Run(); err == nil {
+		t.Fatal("expected non-zero exit for modifier-only hotkey, got nil")
+	}
+
+	if exitCode := cmd.ProcessState.ExitCode(); exitCode != 1 {
+		t.Errorf("exit code = %d, want 1 (modifier-only rejection)", exitCode)
+	}
+
+	stderrStr := stderr.String()
+	if !strings.Contains(stderrStr, "invalid hotkey") {
+		t.Errorf("stderr missing 'invalid hotkey' marker: %s", stderrStr)
+	}
+}
+
 // --- helpers ---
 
 func waitForStdout(buf *syncBuffer, substr string, timeout time.Duration) bool {
