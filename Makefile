@@ -6,7 +6,7 @@ BIN        := dndmode
 GOPATH_BIN := $(shell $(GO) env GOPATH)/bin
 
 build:
-	CGO_ENABLED=0 GOOS=darwin GOARCH=arm64 $(GO) build -o $(BIN) ./cmd/dndmode
+	CGO_ENABLED=1 GOOS=darwin GOARCH=arm64 $(GO) build -o $(BIN) ./cmd/dndmode
 
 test:
 	$(GO) test -race $(PKG)
