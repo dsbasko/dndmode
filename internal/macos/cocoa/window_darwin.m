@@ -122,3 +122,45 @@ unsigned long cocoa_window_collection_behavior(void* windowHandle) {
     NSWindow *w = (__bridge NSWindow*)windowHandle;
     return (unsigned long)[w collectionBehavior];
 }
+
+// cocoa_is_main_thread returns 1 if called on the main thread, 0 otherwise.
+// Test-only helper: smoke tests use this to t.Skip gracefully when invoked
+// from a goroutine that is NOT pinned to the main thread, instead of
+// aborting the whole test binary with NSInternalInconsistencyException
+// ("NSWindow should only be instantiated on the main thread!").
+//
+// Production code routes through the DispatchMain helper from plan 02-02
+// (parallel Wave 1) instead of polling this directly. A full live round-trip
+// smoke that actually creates/closes an NSWindow on a dev machine requires
+// both DispatchMain (02-02) and RunApp (02-05) to be in place, and so lives
+// in plan 02-06 (controller-level smoke). The smoke tests in this plan
+// validate the cgo bridging surface (compilation, error path, nil-safety,
+// HEADLESS skip) and document the main-thread skip path explicitly.
+int cocoa_is_main_thread(void) {
+    return [NSThread isMainThread] ? 1 : 0;
+}
+
+// cocoa_first_attached_display_id returns the CGDirectDisplayID of the first
+// attached NSScreen (deviceDescription[NSScreenNumber] of [NSScreen screens][0]),
+// or 0 with *outFound=0 when no screens are attached.
+//
+// Test-only helper bridging smoke tests to NSScreen enumeration
+// without depending on internal/macos/cocoa/screens_darwin.go (parallel
+//). Once lands its production-grade enumerateScreens
+// helper, this minimal single-screen lookup remains useful as an isolated
+// alternative for the low-level NSWindow round-trip layer.
+uint32_t cocoa_first_attached_display_id(int* outFound) {
+    NSArray<NSScreen*> *screens = [NSScreen screens];
+    if (screens == nil || [screens count] == 0) {
+        if (outFound) *outFound = 0;
+        return 0;
+    }
+    NSScreen *s = [screens objectAtIndex:0];
+    NSNumber *n = [[s deviceDescription] objectForKey:@"NSScreenNumber"];
+    if (n == nil) {
+        if (outFound) *outFound = 0;
+        return 0;
+    }
+    if (outFound) *outFound = 1;
+    return (uint32_t)[n unsignedIntValue];
+}
