@@ -32,13 +32,29 @@ func TestDispatchMain_Inline_OnMain(t *testing.T) {
 }
 
 func TestDispatchMain_NilFn_Panics(t *testing.T) {
-	defer func() {
-		if r := recover(); r == nil {
-			t.Errorf("expected panic on nil fn, got none")
-		}
-	}()
+	// DispatchMain(nil) panics ONLY when the inline (main-thread) fast-path is
+	// taken — fn() runs synchronously and Go panics on the nil-func call. On
+	// the async path, the boxed nil closure would panic asynchronously inside
+	// the libdispatch block on main, which is unreachable from a unit test
+	// without NSApp.run (covered later by window smoketest in).
+	//
+	// We therefore probe the fast-path first via a no-op DispatchMain; if the
+	// probe ran inline, the nil call below must panic. Otherwise, we skip —
+	// matching the IF-not-WHEN convention used by TestDispatchMain_Inline_OnMain.
 	runtime.LockOSThread()
 	defer runtime.UnlockOSThread()
+
+	var probeRan atomic.Bool
+	cocoa.DispatchMain(func() { probeRan.Store(true) })
+	if !probeRan.Load() {
+		t.Skip("inline fast-path unavailable (pthread_main_np=0); nil-panic only triggers inline")
+	}
+
+	defer func() {
+		if r := recover(); r == nil {
+			t.Errorf("expected panic on nil fn (inline path), got none")
+		}
+	}()
 	cocoa.DispatchMain(nil)
 }
 
