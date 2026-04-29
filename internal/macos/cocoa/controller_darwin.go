@@ -54,6 +54,25 @@ type cgoObserverRegistrar struct{}
 func (cgoObserverRegistrar) Register() int   { return registerScreenObservers() }
 func (cgoObserverRegistrar) Unregister() int { return unregisterScreenObservers() }
 
+// mainDispatcher abstracts DispatchMain for unit-test injection. Production
+// implementation routes through cocoa.DispatchMain (cgo + libdispatch); tests
+// inject an inline-execute fake so that Release / debounce reconcile bodies
+// run synchronously inside the test goroutine without requiring NSApp.run.
+//
+// This is a deliberate deviation from the original design: the
+// plan called DispatchMain directly inside Release / onScreensChanged, which
+// silently no-op'ed on test paths (async branch dispatches to the main queue
+// that test runners do not pump). The seam preserves production behaviour
+// while letting unit tests assert real Release / reconcile side-effects.
+type mainDispatcher interface {
+	Dispatch(fn func())
+}
+
+// cgoMainDispatcher is the production impl backed by cocoa.DispatchMain.
+type cgoMainDispatcher struct{}
+
+func (cgoMainDispatcher) Dispatch(fn func()) { DispatchMain(fn) }
+
 // Controller manages the per-display overlay NSWindows for Phase 2.
 // Implements state.Releaser (Release() error + Name() string), so it can be
 // pushed into the RestoreState LIFO Cleanup chain by cmd/dndmode/main.go.
@@ -80,9 +99,10 @@ type Controller struct {
 
 	// Dependency injection seams for unit tests. Production callers use
 	// NewController which wires the cgo-backed implementations.
-	screens   screenEnumerator
-	windowsOf windowFactory
-	observers observerRegistrar
+	screens    screenEnumerator
+	windowsOf  windowFactory
+	observers  observerRegistrar
+	dispatcher mainDispatcher
 
 	// onScreensChangedFn is the &c.onScreensChanged closure passed to
 	// setOnScreensChanged. We hold it in a field so Release can pass nil
@@ -102,6 +122,7 @@ func NewController(log *slog.Logger) *Controller {
 		cgoScreenEnumerator{},
 		cgoWindowFactory{},
 		cgoObserverRegistrar{},
+		cgoMainDispatcher{},
 		250*time.Millisecond,
 	)
 }
@@ -113,6 +134,7 @@ func newControllerWithDeps(
 	screens screenEnumerator,
 	windowsOf windowFactory,
 	observers observerRegistrar,
+	dispatcher mainDispatcher,
 	debounceWin time.Duration,
 ) *Controller {
 	c := &Controller{
@@ -122,6 +144,7 @@ func newControllerWithDeps(
 		screens:     screens,
 		windowsOf:   windowsOf,
 		observers:   observers,
+		dispatcher:  dispatcher,
 	}
 	c.onScreensChangedFn = c.onScreensChanged
 	setOnScreensChanged(&c.onScreensChangedFn)
@@ -225,7 +248,7 @@ func (c *Controller) onScreensChanged() {
 		c.debouncer.Stop()
 	}
 	c.debouncer = time.AfterFunc(c.debounceWin, func() {
-		DispatchMain(func() {
+		c.dispatcher.Dispatch(func() {
 			if err := c.reconcile(false); err != nil {
 				c.log.Error("hot-plug reconcile failed", slog.Any("err", err))
 			}
@@ -266,7 +289,7 @@ func (c *Controller) Release() error {
 		setOnScreensChanged(nil)
 
 		// 3+4. Cocoa ops on main thread (inline-fast-path if already on main).
-		DispatchMain(func() {
+		c.dispatcher.Dispatch(func() {
 			if rc := c.observers.Unregister(); rc != 0 {
 				releaseErr = fmt.Errorf("unregister screen observers: rc=%d", rc)
 			}
