@@ -2,23 +2,25 @@
 
 // Command dndmode is a macOS Apple-Silicon CLI utility that locks the
 // keyboard/trackpad behind a configurable hotkey while keeping the system
-// awake (Phase 4-5 functionality). Phase 1 is a transparent process model
-// skeleton: it loads (or creates) ~/.config/dndmode/config.yml, prints a
-// banner, enters an "active" sleep, and on SIGINT/SIGTERM/SIGHUP runs the
-// LIFO cleanup chain over in-memory mock Releasers and exits 0.
+// awake (Phase 4-5 functionality). Phase 2 adds the per-screen overlay:
+// cocoa.Init creates NSApp + screen observers, controller creates one
+// black NSWindow per display on CGShieldingWindowLevel, and the main
+// goroutine blocks on cocoa.RunApp(ctx) — the [NSApp run] loop — until
+// ctx.Cancel triggers a synthetic stop event.
 //
-// No system effects in Phase 1: no overlay, no input blocking, no power
-// assertion, no Focus integration. All of those are added incrementally
-// in Phases 2-5; Phase 1 validates the Go-runtime foundation in isolation.
+// Input is intentionally NOT blocked in Phase 2 (Cmd+Tab still works);
+// CGEventTap arrives in Phase 4. PreFlight permission checks arrive in
+// Phase 3. This is the visual-only milestone for AppKit/Cocoa debugging.
 package main
 
 import (
 	// runtimepin's init() calls runtime.LockOSThread() to pin main goroutine
-	// to OS thread #0 (m0). This MUST be the first import — Phase 2 NSApp.run()
-	// depends on the invariant that main lives on m0 (PITFALLS #24, RESEARCH §1).
+	// to OS thread #0 (m0). MUST be the first import — cocoa.Init / RunApp /
+	// NSWindow ops depend on the invariant that main lives on m0.
 	_ "github.com/dsbasko/dndmode/internal/runtimepin"
 
 	"context"
+	"errors"
 	"flag"
 	"fmt"
 	"log/slog"
@@ -27,13 +29,14 @@ import (
 
 	"github.com/dsbasko/dndmode/internal/config"
 	"github.com/dsbasko/dndmode/internal/config/hotkey"
+	"github.com/dsbasko/dndmode/internal/macos/cocoa"
 	"github.com/dsbasko/dndmode/internal/state"
 	"github.com/dsbasko/dndmode/internal/supervisor"
 )
 
 const (
 	// configRelPath is the user-relative config path. POSIX-stable via
-	// os.UserHomeDir (T-01-01 mitigation: not parsing $HOME directly).
+	// os.UserHomeDir (mitigation).
 	configRelPath = ".config/dndmode/config.yml"
 
 	exitOK        = 0
@@ -55,11 +58,29 @@ func main() {
 	os.Exit(run())
 }
 
-// run is the testable entry point (main calls os.Exit(run())). Phase 1
-// does not unit-test run() directly — coverage comes from acceptance tests
-// (-tags=acceptance) that fork a subprocess.
+// run is the testable entry point (main calls os.Exit(run())). Acceptance
+// tests fork the binary as a subprocess; unit-level testing of run()
+// directly is not done because too much main-thread Cocoa state crosses
+// boundaries.
+//
+// Step ordering (Phase 2 — D-09 + D-13 fix):
+//
+//	1.  Parse --debug flag
+//	2.  Construct slog logger (stderr, Info or Debug level)
+//	3.  RestoreState + defer Cleanup + cleanup banner
+//	4.  Resolve home dir
+//	5.  Load config (CFG-01..03) + parse hotkey (CFG-04, 05)
+//	6.  Print config banner + active banner sequence
+//	6b. cocoa.Init (D-04: NSApp + observers)
+//	6c. controller := NewController + CreateWindowsForAllScreens (D-09 cold-start)
+//	7.  Push 4 Releasers in REVERSE-LIFE-06 order (D-13 fix)
+//	8.  ctx + cancelStopper (hoisted for D-02 RunApp error access) + supervisor
+//	9.  stdout "active. press Ctrl-C." banner (D-09: AFTER controller create)
+//	10. cocoa.RunApp(ctx) — blocks on [NSApp run] until stop or unexpected exit
+//	11. sup.Wait()
+//	12. return exitOK; defer chain runs (Cleanup LIFO + stdout cleanup banner)
 func run() int {
-	// --- Step 1: Parse flags (D-03 stdlib flag, no pflag/cobra in v1) ---
+	// --- Step 1: Parse flags (stdlib flag) ---
 	debug := flag.Bool("debug", false, "enable debug-level logging on stderr")
 	flag.Parse()
 
@@ -93,15 +114,11 @@ func run() int {
 	loader := config.NewLoader(cfgPath)
 	cfg, created, err := loader.Load()
 	if err != nil {
-		// CFG-03: pretty error with line:col already formatted by Loader.
 		fmt.Fprintln(os.Stderr, err)
 		return exitConfigErr
 	}
 
-	// --- Step 5b: Validate hotkey grammar (CFG-04, CFG-05). Phase 4 will
-	// reuse the parsed Spec for CGEventTap matching; Phase 1 only needs the
-	// validation side-effect so a modifier-only or unknown-key config fails
-	// fast with exit 1 (ROADMAP SC4). ---
+	// --- Step 5b: Validate hotkey grammar ---
 	if _, err := hotkey.Parse(cfg.Hotkey); err != nil {
 		fmt.Fprintf(os.Stderr, "dndmode: invalid hotkey %q: %v\n", cfg.Hotkey, err)
 		return exitConfigErr
@@ -113,15 +130,46 @@ func run() int {
 	}
 	fmt.Fprintf(os.Stdout, "dndmode: config=%s hotkey=%s\n", cfgPath, cfg.Hotkey)
 
-	// --- Step 7: Push Phase-1 mock Releasers in the order Phase 4-5 will ---
-	// push real ones. LIFO Cleanup will release "mock-runtime-file" first,
-	// "mock-tap" last (mirroring REQUIREMENTS LIFE-06 ordering).
-	rs.Push(state.NewMockReleaser("mock-tap"))
-	rs.Push(state.NewMockReleaser("mock-windows"))
-	rs.Push(state.NewMockReleaser("mock-assertion"))
-	rs.Push(state.NewMockReleaser("mock-runtime-file"))
+	// --- Step 6b: cocoa.Init (D-04) — main-goroutine setup of NSApp + screen observers ---
+	if err := cocoa.Init(log); err != nil {
+		fmt.Fprintf(os.Stderr, "dndmode: cocoa init failed: %v\n", err)
+		return exitFatalErr
+	}
 
-	// --- Step 8: Supervisor + ctx ---
+	// --- Step 6c: Construct controller + create overlay windows (D-09, D-14) ---
+	controller := cocoa.NewController(log)
+	if err := controller.CreateWindowsForAllScreens(); err != nil {
+		if errors.Is(err, cocoa.ErrNoDisplays) {
+			fmt.Fprintln(os.Stderr,
+				"dndmode: no displays detected (lid closed without external monitor?). "+
+					"Open the lid or connect a display, then re-run.")
+		} else {
+			fmt.Fprintf(os.Stderr, "dndmode: create overlay windows: %v\n", err)
+		}
+		return exitFatalErr
+	}
+
+	// --- Step 7: Push Releasers in REVERSE-LIFE-06 order (D-13 fix) ---
+	// LIFE-06 mandates cleanup execution order:
+	//   1. CGEventTap disable+remove (Phase 4 — currently mocked).
+	//   2. NSWindow controller close all (THIS PHASE — real controller).
+	//   3. Screen observers detach (folded into controller.Release).
+	//   4. shortcuts run dndmode-off (Phase 5 — currently mocked).
+	//   5. IOPMAssertion release (Phase 3 — currently mocked).
+	//   6. runtime.json delete (Phase 5 — currently mocked).
+	//
+	// Stack semantics: Push order = creation order; LIFO unwind reverses.
+	// To get LIFE-06 execution order tap → windows → assertion → runtime,
+	// we Push in the OPPOSITE order: runtime-file → assertion → controller
+	// → mock-tap. Then Cleanup pops mock-tap first, controller second,
+	// mock-assertion third, mock-runtime-file last. Phase 1 had this
+	// inverted (mock-tap pushed first → released last) — fixed here.
+	rs.Push(state.NewMockReleaser("mock-runtime-file")) // released LAST  (LIFE-06 #6)
+	rs.Push(state.NewMockReleaser("mock-assertion"))    // released 3rd   (LIFE-06 #5)
+	rs.Push(controller)                                 // released 2nd   (LIFE-06 #2; Name == "windows")
+	rs.Push(state.NewMockReleaser("mock-tap"))          // released FIRST (LIFE-06 #1)
+
+	// --- Step 8: ctx + cancelStopper (hoisted for D-02) + supervisor ---
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
@@ -129,11 +177,18 @@ func run() int {
 	sup := supervisor.New(log, stopper)
 	sup.Start(ctx)
 
-	// --- Step 9: Active state banner ---
+	// --- Step 9: Active state banner (D-09: AFTER controller create) ---
 	fmt.Fprintln(os.Stdout, "dndmode: active. press Ctrl-C.")
 
-	// --- Step 10-11: Block until shutdown trigger fires ---
-	<-ctx.Done()
+	// --- Step 10: Block on [NSApp run] until ctx-cancel or unexpected exit ---
+	if err := cocoa.RunApp(ctx); err != nil {
+		// D-02: NSApp.run returned without ctx-cancellation (NSException,
+		// AppKit assertion, [NSApp terminate:] from delegate, etc.).
+		// Request a stop so the supervisor unwinds + Cleanup chain runs.
+		stopper.RequestStop("cocoa exit: " + err.Error())
+	}
+
+	// --- Step 11: Wait for supervisor goroutine to drain ---
 	sup.Wait()
 
 	// --- Step 12: Return; defer chain runs (Cleanup + cleaning-up banner) ---
