@@ -279,6 +279,110 @@ func TestAcceptance_ModifierOnlyHotkey_ExitOne(t *testing.T) {
 	}
 }
 
+// TestAcceptance_LIFE06_PushOrder verifies (D-13) that the LIFO Cleanup
+// chain releases resources in the exact order REQUIREMENTS.md LIFE-06
+// mandates: tap (first) → windows → assertion → runtime-file (last).
+//
+// Phase 1 verifier missed this because it only checked "did anything fail"
+// — not the ordering. This test parses stderr looking for the per-Releaser
+// success-log emitted by RestoreState.Cleanup (`released releaser=<name>`)
+// and asserts strings.Index ordering.
+//
+// The acceptance binary uses the production dndmode (built once in TestMain)
+// which routes through the real cocoa.Controller via main.go Push order.
+// We only need a brief active session and a SIGINT — no GUI verification.
+func TestAcceptance_LIFE06_PushOrder(t *testing.T) {
+	tmpHome := t.TempDir()
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	cmd, stdout, stderr := dndmodeCmd(t, ctx, tmpHome)
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+
+	// On HEADLESS CI without GUI: cocoa.Init may still succeed (NSApp
+	// sharedApplication usually works without a connected display) but
+	// CreateWindowsForAllScreens with 0 displays returns ErrNoDisplays
+	// → exit 2. In that case the test cannot proceed; skip cleanly.
+	if !waitForStdout(stdout, "active. press Ctrl-C.", 10*time.Second) {
+		_ = cmd.Process.Kill()
+		stderrSnap := stderr.String()
+		if strings.Contains(stderrSnap, "no displays detected") {
+			t.Skip("no displays attached on this host (HEADLESS or lid-closed); test requires GUI session")
+		}
+		t.Fatalf("did not see active banner; stderr:\n%s", stderrSnap)
+	}
+
+	signalAndWait(t, cmd, syscall.SIGINT, 10*time.Second)
+
+	s := stderr.String()
+	// LIFE-06 cleanup execution order (LIFO unwind of D-13 push order):
+	//   1. mock-tap         (first to release — restore input ASAP)
+	//   2. windows          (controller — close all NSWindow)
+	//   3. mock-assertion   (would release IOPMAssertion in Phase 3)
+	//   4. mock-runtime-file(would delete runtime.json in Phase 5)
+	posTap := strings.Index(s, `releaser=mock-tap`)
+	posWin := strings.Index(s, `releaser=windows`)
+	posAssert := strings.Index(s, `releaser=mock-assertion`)
+	posRuntime := strings.Index(s, `releaser=mock-runtime-file`)
+
+	if posTap < 0 || posWin < 0 || posAssert < 0 || posRuntime < 0 {
+		t.Fatalf("missing release log entries (need all 4 'released' info logs):\n"+
+			"  posTap=%d posWin=%d posAssert=%d posRuntime=%d\n"+
+			"stderr:\n%s",
+			posTap, posWin, posAssert, posRuntime, s)
+	}
+
+	if !(posTap < posWin && posWin < posAssert && posAssert < posRuntime) {
+		t.Errorf("cleanup order violated:\n"+
+			"  tap@%d  windows@%d  assertion@%d  runtime-file@%d\n"+
+			"  expected: tap < windows < assertion < runtime-file (D-13 LIFO unwind)\n"+
+			"stderr:\n%s",
+			posTap, posWin, posAssert, posRuntime, s)
+	}
+}
+
+// TestAcceptance_Phase2_OverlayBootstrapsAndShutsDown is the Phase 2
+// happy-path: dndmode starts, creates overlay windows, ctx-cancel via
+// SIGINT triggers cocoa.RunApp to return cleanly, exit 0, cleanup banner
+// appears on stdout. Verifies Phase 2 wire-up didn't break the existing
+// Phase 1 acceptance contract.
+func TestAcceptance_Phase2_OverlayBootstrapsAndShutsDown(t *testing.T) {
+	tmpHome := t.TempDir()
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	cmd, stdout, stderr := dndmodeCmd(t, ctx, tmpHome)
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+
+	if !waitForStdout(stdout, "active. press Ctrl-C.", 10*time.Second) {
+		_ = cmd.Process.Kill()
+		stderrSnap := stderr.String()
+		if strings.Contains(stderrSnap, "no displays detected") {
+			t.Skip("no displays attached; Phase 2 happy-path requires GUI session")
+		}
+		t.Fatalf("did not see active banner; stderr:\n%s", stderrSnap)
+	}
+
+	signalAndWait(t, cmd, syscall.SIGINT, 10*time.Second)
+
+	out := stdout.String()
+	if !strings.Contains(out, "active. press Ctrl-C.") {
+		t.Errorf("stdout missing active banner: %s", out)
+	}
+	if !strings.Contains(out, "cleaning up… done.") {
+		t.Errorf("stdout missing cleanup banner: %s", out)
+	}
+
+	// stderr should contain release log for "windows" (real controller).
+	if !strings.Contains(stderr.String(), `releaser=windows`) {
+		t.Errorf("stderr missing 'released releaser=windows' (controller didn't run): %s", stderr.String())
+	}
+}
+
 // --- helpers ---
 
 func waitForStdout(buf *syncBuffer, substr string, timeout time.Duration) bool {
