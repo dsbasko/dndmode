@@ -73,6 +73,12 @@ func (rs *RestoreState) Cleanup() error {
 					slog.String("releaser", r.Name()),
 					slog.Any("err", err))
 				aggregated = errors.Join(aggregated, err)
+			} else {
+				// Phase 2: emit per-releaser success log so the acceptance
+				// test (TestAcceptance_LIFE06_PushOrder) can verify
+				// ordering by parsing stderr (`"mock-tap"` appears before
+				// `"windows"` appears before `"mock-assertion"` etc.).
+				rs.log.Info("released", slog.String("releaser", r.Name()))
 			}
 		}
 	})
