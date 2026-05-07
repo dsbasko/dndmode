@@ -61,3 +61,49 @@ func TestSmoke_AX_Prompt_NonPanic(t *testing.T) {
 	}()
 	_ = permissions.PromptAccessibility()
 }
+
+// TestSmoke_IM_CheckAccess_NonPanic verifies that the IOHIDCheckAccess cgo
+// bridge does not panic and returns one of the three documented IMAccess
+// values. The exact value depends on whether the test binary's cdhash is
+// in the user's Input Monitoring TCC list — we do NOT assert a specific
+// outcome, only that the result is well-formed.
+//
+// Note: per / the production code path does NOT trigger the IM
+// prompt (IOHIDRequestAccess is the antipattern); IOHIDCheckAccess is a
+// silent probe identical in side-effect profile to AXIsProcessTrusted.
+func TestSmoke_IM_CheckAccess_NonPanic(t *testing.T) {
+	if os.Getenv("HEADLESS") != "" {
+		t.Skip("smoke test requires GUI session; HEADLESS=1")
+	}
+	defer func() {
+		if r := recover(); r != nil {
+			t.Errorf("CheckInputMonitoring panicked: %v", r)
+		}
+	}()
+	got := permissions.CheckInputMonitoring()
+	switch got {
+	case permissions.IMAccessGranted,
+		permissions.IMAccessDenied,
+		permissions.IMAccessUnknown:
+		// well-formed value — assertion satisfied
+	default:
+		t.Errorf("CheckInputMonitoring returned out-of-range IMAccess=%d; "+
+			"expected one of {Granted=0, Denied=1, Unknown=2}", got)
+	}
+}
+
+// TestSmoke_SecureEventInput_IsActive_NonPanic verifies that the Carbon
+// IsSecureEventInputEnabled cgo bridge does not panic. Return value is
+// not asserted: it depends on whether a sudo prompt, password field, or
+// 1Password unlock dialog is open at test time..
+func TestSmoke_SecureEventInput_IsActive_NonPanic(t *testing.T) {
+	if os.Getenv("HEADLESS") != "" {
+		t.Skip("smoke test requires GUI session; HEADLESS=1")
+	}
+	defer func() {
+		if r := recover(); r != nil {
+			t.Errorf("IsSecureEventInputActive panicked: %v", r)
+		}
+	}()
+	_ = permissions.IsSecureEventInputActive()
+}
