@@ -66,13 +66,23 @@ static int pa_dict_has_match(
 }
 
 // pa_extract_assertion_id pulls the per-assertion ID out of the inner
-// CFDictionary. Apple does not document the exact key name in the public
-// header; community reference impls use "AssertID" most commonly, with
-// "AssertionID" as a secondary fallback. We try both and return 0 if
-// neither yields a CFNumber convertible to int32 (caller skips that
-// entry).
+// CFDictionary. Apple does NOT define a CFSTR macro for this key in
+// the public IOPMLib.h header (only kIOPMAssertionNameKey / TypeKey /
+// LevelKey are exposed).
+//
+// Empirical observation on macOS 14/15 via CFShow of a live
+// IOPMCopyAssertionsByProcess result shows the actual key is
+// "AssertionId" (mixed case — capital A, lowercase d). The 03-RESEARCH
+// Pattern 8 [ASSUMED] note proposed "AssertID" / "AssertionID" — both
+// turn out to be wrong on current macOS. We try "AssertionId" first
+// (verified) then fall back to the legacy forms in case a future macOS
+// reverts the key name. Returns 0 if no key yields a CFNumber
+// convertible to int32 (caller skips that entry).
 static int pa_extract_assertion_id(CFDictionaryRef d, uint32_t *out_id) {
-    CFNumberRef aid_num = (CFNumberRef)CFDictionaryGetValue(d, CFSTR("AssertID"));
+    CFNumberRef aid_num = (CFNumberRef)CFDictionaryGetValue(d, CFSTR("AssertionId"));
+    if (aid_num == NULL) {
+        aid_num = (CFNumberRef)CFDictionaryGetValue(d, CFSTR("AssertID"));
+    }
     if (aid_num == NULL) {
         aid_num = (CFNumberRef)CFDictionaryGetValue(d, CFSTR("AssertionID"));
     }
