@@ -26,10 +26,13 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"runtime"
+	"time"
 
 	"github.com/dsbasko/dndmode/internal/config"
 	"github.com/dsbasko/dndmode/internal/config/hotkey"
 	"github.com/dsbasko/dndmode/internal/macos/cocoa"
+	"github.com/dsbasko/dndmode/internal/macos/permissions"
 	"github.com/dsbasko/dndmode/internal/state"
 	"github.com/dsbasko/dndmode/internal/supervisor"
 )
@@ -39,9 +42,17 @@ const (
 	// os.UserHomeDir (mitigation).
 	configRelPath = ".config/dndmode/config.yml"
 
-	exitOK        = 0
-	exitConfigErr = 1
-	exitFatalErr  = 2
+	// Granular exit codes per CONTEXT D-16 (Phase 3 expansion). Reserved
+	// slots 6/7 are for Phase 5 (FOC-01 Shortcuts missing / CRR-04 runtime
+	// JSON non-recoverable). Stderr wording per UI-SPEC Copywriting Contract.
+	exitOK                  = 0 // success
+	exitConfigErr           = 1 // P1 — bad YAML, modifier-only hotkey
+	exitPlatformErr         = 2 // non-arm64, macOS < 14, IOKit fundamentals
+	exitPermissionDenied    = 3 // SIGINT in polling loop
+	exitSecureInputConflict = 4 // SecureEventInput active
+	exitConcurrentInstance  = 5 // live-PID match on orphan IOPMAssertion
+	// Reserved: 6 = exitFocusSetup (Phase 5 FOC-01),
+	//           7 = exitRuntimeJSON (Phase 5 CRR-04).
 )
 
 // cancelStopper adapts context.CancelFunc to the supervisor.Stopper
@@ -106,7 +117,7 @@ func run() int {
 	home, err := os.UserHomeDir()
 	if err != nil {
 		log.Error("resolve home dir", slog.Any("err", err))
-		return exitFatalErr
+		return exitPlatformErr
 	}
 	cfgPath := filepath.Join(home, configRelPath)
 
@@ -130,10 +141,59 @@ func run() int {
 	}
 	fmt.Fprintf(os.Stdout, "dndmode: config=%s hotkey=%s\n", cfgPath, cfg.Hotkey)
 
+	// --- Step 7 (Phase 3 D-05): ctx (hoisted; Task 1b replaces with signal.NotifyContext per D-04) ---
+	// ctx is needed by Step 8 WaitForGrants (D-08 indefinite polling, ctx-only
+	// cancel). Task 1b will swap context.WithCancel for signal.NotifyContext
+	// and move the cancelStopper construction adjacent to it.
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	// --- Step 8 (Phase 3): Platform check (exit 2) ---
+	ver := permissions.CurrentOSVersion()
+	if err := permissions.CheckPlatform(permissions.CurrentArch(), ver); err != nil {
+		switch {
+		case errors.Is(err, permissions.ErrNonArm64):
+			fmt.Fprintf(os.Stderr,
+				"dndmode: requires macOS on Apple Silicon (arm64), got %s/%s.\n",
+				runtime.GOOS, runtime.GOARCH)
+		case errors.Is(err, permissions.ErrMacOSBelow14):
+			fmt.Fprintf(os.Stderr,
+				"dndmode: requires macOS 14 (Sonoma) or newer, got %d.%d.\n",
+				ver.Major, ver.Minor)
+		default:
+			fmt.Fprintf(os.Stderr, "dndmode: platform check failed: %v\n", err)
+		}
+		return exitPlatformErr
+	}
+
+	// --- Step 9 (Phase 3): WaitForGrants ---
+	// Indefinite polling — only ctx.Done() (SIGINT/SIGTERM/SIGHUP) prunes.
+	// one-shot prompt Settings deep-link per missing permission at
+	// entry; cycle interval 500ms per.
+	promptFn := func() { permissions.PromptAccessibility() }
+	chk := permissions.NewCgoChecker()
+	link := permissions.NewDeepLinker()
+	statusW := permissions.NewStatusWriter(os.Stdout)
+	if err := permissions.WaitForGrants(ctx, chk, link, statusW, promptFn, log, 500*time.Millisecond); err != nil {
+		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+			fmt.Fprintln(os.Stderr, "dndmode: aborted while waiting for permissions.")
+			return exitPermissionDenied
+		}
+		fmt.Fprintf(os.Stderr, "dndmode: wait for grants failed: %v\n", err)
+		return exitPlatformErr
+	}
+
+	// --- Step 10 (Phase 3): SecureEventInput check (exit 4) ---
+	if permissions.IsSecureEventInputActive() {
+		fmt.Fprintln(os.Stderr,
+			"dndmode: Secure Event Input is active (typically Terminal sudo prompt, password fields, or 1Password). Close those, then re-run.")
+		return exitSecureInputConflict
+	}
+
 	// --- Step 6b: cocoa.Init (D-04) — main-goroutine setup of NSApp + screen observers ---
 	if err := cocoa.Init(log); err != nil {
 		fmt.Fprintf(os.Stderr, "dndmode: cocoa init failed: %v\n", err)
-		return exitFatalErr
+		return exitPlatformErr
 	}
 
 	// --- Step 6c: Construct controller + create overlay windows (D-09, D-14) ---
@@ -146,7 +206,7 @@ func run() int {
 		} else {
 			fmt.Fprintf(os.Stderr, "dndmode: create overlay windows: %v\n", err)
 		}
-		return exitFatalErr
+		return exitPlatformErr
 	}
 
 	// --- Step 7: Push Releasers in REVERSE-LIFE-06 order (D-13 fix) ---
@@ -169,10 +229,9 @@ func run() int {
 	rs.Push(controller)                                 // released 2nd   (LIFE-06 #2; Name == "windows")
 	rs.Push(state.NewMockReleaser("mock-tap"))          // released FIRST (LIFE-06 #1)
 
-	// --- Step 8: ctx + cancelStopper (hoisted for D-02) + supervisor ---
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-
+	// --- Step 8: cancelStopper (hoisted for D-02) + supervisor ---
+	// ctx + cancel are created above (Step 7); Task 1b replaces them with
+	// signal.NotifyContext per D-04.
 	stopper := &cancelStopper{cancel: cancel}
 	sup := supervisor.New(log, stopper)
 	sup.Start(ctx)
