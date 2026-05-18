@@ -351,9 +351,13 @@ func TestAcceptance_LIFE06_PushOrder(t *testing.T) {
 	//   2. windows           (controller — close all NSWindow)
 	//   3. dndmode active    (REAL IOPMAssertion — Phase 3 replaces P2 mock-assertion)
 	//   4. mock-runtime-file (Phase 5 — currently mocked; last to release)
+	// slog TextHandler quotes string values containing spaces, so the
+	// real Assertion releaser logs as `releaser="dndmode active"` (with
+	// the quotes around the multi-word name). Single-word releaser names
+	// (mock-tap, windows, mock-runtime-file) are unquoted.
 	posTap := strings.Index(s, `releaser=mock-tap`)
 	posWin := strings.Index(s, `releaser=windows`)
-	posAssert := strings.Index(s, `releaser=dndmode active`)
+	posAssert := strings.Index(s, `releaser="dndmode active"`)
 	posRuntime := strings.Index(s, `releaser=mock-runtime-file`)
 
 	if posTap < 0 || posWin < 0 || posAssert < 0 || posRuntime < 0 {
@@ -464,8 +468,10 @@ func TestAcceptance_Phase3_PreFlight_HappyPath(t *testing.T) {
 	signalAndWait(t, cmd, syscall.SIGINT, 10*time.Second)
 
 	stderrStr := stderr.String()
-	if !strings.Contains(stderrStr, `releaser=dndmode active`) {
-		t.Errorf("stderr missing real assertion release (Phase 3 D-02 should produce 'releaser=dndmode active'): %s", stderrStr)
+	// slog TextHandler quotes string values containing spaces, so the real
+	// Assertion releaser logs as `releaser="dndmode active"` (with quotes).
+	if !strings.Contains(stderrStr, `releaser="dndmode active"`) {
+		t.Errorf("stderr missing real assertion release (Phase 3 should produce 'releaser=\"dndmode active\"'): %s", stderrStr)
 	}
 	if strings.Contains(stderrStr, `releaser=mock-assertion`) {
 		t.Errorf("stderr contains 'releaser=mock-assertion' (Phase 3 should have replaced the P2 mock with real powerassert.Assertion): %s", stderrStr)
