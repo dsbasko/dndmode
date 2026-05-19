@@ -1,6 +1,6 @@
 //go:build acceptance && darwin
 
-// Acceptance tests for Phase 1. Run via `make acceptance` (NOT `make test`).
+// Acceptance tests for Phase 1-3. Run via `make acceptance` (NOT `make test`).
 // These tests build the dndmode binary once in TestMain, then fork the
 // binary as a subprocess with a tmp HOME, send signals, and verify exit
 // codes + stdout/stderr per the design notes Validation Architecture.
@@ -11,6 +11,19 @@
 // (b) make signal delivery awkward — SIGINT to `go run` does NOT propagate
 // to the child `dndmode` reliably. Building once and exec'ing the binary
 // directly sidesteps both issues.
+//
+// Phase 3 manual-only PreFlight paths (NOT automated here — see
+// the design notes Manual-Only Verifications):
+//
+// - exit 3 (polling SIGINT) — requires
+//     `tccutil reset Accessibility com.dsbasko.dndmode` to put the binary
+//     back into the not-yet-trusted state before launch.
+// - exit 4 (SecureEventInput active) — requires an open sudo
+//     prompt or password field in another tab while dndmode launches.
+// - exit 5 (concurrent instance) — requires two dndmode
+//     processes started in parallel.
+//
+// All three are exercised by docs/manual-test.md in Phase 6 (Polish).
 package main_test
 
 import (
@@ -279,14 +292,21 @@ func TestAcceptance_ModifierOnlyHotkey_ExitOne(t *testing.T) {
 	}
 }
 
-// TestAcceptance_LIFE06_PushOrder verifies (D-13) that the LIFO Cleanup
-// chain releases resources in the exact order REQUIREMENTS.md LIFE-06
-// mandates: tap (first) → windows → assertion → runtime-file (last).
+// TestAcceptance_LIFE06_PushOrder verifies (P2 D-13 + Phase 3 D-02) that the
+// LIFO Cleanup chain releases resources in the exact order REQUIREMENTS.md
+// LIFE-06 mandates: tap (first) → windows → assertion → runtime-file (last).
 //
 // Phase 1 verifier missed this because it only checked "did anything fail"
 // — not the ordering. This test parses stderr looking for the per-Releaser
 // success-log emitted by RestoreState.Cleanup (`released releaser=<name>`)
 // and asserts strings.Index ordering.
+//
+// Phase 3 update: the third releaser is now a real powerassert.Assertion
+// with Name() == "dndmode active" (per POW-01 + plan 03-03). The
+// substring match here changed from `releaser=mock-assertion` to
+// `releaser=dndmode active` accordingly. Phase 2 had this third slot
+// occupied by state.NewMockReleaser("mock-assertion") — Phase 3 D-02
+// replaces that placeholder with the real IOPMAssertion releaser.
 //
 // The acceptance binary uses the production dndmode (built once in TestMain)
 // which routes through the real cocoa.Controller via main.go Push order.
@@ -305,39 +325,52 @@ func TestAcceptance_LIFE06_PushOrder(t *testing.T) {
 	// sharedApplication usually works without a connected display) but
 	// CreateWindowsForAllScreens with 0 displays returns ErrNoDisplays
 	// → exit 2. In that case the test cannot proceed; skip cleanly.
+	// Phase 3 path: if AX/IM are not granted on the host the binary will
+	// sit in WaitForGrants — we detect that via "dndmode: waiting" on stdout.
 	if !waitForStdout(stdout, "active. press Ctrl-C.", 10*time.Second) {
 		_ = cmd.Process.Kill()
 		stderrSnap := stderr.String()
-		if strings.Contains(stderrSnap, "no displays detected") {
+		stdoutSnap := stdout.String()
+		switch {
+		case strings.Contains(stderrSnap, "no displays detected"):
 			t.Skip("no displays attached on this host (HEADLESS or lid-closed); test requires GUI session")
+		case strings.Contains(stdoutSnap, "dndmode: waiting"):
+			t.Skip("AX or IM not granted on this host; test requires both granted upfront")
+		case strings.Contains(stderrSnap, "Secure Event Input"):
+			t.Skip("SecureEventInput active on host; close it and re-run")
 		}
-		t.Fatalf("did not see active banner; stderr:\n%s", stderrSnap)
+		t.Fatalf("did not see active banner; stdout:\n%s\nstderr:\n%s", stdoutSnap, stderrSnap)
 	}
 
 	signalAndWait(t, cmd, syscall.SIGINT, 10*time.Second)
 
 	s := stderr.String()
-	// LIFE-06 cleanup execution order (LIFO unwind of D-13 push order):
-	//   1. mock-tap         (first to release — restore input ASAP)
-	//   2. windows          (controller — close all NSWindow)
-	//   3. mock-assertion   (would release IOPMAssertion in Phase 3)
-	//   4. mock-runtime-file(would delete runtime.json in Phase 5)
+	// LIFE-06 cleanup execution order (LIFO unwind of P2 D-13 push order,
+	// updated by Phase 3 D-02 — assertion slot is now a REAL powerassert.Assertion):
+	//   1. mock-tap          (Phase 4 — currently mocked; first to release)
+	//   2. windows           (controller — close all NSWindow)
+	//   3. dndmode active    (REAL IOPMAssertion — Phase 3 replaces P2 mock-assertion)
+	//   4. mock-runtime-file (Phase 5 — currently mocked; last to release)
+	// slog TextHandler quotes string values containing spaces, so the
+	// real Assertion releaser logs as `releaser="dndmode active"` (with
+	// the quotes around the multi-word name). Single-word releaser names
+	// (mock-tap, windows, mock-runtime-file) are unquoted.
 	posTap := strings.Index(s, `releaser=mock-tap`)
 	posWin := strings.Index(s, `releaser=windows`)
-	posAssert := strings.Index(s, `releaser=mock-assertion`)
+	posAssert := strings.Index(s, `releaser="dndmode active"`)
 	posRuntime := strings.Index(s, `releaser=mock-runtime-file`)
 
 	if posTap < 0 || posWin < 0 || posAssert < 0 || posRuntime < 0 {
 		t.Fatalf("missing release log entries (need all 4 'released' info logs):\n"+
-			"  posTap=%d posWin=%d posAssert=%d posRuntime=%d\n"+
+			"  posTap=%d posWin=%d posAssert(dndmode active)=%d posRuntime=%d\n"+
 			"stderr:\n%s",
 			posTap, posWin, posAssert, posRuntime, s)
 	}
 
 	if !(posTap < posWin && posWin < posAssert && posAssert < posRuntime) {
 		t.Errorf("cleanup order violated:\n"+
-			"  tap@%d  windows@%d  assertion@%d  runtime-file@%d\n"+
-			"  expected: tap < windows < assertion < runtime-file (D-13 LIFO unwind)\n"+
+			"  tap@%d  windows@%d  dndmode-active@%d  runtime-file@%d\n"+
+			"  expected: tap < windows < dndmode-active < runtime-file (P2 D-13 + Phase 3 D-02 LIFO unwind)\n"+
 			"stderr:\n%s",
 			posTap, posWin, posAssert, posRuntime, s)
 	}
@@ -361,8 +394,14 @@ func TestAcceptance_Phase2_OverlayBootstrapsAndShutsDown(t *testing.T) {
 	if !waitForStdout(stdout, "active. press Ctrl-C.", 10*time.Second) {
 		_ = cmd.Process.Kill()
 		stderrSnap := stderr.String()
-		if strings.Contains(stderrSnap, "no displays detected") {
+		stdoutSnap := stdout.String()
+		switch {
+		case strings.Contains(stderrSnap, "no displays detected"):
 			t.Skip("no displays attached; Phase 2 happy-path requires GUI session")
+		case strings.Contains(stdoutSnap, "dndmode: waiting"):
+			t.Skip("AX or IM not granted on this host; Phase 2 happy-path requires both granted upfront")
+		case strings.Contains(stderrSnap, "Secure Event Input"):
+			t.Skip("SecureEventInput active on host; close it and re-run")
 		}
 		t.Fatalf("did not see active banner; stderr:\n%s", stderrSnap)
 	}
@@ -380,6 +419,90 @@ func TestAcceptance_Phase2_OverlayBootstrapsAndShutsDown(t *testing.T) {
 	// stderr should contain release log for "windows" (real controller).
 	if !strings.Contains(stderr.String(), `releaser=windows`) {
 		t.Errorf("stderr missing 'released releaser=windows' (controller didn't run): %s", stderr.String())
+	}
+}
+
+// TestAcceptance_Phase3_PreFlight_HappyPath exercises the full Phase 3
+// PreFlight on a dev machine where AX + IM are already granted and at least
+// one display is attached. The test:
+//
+//  1. starts dndmode,
+//  2. waits up to 10s for the "active. press Ctrl-C." banner on stdout,
+//  3. sends SIGINT, waits for clean exit,
+//  4. asserts exit code 0,
+//  5. asserts stderr contains `releaser=dndmode active` (proves the real
+// powerassert.Assertion was released — Phase 3 contract),
+//  6. asserts stderr does NOT contain `releaser=mock-assertion`
+//     (regression guard for someone re-introducing the P2 mock).
+//
+// Skip strategy: any of the Phase 3 short-circuit paths visible in the
+// stdout/stderr snapshots triggers a clean t.Skip — the happy-path test
+// requires a pre-granted dev host.
+func TestAcceptance_Phase3_PreFlight_HappyPath(t *testing.T) {
+	tmpHome := t.TempDir()
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	cmd, stdout, stderr := dndmodeCmd(t, ctx, tmpHome)
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+
+	if !waitForStdout(stdout, "active. press Ctrl-C.", 10*time.Second) {
+		_ = cmd.Process.Kill()
+		stderrSnap := stderr.String()
+		stdoutSnap := stdout.String()
+		switch {
+		case strings.Contains(stdoutSnap, "dndmode: waiting"):
+			t.Skip("AX or IM not granted on this host; Phase 3 happy-path requires both granted upfront")
+		case strings.Contains(stderrSnap, "no displays detected"):
+			t.Skip("no displays attached; Phase 3 happy-path requires GUI session")
+		case strings.Contains(stderrSnap, "Secure Event Input"):
+			t.Skip("SecureEventInput active on host; close it and re-run")
+		case strings.Contains(stderrSnap, "another instance is holding"):
+			t.Skip("another dndmode instance is holding the awake-lock; SIGTERM it and re-run")
+		}
+		t.Fatalf("did not see active banner; stdout:\n%s\nstderr:\n%s", stdoutSnap, stderrSnap)
+	}
+
+	signalAndWait(t, cmd, syscall.SIGINT, 10*time.Second)
+
+	stderrStr := stderr.String()
+	// slog TextHandler quotes string values containing spaces, so the real
+	// Assertion releaser logs as `releaser="dndmode active"` (with quotes).
+	if !strings.Contains(stderrStr, `releaser="dndmode active"`) {
+		t.Errorf("stderr missing real assertion release (Phase 3 should produce 'releaser=\"dndmode active\"'): %s", stderrStr)
+	}
+	if strings.Contains(stderrStr, `releaser=mock-assertion`) {
+		t.Errorf("stderr contains 'releaser=mock-assertion' (Phase 3 should have replaced the P2 mock with real powerassert.Assertion): %s", stderrStr)
+	}
+}
+
+// TestAcceptance_Phase3_NoMockAssertion_Regression is a static (no
+// subprocess) regression guard against someone re-adding the Phase 2
+// placeholder `state.NewMockReleaser("mock-assertion")` to cmd/dndmode/main.go.
+// ordering would still pass if you simply moved the mock up — but
+// the Phase 3 contract requires the real powerassert.Assertion in that
+// slot. This test reads main.go from disk and fails if the literal string
+// `"mock-assertion"` (Go source quoted) appears anywhere in the file.
+//
+// The test runs on any host (no GUI, no TCC state needed) and is therefore
+// the canonical Phase 3 regression check for CI without permission setup.
+func TestAcceptance_Phase3_NoMockAssertion_Regression(t *testing.T) {
+	repoRoot, err := filepath.Abs("../..")
+	if err != nil {
+		t.Fatalf("resolve repo root: %v", err)
+	}
+	mainGoPath := filepath.Join(repoRoot, "cmd", "dndmode", "main.go")
+	mainGo, err := os.ReadFile(mainGoPath)
+	if err != nil {
+		t.Fatalf("read %s: %v", mainGoPath, err)
+	}
+	const forbidden = `"mock-assertion"`
+	if strings.Contains(string(mainGo), forbidden) {
+		t.Errorf("%s still contains the literal string %s — Phase 3 should have replaced"+
+			"state.NewMockReleaser(\"mock-assertion\") with a real powerassert.Assertion via Acquire(\"dndmode active\")",
+			mainGoPath, forbidden)
 	}
 }
 
