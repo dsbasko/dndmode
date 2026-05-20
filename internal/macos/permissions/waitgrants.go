@@ -79,10 +79,19 @@ func NewCgoChecker() Checker {
 //   - log == nil falls back to slog.Default() (mirrors Phase 2 controller).
 //
 // Status rendering is delegated to status (StatusWriter):
-// the cold-start state is rendered once before any prompts/deep-links, and
-// each polling cycle renders again. status.Final() is called exactly once
-// when both grants land. tick is the cycle interval — PERM-05 fixes 500ms
-// in production; tests pass much shorter values to keep wall-clock low.
+// status.EntryBanner() prints the once-per-WaitForGrants entry message
+// (TTY: "dndmode: waiting for grants…\n"; pipe: no-op — startup state is
+// encoded in pipeWriter.Update's first call). The cold-start state is
+// rendered once before any prompts/deep-links, and each polling cycle
+// renders again. status.Final() is called exactly once when both grants
+// land. tick is the cycle interval — fixes 500ms in production;
+// tests pass much shorter values to keep wall-clock low.
+//
+// contract: EntryBanner is invoked unconditionally (even when both
+// grants are already present), so the TTY user always sees the "we tried
+// to wait" line — followed immediately by Final's "grants received."
+// when the cold-start check finds both trusted. This is intentional
+// observability, not a performance regression.
 func WaitForGrants(
 	ctx context.Context,
 	chk Checker,
@@ -95,6 +104,13 @@ func WaitForGrants(
 	if log == nil {
 		log = slog.Default()
 	}
+
+	// print the "waiting for grants…" entry banner BEFORE any
+	// probe / prompt / deep-link so the TTY user sees the intent before
+	// the \r-cycle Update repaints start. pipeWriter.EntryBanner is a
+	// no-op — its startup line (from the first Update) already carries
+	// state. See.
+	status.EntryBanner()
 
 	ax := chk.IsAXTrusted()
 	im := chk.IsIMGranted()
