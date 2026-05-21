@@ -144,7 +144,7 @@ func run() int {
 
 	// --- Step 5b: Validate hotkey grammar ---
 	if _, err := hotkey.Parse(cfg.Hotkey); err != nil {
-		fmt.Fprintf(os.Stderr, "dndmode: invalid hotkey %q: %v\n", cfg.Hotkey, err)
+		fmt.Fprintf(os.Stderr, "dndmode: invalid hotkey %q: %v. Fix the hotkey grammar in ~/.config/dndmode/config.yml.\n", cfg.Hotkey, err)
 		return exitConfigErr
 	}
 
@@ -179,7 +179,7 @@ func run() int {
 				"dndmode: requires macOS 14 (Sonoma) or newer, got %d.%d.\n",
 				ver.Major, ver.Minor)
 		default:
-			fmt.Fprintf(os.Stderr, "dndmode: platform check failed: %v\n", err)
+			fmt.Fprintf(os.Stderr, "dndmode: platform check failed: %v. Re-run on macOS 14+ Apple Silicon.\n", err)
 		}
 		return exitPlatformErr
 	}
@@ -197,7 +197,7 @@ func run() int {
 			fmt.Fprintln(os.Stderr, "dndmode: aborted while waiting for permissions.")
 			return exitPermissionDenied
 		}
-		fmt.Fprintf(os.Stderr, "dndmode: wait for grants failed: %v\n", err)
+		fmt.Fprintf(os.Stderr, "dndmode: wait for grants failed: %v. Check Console.app for TCC daemon errors and re-run.\n", err)
 		return exitPlatformErr
 	}
 
@@ -225,7 +225,7 @@ func run() int {
 				"dndmode: %v. Send SIGTERM or wait for its exit, then re-run.\n", err)
 			return exitConcurrentInstance
 		}
-		fmt.Fprintf(os.Stderr, "dndmode: orphan cleanup failed: %v\n", err)
+		fmt.Fprintf(os.Stderr, "dndmode: orphan cleanup failed: %v. Inspect 'pmset -g assertions' for stuck entries and re-run.\n", err)
 		return exitPlatformErr
 	}
 
@@ -241,7 +241,7 @@ func run() int {
 	// `releaser=dndmode active` (per Assertion.Name() == "dndmode active").
 	assertion, err := powerassert.Acquire("dndmode active", log)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "dndmode: acquire awake-lock: %v\n", err)
+		fmt.Fprintf(os.Stderr, "dndmode: acquire awake-lock failed: %v. Check IOKit availability and re-run.\n", err)
 		return exitPlatformErr
 	}
 	rs.Push(assertion) // released 3rd in LIFO (between controller и runtime-mock)
@@ -253,7 +253,7 @@ func run() int {
 	// above is the cheapest resource — fail fast on IOKit errors before any
 	// AppKit objects exist.
 	if err := cocoa.Init(log); err != nil {
-		fmt.Fprintf(os.Stderr, "dndmode: cocoa init failed: %v\n", err)
+		fmt.Fprintf(os.Stderr, "dndmode: cocoa init failed: %v. Check Console.app for AppKit asserts and re-run.\n", err)
 		return exitPlatformErr
 	}
 
@@ -265,7 +265,7 @@ func run() int {
 				"dndmode: no displays detected (lid closed without external monitor?). "+
 					"Open the lid or connect a display, then re-run.")
 		} else {
-			fmt.Fprintf(os.Stderr, "dndmode: create overlay windows: %v\n", err)
+			fmt.Fprintf(os.Stderr, "dndmode: create overlay windows failed: %v. Reconnect displays and re-run.\n", err)
 		}
 		return exitPlatformErr
 	}
