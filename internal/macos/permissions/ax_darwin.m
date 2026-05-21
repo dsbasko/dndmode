@@ -28,6 +28,16 @@ int permissions_ax_is_trusted(void) {
 // memory rules; the system documents that AXIsProcessTrustedWithOptions does
 // NOT retain the dictionary beyond the call).
 //
+// NULL-safety (fix): CFDictionaryCreate is documented to
+// return NULL on OOM or invalid args. Pre-fix code called CFRelease(opts)
+// unconditionally — undefined behavior on NULL per Core Foundation
+// contract. Post-fix: if opts == NULL we gracefully degrade to
+// AXIsProcessTrusted() (silent check, no prompt) and bypass the
+// CFRelease entirely — same NULL-guard pattern as pm_darwin.c:115-125
+// (root / cf_want_name / cf_want_type guards). graceful degradation:
+// failure to prompt is non-fatal — the polling loop will re-check anyway,
+// so the user just sees the next \r-cycle without the system dialog.
+//
 // macOS dedupes the prompt by (cdhash, user) — re-invocation within the
 // same process (or between processes sharing a cdhash) does NOT re-prompt.
 // contract: caller invokes exactly once per process at polling entry.
@@ -41,6 +51,13 @@ int permissions_ax_prompt(void) {
         keys, vals, 1,
         &kCFTypeDictionaryKeyCallBacks,
         &kCFTypeDictionaryValueCallBacks);
+    if (opts == NULL) {
+        // OOM or invalid args — graceful fallback to silent AXIsProcessTrusted.
+        // The polling loop in WaitForGrants will retry every cycle, so missing
+        // the one-shot prompt here is observable (no system dialog) but not
+        // catastrophic — allows the user to grant via System Settings.
+        return AXIsProcessTrusted() ? 1 : 0;
+    }
     int res = AXIsProcessTrustedWithOptions(opts) ? 1 : 0;
     CFRelease(opts);
     return res;
