@@ -6,6 +6,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
 	"strings"
 	"sync"
@@ -73,16 +74,33 @@ type fakeStatusWriter struct {
 	mu         sync.Mutex
 	updates    [][2]bool
 	finalCalls atomic.Int64
+	// events records the call sequence as opaque labels — used by
+	// TestWaitForGrants_EntryBanner_CalledBeforeInitialProbe to assert
+	// ordering of EntryBanner / Update / Final without coupling to
+	// timestamps. Labels: "entry", "update(ax,im)", "final".
+	events []string
 }
 
 func (f *fakeStatusWriter) Update(ax, im bool) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.updates = append(f.updates, [2]bool{ax, im})
+	f.events = append(f.events, fmt.Sprintf("update(%t,%t)", ax, im))
 }
 
 func (f *fakeStatusWriter) Final() {
+	f.mu.Lock()
+	f.events = append(f.events, "final")
+	f.mu.Unlock()
 	f.finalCalls.Add(1)
+}
+
+// EntryBanner records the call without touching updates (no state
+// change) — see TestWaitForGrants_EntryBanner_CalledBeforeInitialProbe.
+func (f *fakeStatusWriter) EntryBanner() {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.events = append(f.events, "entry")
 }
 
 func (f *fakeStatusWriter) updateCount() int {
@@ -95,6 +113,14 @@ func (f *fakeStatusWriter) updateAt(idx int) [2]bool {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return f.updates[idx]
+}
+
+func (f *fakeStatusWriter) eventSnapshot() []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	out := make([]string, len(f.events))
+	copy(out, f.events)
+	return out
 }
 
 type waitTestDeps struct {
@@ -365,4 +391,85 @@ func TestNewCgoChecker_ReturnsImplWithoutPanic(t *testing.T) {
 	// Note: actual cgo invocation is covered by permissions_smoketest_test.go
 	// (TestSmoke_AX_IsTrusted_NonPanic + TestSmoke_IM_CheckAccess_NonPanic).
 	// This test only verifies the constructor wires the impl correctly.
+}
+
+// TestWaitForGrants_EntryBanner_CalledBeforeInitialProbe verifies
+// fix: WaitForGrants invokes status.EntryBanner exactly ONCE, before the
+// initial AX/IM probe, regardless of cold-start grant state. The fake
+// StatusWriter records "entry", "update(...)", "final" labels in call
+// order, and we assert that "entry" precedes every "update".
+//
+// Two scenarios covered via subtests:
+//   - both granted at entry → ["entry", "update(true,true)", "final"]
+//   - polling required      → ["entry", "update(false,false)", "update(...)", ..., "final"]
+//
+// This is the regression gate against the pre- silent state where
+// the TTY user saw \r-overwrite cycles immediately without the "we are
+// waiting for grants…" banner — a the UI spec "Polling entry banner (TTY)"
+// violation.
+func TestWaitForGrants_EntryBanner_CalledBeforeInitialProbe(t *testing.T) {
+	t.Run("both_granted_at_entry", func(t *testing.T) {
+		td := newWaitTestDeps(t, []bool{true}, []bool{true})
+		err := WaitForGrants(context.Background(), td.checker, td.linker, td.status, func() {}, td.log, 10*time.Millisecond)
+		if err != nil {
+			t.Fatalf("WaitForGrants err = %v, want nil", err)
+		}
+		got := td.status.eventSnapshot()
+		want := []string{"entry", "update(true,true)", "final"}
+		if !equalStringSlices(got, want) {
+			t.Errorf("event sequence = %v, want %v", got, want)
+		}
+	})
+
+	t.Run("polling_until_granted", func(t *testing.T) {
+		// 1 initial + 2 polling = 3 IsAXTrusted / IsIMGranted calls.
+		td := newWaitTestDeps(t,
+			[]bool{false, false, true},
+			[]bool{false, true, true},
+		)
+		ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
+		defer cancel()
+
+		err := WaitForGrants(ctx, td.checker, td.linker, td.status, func() {}, td.log, 10*time.Millisecond)
+		if err != nil {
+			t.Fatalf("WaitForGrants err = %v, want nil", err)
+		}
+		got := td.status.eventSnapshot()
+		if len(got) == 0 || got[0] != "entry" {
+			t.Fatalf("event[0] = %q, want %q (EntryBanner must precede first probe)", firstOrEmpty(got), "entry")
+		}
+		// Exactly one "entry" — no re-banner on polling cycles.
+		entryCount := 0
+		for _, e := range got {
+			if e == "entry" {
+				entryCount++
+			}
+		}
+		if entryCount != 1 {
+			t.Errorf("entry banner count = %d, want 1; full sequence = %v", entryCount, got)
+		}
+		// Final must be the last event.
+		if got[len(got)-1] != "final" {
+			t.Errorf("last event = %q, want %q; full sequence = %v", got[len(got)-1], "final", got)
+		}
+	})
+}
+
+func equalStringSlices(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
+}
+
+func firstOrEmpty(s []string) string {
+	if len(s) == 0 {
+		return ""
+	}
+	return s[0]
 }

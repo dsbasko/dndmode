@@ -4,8 +4,10 @@ package powerassert
 
 import (
 	"errors"
+	"sync"
 	"sync/atomic"
 	"testing"
+	"time"
 )
 
 // fakeReleaser is a test-injectable releaseFn used to assert idempotency
@@ -91,6 +93,108 @@ func TestAssertion_Release_PropagatesError(t *testing.T) {
 	}
 	if got := fake.calls.Load(); got != 1 {
 		t.Errorf("fake.calls = %d, want 1 (atomic.Bool gate must block re-invoke)", got)
+	}
+}
+
+// TestAssertion_Release_ConcurrentCallers_SerializeViaMutex verifies
+// fix: 10 goroutines invoking a.Release() concurrently must produce exactly
+// 1 releaseFn invocation, and exactly 1 non-nil error return (the first
+// caller — the one that won the mutex — gets the real err from releaseFn;
+// the other 9 are serialized via sync.Mutex and find released=true under
+// the mutex, returning nil without invoking releaseFn).
+//
+// Pre-fix (CAS-based + sync.Once) behavior was racy:
+//   - First caller did CAS(false→true), then *started* releaseFn.
+//   - Second caller saw released==true, returned nil IMMEDIATELY — before
+//     the first caller had finished releaseFn.
+//   - Result: caller #2 might use the released resource (assume it's gone)
+//     while caller #1 is still in IOPMAssertionRelease — a use-after-free
+//     window in the Cleanup chain.
+//
+// Two assertions in this test:
+//  1. invocation/err invariants (passes on both pre-fix and post-fix):
+//     exactly 1 releaseFn call, exactly 1 non-nil err.
+//  2. SERIALIZATION invariant (FAILS on pre-fix CAS, passes on mutex):
+//     among concurrent callers, NONE returns before releaseFn completes.
+//     We measure this via a slow releaseFn (blocks for slowD) and check
+//     that every return time is >= releaseFnStart + slowD.
+//
+// Anti-flake: 20 iterations × 10 goroutines = 200 race opportunities per
+// run. WaitGroup start-barrier + a 5ms artificial releaseFn delay ensures
+// the race window is wide enough to catch any early-return bug.
+func TestAssertion_Release_ConcurrentCallers_SerializeViaMutex(t *testing.T) {
+	t.Parallel()
+	const numGoroutines = 10
+	const iterations = 20
+	const slowD = 5 * time.Millisecond
+	sentinelErr := errors.New("simulated release rc=0xfeedface")
+
+	for iter := 0; iter < iterations; iter++ {
+		fake := &fakeReleaser{err: sentinelErr}
+		// Slow releaseFn — sleeps slowD then returns sentinelErr; captures
+		// the actual finish time so the test can assert every concurrent
+		// caller returned AFTER the slow releaseFn completed.
+		var releaseFinishedAt atomic.Int64 // unix nanos
+		slowRelease := func(id uint32) error {
+			time.Sleep(slowD)
+			err := fake.Release(id)
+			releaseFinishedAt.Store(time.Now().UnixNano())
+			return err
+		}
+		a := newAssertionWithDeps(0xBEEF, "dndmode active", nil, slowRelease)
+
+		var start sync.WaitGroup
+		start.Add(1)
+		var done sync.WaitGroup
+		done.Add(numGoroutines)
+		results := make([]error, numGoroutines)
+		returnedAt := make([]int64, numGoroutines)
+
+		for i := 0; i < numGoroutines; i++ {
+			i := i
+			go func() {
+				defer done.Done()
+				start.Wait()
+				results[i] = a.Release()
+				returnedAt[i] = time.Now().UnixNano()
+			}()
+		}
+		start.Done()
+		done.Wait()
+
+		// Exactly one releaseFn invocation — mutex must serialize.
+		if got := fake.calls.Load(); got != 1 {
+			t.Fatalf("iter=%d: fake.calls = %d, want 1 (mutex must serialize concurrent callers)", iter, got)
+		}
+
+		// Exactly one non-nil err return (first caller through the mutex).
+		nonNilCount := 0
+		for _, r := range results {
+			if r != nil {
+				if !errors.Is(r, sentinelErr) {
+					t.Errorf("iter=%d: unexpected err = %v, want %v", iter, r, sentinelErr)
+				}
+				nonNilCount++
+			}
+		}
+		if nonNilCount != 1 {
+			t.Errorf("iter=%d: non-nil errs = %d, want exactly 1 (first caller gets err, rest get nil)", iter, nonNilCount)
+		}
+
+		// SERIALIZATION invariant: every caller returned AFTER releaseFn
+		// finished. Pre-fix CAS code violates this — caller #2 saw
+		// released=true and returned nil INSTANTLY while caller #1 was
+		// still in time.Sleep(slowD).
+		finishedAt := releaseFinishedAt.Load()
+		if finishedAt == 0 {
+			t.Fatalf("iter=%d: releaseFn never reached the timestamp store (impossible if fake.calls==1)", iter)
+		}
+		for i, rt := range returnedAt {
+			if rt < finishedAt {
+				t.Errorf("iter=%d: caller %d returned %dns BEFORE releaseFn finished (delta=%dns) — mutex must block until releaseFn completes",
+					iter, i, finishedAt-rt, finishedAt-rt)
+			}
+		}
 	}
 }
 
