@@ -121,6 +121,14 @@ func newAssertionWithDeps(id uint32, name string, log *slog.Logger, releaseFn fu
 // (P2 contract: runtime-mock → assertion → controller → tap-mock).
 func (a *Assertion) Name() string { return a.name }
 
+// ID returns the underlying IOPMAssertionID (uint32). Used by
+// internal/state/runtime/manager.go to record the id in runtime.json
+// so a crashed dndmode's orphan can be released by exact id during
+// next-launch recovery (Phase 5), instead of relying on
+// the Phase 3 name+type+dead-PID heuristic. Read-only — the value
+// is set at Acquire and never mutated.
+func (a *Assertion) ID() uint32 { return a.id }
+
 // Release implements state.Releaser. Two-layer idempotency (fix,
 //):
 //
