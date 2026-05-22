@@ -13,14 +13,28 @@ import (
 // Acquire and consumed by main.go's RestoreState LIFO Cleanup chain
 // (push position between runtime-mock and controller).
 //
-// Two-layer idempotency (verbatim mirror of Phase 2
-// cocoa.Controller.Release pattern — controller_darwin.go:273-305 —
-// per CONTEXT D-12 + Phase 3 PATTERNS.md §16):
+// Two-layer idempotency (post- fix, replaces the
+// pre-fix atomic.Bool + one-shot guard which had a serialization race):
 //
-//  1. atomic.Bool fast-path CAS: the second concurrent Release call
-//     short-circuits with nil without touching releaseFn.
-//  2. sync.Once around the body: defense in depth in case a future
-//     refactor breaks the atomic.Bool path.
+//  1. atomic.Bool fast-path: AFTER the first caller has fully completed
+//     releaseFn and stored released=true, subsequent calls observe
+//     released==true without acquiring the mutex — cheap short-circuit.
+//  2. sync.Mutex slow-path: concurrent callers entering before the first
+//     has finished BLOCK on mu.Lock() until releaseFn returns. Under the
+//     mutex they double-check released — if true, they return nil
+//     without invoking releaseFn; if false (genuinely the first caller),
+//     they invoke releaseFn and store released=true.
+//
+// Key contract change vs pre-fix: a concurrent caller no longer returns
+// before releaseFn completes. This matters when the Cleanup chain in
+// main.go retries on partial failures — the caller now reliably knows
+// "the underlying release primitive is done" when Release returns,
+// regardless of which goroutine won the race.
+//
+// Error contract preserved: the first caller (the one whose releaseFn
+// invocation succeeded or failed) returns whatever releaseFn returned;
+// concurrent callers return nil unconditionally (idempotency applies to
+// errors — see TestAssertion_Release_PropagatesError).
 //
 // The id field stores the Go-level uint32 (not C.IOPMAssertionID) so
 // pure-Go unit tests can construct an Assertion via newAssertionWithDeps
@@ -35,8 +49,19 @@ type Assertion struct {
 	// tests wire a fakeReleaser to count calls without IOKit.
 	releaseFn func(uint32) error
 
-	released    atomic.Bool
-	releaseOnce sync.Once
+	// released is the fast-path hint — set to true AFTER releaseFn has
+	// fully completed under mu. atomic.Load lets repeat callers avoid
+	// the mutex entirely once the operation is permanently done.
+	released atomic.Bool
+
+	// mu serializes concurrent Release callers. Pre- the design
+	// relied on a one-shot Do guard for serialization, but the
+	// atomic.Bool was flipped BEFORE entering the guard body, so
+	// concurrent callers short-circuited to nil while the winner was
+	// still inside releaseFn (the pre-fix bug). A plain Mutex is the
+	// simplest fix: every caller takes the lock, double-checks the
+	// hint flag, and only the actual winner reaches releaseFn.
+	mu sync.Mutex
 }
 
 // Acquire creates an IOPMAssertion of type
@@ -50,7 +75,7 @@ type Assertion struct {
 //
 // The returned *Assertion implements state.Releaser; main.go pushes it
 // onto the RestoreState LIFO chain. Two-layer idempotent Release
-// (atomic.Bool + sync.Once) per CONTEXT D-12.
+// (atomic.Bool fast-path + sync.Mutex slow-path) per the design notes +.
 //
 // Logger fallback: nil → slog.Default() (mirrors state.NewRestoreState
 // and cocoa.NewController convention).
@@ -96,11 +121,25 @@ func newAssertionWithDeps(id uint32, name string, log *slog.Logger, releaseFn fu
 // (P2 contract: runtime-mock → assertion → controller → tap-mock).
 func (a *Assertion) Name() string { return a.name }
 
-// Release implements state.Releaser. Two-layer idempotency mirrors the
-// Phase 2 cocoa.Controller.Release pattern (CONTEXT D-12):
+// Release implements state.Releaser. Two-layer idempotency (fix,
+//):
 //
-//  1. atomic.Bool fast path (single CAS) — second-call no-op.
-//  2. sync.Once around the body — defense in depth.
+//  1. atomic.Bool fast-path Load — once released is durably true, any
+//     repeat caller returns nil instantly without touching the mutex.
+//     This optimizes the common "Cleanup already finished, defer chain
+//     touches us again" case.
+//
+//  2. sync.Mutex slow-path — concurrent first-time callers serialize
+//     here. The winner double-checks released under the mutex (covers
+//     the case where the fast-path Load happened before another
+//     goroutine had stored), invokes releaseFn, stores released=true,
+//     and releases mu. Losers block on mu.Lock() until the winner is
+//     done, then see released==true under mu and return nil without
+//     invoking releaseFn.
+//
+// Key contract (vs pre- CAS + one-shot guard): concurrent callers
+// NO LONGER return before releaseFn completes. The IOKit release is
+// genuinely done by the time ANY caller returns.
 //
 // Apple's IOPMLib.h documents kernel auto-cleanup on process exit
 //, so even if Release is never called, the kernel
@@ -114,18 +153,29 @@ func (a *Assertion) Name() string { return a.name }
 // subsequent Release calls return nil unconditionally (idempotency
 // applies to errors too — see TestAssertion_Release_PropagatesError).
 func (a *Assertion) Release() error {
-	if !a.released.CompareAndSwap(false, true) {
-		return nil // first idempotency layer
+	// Fast path: hint flag. Cheap Load — once released is durably set
+	// (after the winner stored it under mu), any repeat caller skips
+	// the mutex entirely.
+	if a.released.Load() {
+		return nil
+	}
+	// Slow path: serialize concurrent first-time callers via the mutex.
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	// Double-check under the mutex — another goroutine may have won
+	// between our Load and our Lock.
+	if a.released.Load() {
+		return nil
 	}
 	var releaseErr error
-	a.releaseOnce.Do(func() {
-		if a.releaseFn == nil {
-			return
-		}
-		if err := a.releaseFn(a.id); err != nil {
-			releaseErr = err
-		}
-	})
+	if a.releaseFn != nil {
+		releaseErr = a.releaseFn(a.id)
+	}
+	// Store AFTER releaseFn completes. Concurrent callers blocked on
+	// mu.Lock will see released=true under mu and short-circuit; new
+	// callers using the fast-path Load see the same after the Unlock
+	// has happens-before published the Store.
+	a.released.Store(true)
 	return releaseErr
 }
 
