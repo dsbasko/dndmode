@@ -1,0 +1,317 @@
+//go:build darwin
+
+package runtime_test
+
+import (
+	"bytes"
+	"context"
+	"errors"
+	"io/fs"
+	"log/slog"
+	"os"
+	"path/filepath"
+	"strings"
+	"testing"
+
+	"go.uber.org/mock/gomock"
+
+	focusmocks "github.com/dsbasko/dndmode/internal/macos/focus/mocks"
+	passertmocks "github.com/dsbasko/dndmode/internal/macos/powerassert/mocks"
+	"github.com/dsbasko/dndmode/internal/state/runtime"
+)
+
+// recoveryDeps groups the gomock controller, three DI mocks (cross-
+// package — powerassert/mocks + focus/mocks), a REAL *runtime.Manager
+// bound to t.TempDir() (the design notes no afero), and a captured slog
+// buffer for log-line assertions.
+//
+// Named recoveryDeps (not testDeps) to avoid collision with the
+// testDeps struct already declared in manager_test.go for the
+// Write/Read/Release suite within the same `runtime_test` package.
+// Go forbids duplicate type declarations within one package.
+type recoveryDeps struct {
+	ctrl       *gomock.Controller
+	mockRel    *passertmocks.MockAssertionReleaser
+	mockRunner *focusmocks.MockShortcutsRunner
+	mockLive   *passertmocks.MockLiveChecker
+	mgr        *runtime.Manager
+	tmpPath    string
+	logBuf     *bytes.Buffer
+	log        *slog.Logger
+}
+
+func newRecoveryDeps(t *testing.T) *recoveryDeps {
+	t.Helper()
+	ctrl := gomock.NewController(t)
+	dir := t.TempDir()
+	path := filepath.Join(dir, "runtime.json")
+	logBuf := &bytes.Buffer{}
+	logger := slog.New(slog.NewTextHandler(logBuf, &slog.HandlerOptions{Level: slog.LevelDebug}))
+	return &recoveryDeps{
+		ctrl:       ctrl,
+		mockRel:    passertmocks.NewMockAssertionReleaser(ctrl),
+		mockRunner: focusmocks.NewMockShortcutsRunner(ctrl),
+		mockLive:   passertmocks.NewMockLiveChecker(ctrl),
+		mgr:        runtime.NewManager(path, logger),
+		tmpPath:    path,
+		logBuf:     logBuf,
+		log:        logger,
+	}
+}
+
+// writeSnapshot is a precondition helper for "file exists" test paths.
+func writeSnapshot(t *testing.T, mgr *runtime.Manager, snap runtime.Snapshot) {
+	t.Helper()
+	if err := mgr.Write(snap); err != nil {
+		t.Fatalf("Write precondition snapshot: %v", err)
+	}
+}
+
+// TestRecoverFromCrash_NoFile_Nil — validation map ID 5-05-05. Fresh
+// tmpdir, no Write performed. RecoverFromCrash returns nil; NONE of
+// the mocks are invoked (gomock fails on unexpected calls — implicit
+// assertion).
+func TestRecoverFromCrash_NoFile_Nil(t *testing.T) {
+	rd := newRecoveryDeps(t)
+	ctx := context.Background()
+
+	err := runtime.RecoverFromCrash(ctx, rd.mgr, rd.mockRel, rd.mockRunner, rd.mockLive, rd.log)
+	if err != nil {
+		t.Fatalf("RecoverFromCrash on missing file returned %v; want nil", err)
+	}
+}
+
+// TestRecoverFromCrash_MalformedJSON_WarnRemove_Nil — validation map
+// ID 5-05-06. Corrupted bytes on disk: warn-log + best-effort file
+// removal + nil return (continue PreFlight). No mock invocations.
+func TestRecoverFromCrash_MalformedJSON_WarnRemove_Nil(t *testing.T) {
+	rd := newRecoveryDeps(t)
+	if err := os.MkdirAll(filepath.Dir(rd.tmpPath), 0o700); err != nil {
+		t.Fatalf("MkdirAll: %v", err)
+	}
+	if err := os.WriteFile(rd.tmpPath, []byte("not-json"), 0o600); err != nil {
+		t.Fatalf("WriteFile garbage: %v", err)
+	}
+
+	ctx := context.Background()
+	err := runtime.RecoverFromCrash(ctx, rd.mgr, rd.mockRel, rd.mockRunner, rd.mockLive, rd.log)
+	if err != nil {
+		t.Fatalf("RecoverFromCrash on malformed JSON returned %v; want nil (warn + continue)", err)
+	}
+	if !strings.Contains(rd.logBuf.String(), "malformed runtime.json") {
+		t.Errorf("log buffer missing 'malformed runtime.json'; got:\n%s", rd.logBuf.String())
+	}
+	if _, err := os.Stat(rd.tmpPath); !errors.Is(err, fs.ErrNotExist) {
+		t.Errorf("file not removed after malformed-JSON recovery: stat err = %v", err)
+	}
+}
+
+// TestRecoverFromCrash_LivePID_ErrConcurrentInstance — validation map
+// ID 5-05-04. Stored PID is alive → return wrapped ErrConcurrentInstance.
+// mockRel + mockRunner MUST NOT be invoked (gomock fails on unexpected).
+// File remains on disk (cleanup is user's manual step).
+func TestRecoverFromCrash_LivePID_ErrConcurrentInstance(t *testing.T) {
+	rd := newRecoveryDeps(t)
+	const livePID = 12345
+	writeSnapshot(t, rd.mgr, runtime.Snapshot{PID: livePID, AssertionID: 0xabcd})
+	rd.mockLive.EXPECT().IsAlive(livePID).Return(true)
+
+	ctx := context.Background()
+	err := runtime.RecoverFromCrash(ctx, rd.mgr, rd.mockRel, rd.mockRunner, rd.mockLive, rd.log)
+	if err == nil {
+		t.Fatal("RecoverFromCrash returned nil; want ErrConcurrentInstance-wrapped error")
+	}
+	if !errors.Is(err, runtime.ErrConcurrentInstance) {
+		t.Errorf("errors.Is(err, ErrConcurrentInstance) = false; want true (err=%v)", err)
+	}
+	if !strings.Contains(err.Error(), "PID=12345") {
+		t.Errorf("err message %q does not contain PID=12345", err.Error())
+	}
+	// File still on disk: caller exit 5; manual rm is user's step.
+	if _, err := os.Stat(rd.tmpPath); err != nil {
+		t.Errorf("file should still exist on live-PID path: stat err = %v", err)
+	}
+}
+
+// TestRecoverFromCrash_DeadPID_ReleasesAssertion — validation map ID
+// 5-05-01. Dead PID → InOrder: IsAlive(false) → Release(id) → Run("dndmode-off").
+// All succeed; RecoverFromCrash returns nil; file removed; log contains
+// "recovery: released orphan assertion".
+func TestRecoverFromCrash_DeadPID_ReleasesAssertion(t *testing.T) {
+	rd := newRecoveryDeps(t)
+	const deadPID = 99999
+	const assertionID uint32 = 0xabcd
+	writeSnapshot(t, rd.mgr, runtime.Snapshot{PID: deadPID, AssertionID: assertionID})
+
+	gomock.InOrder(
+		rd.mockLive.EXPECT().IsAlive(deadPID).Return(false),
+		rd.mockRel.EXPECT().Release(assertionID).Return(nil),
+		rd.mockRunner.EXPECT().Run(gomock.Any(), "dndmode-off").Return(nil),
+	)
+
+	ctx := context.Background()
+	err := runtime.RecoverFromCrash(ctx, rd.mgr, rd.mockRel, rd.mockRunner, rd.mockLive, rd.log)
+	if err != nil {
+		t.Fatalf("RecoverFromCrash returned %v; want nil", err)
+	}
+	if !strings.Contains(rd.logBuf.String(), "recovery: released orphan assertion") {
+		t.Errorf("log buffer missing 'recovery: released orphan assertion'; got:\n%s", rd.logBuf.String())
+	}
+	if _, err := os.Stat(rd.tmpPath); !errors.Is(err, fs.ErrNotExist) {
+		t.Errorf("file not removed after happy-path recovery: stat err = %v", err)
+	}
+}
+
+// TestRecoverFromCrash_DeadPID_DeactivatesFocus — validation map ID
+// 5-05-02. Focused on the runner.Run("dndmode-off") call. Largely a
+// duplicate of #4 but kept separate per validation map for surface
+// area documentation.
+func TestRecoverFromCrash_DeadPID_DeactivatesFocus(t *testing.T) {
+	rd := newRecoveryDeps(t)
+	const deadPID = 99999
+	const assertionID uint32 = 0xabcd
+	writeSnapshot(t, rd.mgr, runtime.Snapshot{PID: deadPID, AssertionID: assertionID})
+
+	gomock.InOrder(
+		rd.mockLive.EXPECT().IsAlive(deadPID).Return(false),
+		rd.mockRel.EXPECT().Release(assertionID).Return(nil),
+		// Key expectation: runner.Run called with "dndmode-off" (NOT "dndmode-on").
+		rd.mockRunner.EXPECT().Run(gomock.Any(), "dndmode-off").Return(nil),
+	)
+
+	ctx := context.Background()
+	if err := runtime.RecoverFromCrash(ctx, rd.mgr, rd.mockRel, rd.mockRunner, rd.mockLive, rd.log); err != nil {
+		t.Fatalf("RecoverFromCrash returned %v; want nil", err)
+	}
+}
+
+// TestRecoverFromCrash_DeadPID_DeletesFile — validation map ID 5-05-03.
+// Verify file is removed at the end of the happy path.
+func TestRecoverFromCrash_DeadPID_DeletesFile(t *testing.T) {
+	rd := newRecoveryDeps(t)
+	const deadPID = 99999
+	const assertionID uint32 = 0xabcd
+	writeSnapshot(t, rd.mgr, runtime.Snapshot{PID: deadPID, AssertionID: assertionID})
+
+	rd.mockLive.EXPECT().IsAlive(deadPID).Return(false)
+	rd.mockRel.EXPECT().Release(assertionID).Return(nil)
+	rd.mockRunner.EXPECT().Run(gomock.Any(), "dndmode-off").Return(nil)
+
+	ctx := context.Background()
+	if err := runtime.RecoverFromCrash(ctx, rd.mgr, rd.mockRel, rd.mockRunner, rd.mockLive, rd.log); err != nil {
+		t.Fatalf("RecoverFromCrash returned %v; want nil", err)
+	}
+	if _, err := os.Stat(rd.tmpPath); !errors.Is(err, fs.ErrNotExist) {
+		t.Errorf("file not removed: stat err = %v", err)
+	}
+}
+
+// TestRecoverFromCrash_DeadPID_AssertionReleaseFail_WarnContinue —
+// validation map ID 5-05-09. AssertionReleaser.Release returns an
+// error: log a warn and CONTINUE (best-effort; kernel auto-reaps on
+// process exit anyway). RecoverFromCrash returns nil overall, file
+// is still removed.
+func TestRecoverFromCrash_DeadPID_AssertionReleaseFail_WarnContinue(t *testing.T) {
+	rd := newRecoveryDeps(t)
+	const deadPID = 99999
+	const assertionID uint32 = 0xabcd
+	writeSnapshot(t, rd.mgr, runtime.Snapshot{PID: deadPID, AssertionID: assertionID})
+
+	gomock.InOrder(
+		rd.mockLive.EXPECT().IsAlive(deadPID).Return(false),
+		rd.mockRel.EXPECT().Release(assertionID).Return(errors.New("simulated IOPMAssertionRelease error")),
+		// runner.Run STILL invoked — assertion-release failure does NOT short-circuit.
+		rd.mockRunner.EXPECT().Run(gomock.Any(), "dndmode-off").Return(nil),
+	)
+
+	ctx := context.Background()
+	if err := runtime.RecoverFromCrash(ctx, rd.mgr, rd.mockRel, rd.mockRunner, rd.mockLive, rd.log); err != nil {
+		t.Fatalf("RecoverFromCrash returned %v; want nil (best-effort)", err)
+	}
+	if !strings.Contains(rd.logBuf.String(), "recovery: release stored assertion failed") {
+		t.Errorf("log buffer missing 'recovery: release stored assertion failed'; got:\n%s", rd.logBuf.String())
+	}
+	if _, err := os.Stat(rd.tmpPath); !errors.Is(err, fs.ErrNotExist) {
+		t.Errorf("file should still be removed despite assertion-release failure: stat err = %v", err)
+	}
+}
+
+// TestRecoverFromCrash_DeadPID_ShortcutsFail_WarnContinue — validation
+// map ID 5-05-07. runner.Run("dndmode-off") returns an error: log warn
+// and CONTINUE (the design notes best-effort). nil overall.
+func TestRecoverFromCrash_DeadPID_ShortcutsFail_WarnContinue(t *testing.T) {
+	rd := newRecoveryDeps(t)
+	const deadPID = 99999
+	const assertionID uint32 = 0xabcd
+	writeSnapshot(t, rd.mgr, runtime.Snapshot{PID: deadPID, AssertionID: assertionID})
+
+	gomock.InOrder(
+		rd.mockLive.EXPECT().IsAlive(deadPID).Return(false),
+		rd.mockRel.EXPECT().Release(assertionID).Return(nil),
+		rd.mockRunner.EXPECT().Run(gomock.Any(), "dndmode-off").Return(errors.New("simulated shortcuts run failure")),
+	)
+
+	ctx := context.Background()
+	if err := runtime.RecoverFromCrash(ctx, rd.mgr, rd.mockRel, rd.mockRunner, rd.mockLive, rd.log); err != nil {
+		t.Fatalf("RecoverFromCrash returned %v; want nil (best-effort)", err)
+	}
+	if !strings.Contains(rd.logBuf.String(), "recovery: focus deactivate failed") {
+		t.Errorf("log buffer missing 'recovery: focus deactivate failed'; got:\n%s", rd.logBuf.String())
+	}
+}
+
+// TestRecoverFromCrash_DeadPID_FileDeleteFail_ErrFileDeletePersistent —
+// validation map ID 5-05-08. Induce os.Remove failure deterministically
+// by chmod-ing the file's PARENT directory (not the t.TempDir root) to
+// 0o500 (read+execute, no write).
+//
+// CRITICAL: Chmod-ing t.TempDir() root is unsafe — breaks Go's
+// testing.T cleanup invariant. The test runner's RemoveAll fails on
+// 0o500 dirs and either leaks tmpdirs or panics. Always nest the
+// chmod target under a directory the test creates itself, and restore
+// perms via t.Cleanup BEFORE the testing harness's RemoveAll fires.
+func TestRecoverFromCrash_DeadPID_FileDeleteFail_ErrFileDeletePersistent(t *testing.T) {
+	rd := newRecoveryDeps(t)
+	// Build a nested parentDir we own under t.TempDir; chmod ONLY this
+	// nested dir, never the t.TempDir root.
+	parentDir := filepath.Join(t.TempDir(), "nested")
+	if err := os.MkdirAll(parentDir, 0o700); err != nil {
+		t.Fatalf("MkdirAll nested: %v", err)
+	}
+	rd.tmpPath = filepath.Join(parentDir, "runtime.json")
+	rd.mgr = runtime.NewManager(rd.tmpPath, rd.log)
+
+	const deadPID = 99999
+	const assertionID uint32 = 0xabcd
+	writeSnapshot(t, rd.mgr, runtime.Snapshot{PID: deadPID, AssertionID: assertionID})
+
+	gomock.InOrder(
+		rd.mockLive.EXPECT().IsAlive(deadPID).Return(false),
+		rd.mockRel.EXPECT().Release(assertionID).Return(nil),
+		rd.mockRunner.EXPECT().Run(gomock.Any(), "dndmode-off").Return(nil),
+	)
+
+	// Make the parent dir non-writable so os.Remove(runtime.json) fails.
+	if err := os.Chmod(parentDir, 0o500); err != nil {
+		t.Fatalf("Chmod parentDir 0o500: %v", err)
+	}
+	t.Cleanup(func() {
+		// Restore perms BEFORE testing.T's RemoveAll fires, otherwise the
+		// test runner leaves the temp tree behind (or panics on some
+		// filesystems).
+		_ = os.Chmod(parentDir, 0o700)
+	})
+
+	ctx := context.Background()
+	err := runtime.RecoverFromCrash(ctx, rd.mgr, rd.mockRel, rd.mockRunner, rd.mockLive, rd.log)
+	if err == nil {
+		t.Fatal("RecoverFromCrash returned nil on os.Remove failure; want ErrFileDeletePersistent-wrapped")
+	}
+	if !errors.Is(err, runtime.ErrFileDeletePersistent) {
+		t.Errorf("errors.Is(err, ErrFileDeletePersistent) = false; want true (err=%v)", err)
+	}
+	if !strings.Contains(err.Error(), rd.tmpPath) {
+		t.Errorf("err message %q does not include path %q for the user-facing stderr template",
+			err.Error(), rd.tmpPath)
+	}
+}
