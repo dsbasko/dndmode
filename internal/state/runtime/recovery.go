@@ -9,6 +9,7 @@ import (
 	"io/fs"
 	"log/slog"
 	"os"
+	"time"
 
 	"github.com/dsbasko/dndmode/internal/macos/focus"
 	"github.com/dsbasko/dndmode/internal/macos/powerassert"
@@ -24,6 +25,23 @@ import (
 // such a value otherwise permanently bricks dndmode into exit 5 with no
 // way forward except manual `rm`.
 const minValidPID = 2
+
+// stalePIDWindow bounds how old a snapshot may be before a live-PID match
+// is treated as a PID-recycling false positive rather than a real
+// concurrent instance. macOS recycles PIDs aggressively
+// (`kern.maxproc` ≈ 1024–4096), so a 24h-old snapshot whose stored PID
+// happens to match a currently-live process is overwhelmingly likely to
+// be the kernel having reassigned a dead dndmode's PID to an unrelated
+// long-running process (Chrome renderer, Spotlight indexer, system
+// daemon). Without this second-pass guard, RecoverFromCrash bails on PID
+// match alone and the user gets a permanent exit-5 loop with no
+// actionable recovery — exactly the failure mode exists to
+// avoid. Recovery prefers proceeding (release the assertion, deactivate
+// Focus, delete the file) over bricking. A snapshot with a zero or
+// future StartedAt is treated as stale as well — both indicate a
+// corrupt/truncated runtime.json and the recovery path is the safer
+// fallback than exit 5.
+const stalePIDWindow = 24 * time.Hour
 
 // RecoverFromCrash reads runtime.json and reconciles the state left by
 // a SIGKILL'd previous dndmode. Composes Manager.Read
@@ -118,9 +136,32 @@ func RecoverFromCrash(
 	}
 
 	if live.IsAlive(snap.PID) {
-		// Another dndmode instance is alive — bail with wrapped sentinel
-		// so main.go can map via errors.Is to exit 5.
-		return fmt.Errorf("%w (PID=%d)", ErrConcurrentInstance, snap.PID)
+		// PID-reuse race second-pass guard. kill(pid, 0) alone is
+		// insufficient — on a workstation where the kernel recycles PIDs
+		// aggressively, the dead dndmode's PID may have been reassigned to
+		// any unrelated process (Chrome renderer, Spotlight indexer, etc.)
+		// between the SIGKILL and this launch. If the snapshot is stale
+		// (StartedAt > stalePIDWindow in the past, OR zero, OR in the
+		// future — all indicating either a recycled PID or a corrupted
+		// timestamp), prefer proceeding over bailing. A genuinely-live
+		// concurrent dndmode will have a fresh StartedAt within the
+		// window and will still hit the ErrConcurrentInstance branch.
+		now := time.Now().UTC()
+		stale := snap.StartedAt.IsZero() ||
+			snap.StartedAt.After(now) ||
+			now.Sub(snap.StartedAt) > stalePIDWindow
+		if stale {
+			log.Warn("recovery: live PID + stale snapshot, likely PID recycling; treating as dead",
+				slog.Int("pid", snap.PID),
+				slog.Time("started_at", snap.StartedAt),
+				slog.Duration("age", now.Sub(snap.StartedAt)))
+			// Fall through to the dead-PID branch below.
+		} else {
+			// Fresh snapshot + live PID — almost certainly a real concurrent
+			// instance. Bail with wrapped sentinel so main.go can map via
+			// errors.Is to exit 5.
+			return fmt.Errorf("%w (PID=%d)", ErrConcurrentInstance, snap.PID)
+		}
 	}
 
 	// Dead-PID branch: three best-effort steps + one strict.

@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"go.uber.org/mock/gomock"
 
@@ -107,13 +108,23 @@ func TestRecoverFromCrash_MalformedJSON_WarnRemove_Nil(t *testing.T) {
 }
 
 // TestRecoverFromCrash_LivePID_ErrConcurrentInstance — validation map
-// ID 5-05-04. Stored PID is alive → return wrapped ErrConcurrentInstance.
-// mockRel + mockRunner MUST NOT be invoked (gomock fails on unexpected).
-// File remains on disk (cleanup is user's manual step).
+// ID 5-05-04. Stored PID is alive AND snapshot is fresh (StartedAt within
+// stalePIDWindow) → return wrapped ErrConcurrentInstance. mockRel +
+// mockRunner MUST NOT be invoked (gomock fails on unexpected). File
+// remains on disk (cleanup is user's manual step).
+//
+// Post- the snapshot MUST carry a fresh StartedAt — a zero/stale
+// timestamp triggers the PID-recycling second-pass guard and falls
+// through to the dead branch instead of bailing.
 func TestRecoverFromCrash_LivePID_ErrConcurrentInstance(t *testing.T) {
 	rd := newRecoveryDeps(t)
 	const livePID = 12345
-	writeSnapshot(t, rd.mgr, runtime.Snapshot{PID: livePID, AssertionID: 0xabcd})
+	// Fresh snapshot: within the 24h stalePIDWindow → bail on live PID.
+	writeSnapshot(t, rd.mgr, runtime.Snapshot{
+		PID:         livePID,
+		StartedAt:   time.Now().UTC().Add(-1 * time.Minute),
+		AssertionID: 0xabcd,
+	})
 	rd.mockLive.EXPECT().IsAlive(livePID).Return(true)
 
 	ctx := context.Background()
@@ -130,6 +141,74 @@ func TestRecoverFromCrash_LivePID_ErrConcurrentInstance(t *testing.T) {
 	// File still on disk: caller exit 5; manual rm is user's step.
 	if _, err := os.Stat(rd.tmpPath); err != nil {
 		t.Errorf("file should still exist on live-PID path: stat err = %v", err)
+	}
+}
+
+// TestRecoverFromCrash_LivePID_StaleFile_TreatsAsDead — regression.
+// Stored PID happens to be alive (e.g. macOS recycled the dead dndmode's
+// PID into a Chrome renderer between launches), BUT the snapshot is
+// older than 24h. Recovery treats this as PID recycling (NOT a real
+// concurrent instance), falls through to the dead-PID branch: release
+// assertion, deactivate Focus, delete file, return nil. Without this
+// second-pass guard the user would be permanently stuck in exit 5 with
+// no recovery path (the user-visible failure mode exists to
+// avoid).
+func TestRecoverFromCrash_LivePID_StaleFile_TreatsAsDead(t *testing.T) {
+	rd := newRecoveryDeps(t)
+	const reusedPID = 8451
+	const assertionID uint32 = 0xabcd
+	// Stale: 25h old — outside the 24h stalePIDWindow.
+	writeSnapshot(t, rd.mgr, runtime.Snapshot{
+		PID:         reusedPID,
+		StartedAt:   time.Now().UTC().Add(-25 * time.Hour),
+		AssertionID: assertionID,
+	})
+
+	gomock.InOrder(
+		rd.mockLive.EXPECT().IsAlive(reusedPID).Return(true),
+		rd.mockRel.EXPECT().Release(assertionID).Return(nil),
+		rd.mockRunner.EXPECT().Run(gomock.Any(), "dndmode-off").Return(nil),
+	)
+
+	ctx := context.Background()
+	err := runtime.RecoverFromCrash(ctx, rd.mgr, rd.mockRel, rd.mockRunner, rd.mockLive, rd.log)
+	if err != nil {
+		t.Fatalf("RecoverFromCrash on stale+live-PID returned %v; want nil (treat as PID recycling)", err)
+	}
+	if !strings.Contains(rd.logBuf.String(), "stale snapshot") {
+		t.Errorf("log buffer missing 'stale snapshot' warn; got:\n%s", rd.logBuf.String())
+	}
+	if _, err := os.Stat(rd.tmpPath); !errors.Is(err, fs.ErrNotExist) {
+		t.Errorf("file not removed after stale-PID-recycling branch: stat err = %v", err)
+	}
+}
+
+// TestRecoverFromCrash_LivePID_ZeroStartedAt_TreatsAsDead
+// edge case. A corrupted/truncated runtime.json with zero StartedAt and
+// a live PID is treated as stale (defense-in-depth — the snapshot is
+// untrusted). Falls through to the dead-PID branch.
+func TestRecoverFromCrash_LivePID_ZeroStartedAt_TreatsAsDead(t *testing.T) {
+	rd := newRecoveryDeps(t)
+	const reusedPID = 8451
+	const assertionID uint32 = 0xabcd
+	// Zero StartedAt: corrupted/truncated runtime.json.
+	writeSnapshot(t, rd.mgr, runtime.Snapshot{
+		PID:         reusedPID,
+		AssertionID: assertionID,
+	})
+
+	gomock.InOrder(
+		rd.mockLive.EXPECT().IsAlive(reusedPID).Return(true),
+		rd.mockRel.EXPECT().Release(assertionID).Return(nil),
+		rd.mockRunner.EXPECT().Run(gomock.Any(), "dndmode-off").Return(nil),
+	)
+
+	ctx := context.Background()
+	if err := runtime.RecoverFromCrash(ctx, rd.mgr, rd.mockRel, rd.mockRunner, rd.mockLive, rd.log); err != nil {
+		t.Fatalf("RecoverFromCrash on zero-StartedAt+live-PID returned %v; want nil", err)
+	}
+	if !strings.Contains(rd.logBuf.String(), "stale snapshot") {
+		t.Errorf("log buffer missing 'stale snapshot' warn; got:\n%s", rd.logBuf.String())
 	}
 }
 
