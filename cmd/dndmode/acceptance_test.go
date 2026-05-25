@@ -29,6 +29,7 @@ package main_test
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
 	"os"
 	"os/exec"
@@ -39,6 +40,8 @@ import (
 	"syscall"
 	"testing"
 	"time"
+
+	runtimepkg "github.com/dsbasko/dndmode/internal/state/runtime"
 )
 
 // dndmodeBinary is the path to the dndmode binary built once by TestMain.
@@ -129,14 +132,32 @@ func TestAcceptance_DefaultConfigCreatedOnMissing(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
-	cmd, stdout, _ := dndmodeCmd(t, ctx, tmpHome)
+	cmd, stdout, stderr := dndmodeCmd(t, ctx, tmpHome)
 	if err := cmd.Start(); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
 
 	if !waitForStdout(stdout, "active. press Ctrl-C.", 10*time.Second) {
 		_ = cmd.Process.Kill()
-		t.Fatalf("did not see active banner in stdout within 10s; got:\n%s", stdout.String())
+		stdoutSnap := stdout.String()
+		stderrSnap := stderr.String()
+		// Phase 3/5 PreFlight short-circuits prevent reaching the active
+		// banner. This test's intent is the default-config-creation flow
+		// — orthogonal to Phase 3/5 gates. Skip cleanly so the host can
+		// run the test once Shortcuts / permissions are configured.
+		switch {
+		case strings.Contains(stdoutSnap, "dndmode: waiting"):
+			t.Skip("AX or IM not granted on this host; default-config test requires both granted upfront")
+		case strings.Contains(stderrSnap, "no displays detected"):
+			t.Skip("no displays attached; default-config test requires GUI session")
+		case strings.Contains(stderrSnap, "Secure Event Input"):
+			t.Skip("SecureEventInput active on host; close it and re-run")
+		case strings.Contains(stderrSnap, "required Shortcuts not found"):
+			t.Skip("dndmode-on / dndmode-off Shortcuts missing (Phase 5 PreFlight gate); create them and re-run")
+		case strings.Contains(stderrSnap, "another instance is holding"):
+			t.Skip("another dndmode instance is holding the awake-lock; SIGTERM it and re-run")
+		}
+		t.Fatalf("did not see active banner in stdout within 10s; got:\n%s\nstderr:\n%s", stdoutSnap, stderrSnap)
 	}
 
 	// Default config file must exist now.
@@ -172,14 +193,28 @@ func TestAcceptance_SIGINT_ExitZeroWithCleanupBanner(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
-	cmd, stdout, _ := dndmodeCmd(t, ctx, tmpHome)
+	cmd, stdout, stderr := dndmodeCmd(t, ctx, tmpHome)
 	if err := cmd.Start(); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
 
 	if !waitForStdout(stdout, "active. press Ctrl-C.", 10*time.Second) {
 		_ = cmd.Process.Kill()
-		t.Fatalf("did not see active banner: %s", stdout.String())
+		stdoutSnap := stdout.String()
+		stderrSnap := stderr.String()
+		switch {
+		case strings.Contains(stdoutSnap, "dndmode: waiting"):
+			t.Skip("AX or IM not granted on this host; SIGINT-cleanup test requires both granted upfront")
+		case strings.Contains(stderrSnap, "no displays detected"):
+			t.Skip("no displays attached; SIGINT-cleanup test requires GUI session")
+		case strings.Contains(stderrSnap, "Secure Event Input"):
+			t.Skip("SecureEventInput active on host; close it and re-run")
+		case strings.Contains(stderrSnap, "required Shortcuts not found"):
+			t.Skip("dndmode-on / dndmode-off Shortcuts missing (Phase 5 PreFlight gate); create them and re-run")
+		case strings.Contains(stderrSnap, "another instance is holding"):
+			t.Skip("another dndmode instance is holding the awake-lock; SIGTERM it and re-run")
+		}
+		t.Fatalf("did not see active banner: stdout=%s stderr=%s", stdoutSnap, stderrSnap)
 	}
 
 	signalAndWait(t, cmd, syscall.SIGINT, 5*time.Second)
@@ -198,14 +233,28 @@ func TestAcceptance_DoubleSIGINT_NoOp(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
-	cmd, stdout, _ := dndmodeCmd(t, ctx, tmpHome)
+	cmd, stdout, stderr := dndmodeCmd(t, ctx, tmpHome)
 	if err := cmd.Start(); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
 
 	if !waitForStdout(stdout, "active. press Ctrl-C.", 10*time.Second) {
 		_ = cmd.Process.Kill()
-		t.Fatalf("did not see active banner: %s", stdout.String())
+		stdoutSnap := stdout.String()
+		stderrSnap := stderr.String()
+		switch {
+		case strings.Contains(stdoutSnap, "dndmode: waiting"):
+			t.Skip("AX or IM not granted on this host; double-SIGINT test requires both granted upfront")
+		case strings.Contains(stderrSnap, "no displays detected"):
+			t.Skip("no displays attached; double-SIGINT test requires GUI session")
+		case strings.Contains(stderrSnap, "Secure Event Input"):
+			t.Skip("SecureEventInput active on host; close it and re-run")
+		case strings.Contains(stderrSnap, "required Shortcuts not found"):
+			t.Skip("dndmode-on / dndmode-off Shortcuts missing (Phase 5 PreFlight gate); create them and re-run")
+		case strings.Contains(stderrSnap, "another instance is holding"):
+			t.Skip("another dndmode instance is holding the awake-lock; SIGTERM it and re-run")
+		}
+		t.Fatalf("did not see active banner: stdout=%s stderr=%s", stdoutSnap, stderrSnap)
 	}
 
 	// First SIGINT.
@@ -327,6 +376,8 @@ func TestAcceptance_LIFE06_PushOrder(t *testing.T) {
 	// → exit 2. In that case the test cannot proceed; skip cleanly.
 	// Phase 3 path: if AX/IM are not granted on the host the binary will
 	// sit in WaitForGrants — we detect that via "dndmode: waiting" on stdout.
+	// Phase 5 paths: missing dndmode-on/dndmode-off Shortcuts → exit 6 (the
+	// new PreFlight gate at Step 9.5); concurrent live dndmode → exit 5.
 	if !waitForStdout(stdout, "active. press Ctrl-C.", 10*time.Second) {
 		_ = cmd.Process.Kill()
 		stderrSnap := stderr.String()
@@ -338,6 +389,10 @@ func TestAcceptance_LIFE06_PushOrder(t *testing.T) {
 			t.Skip("AX or IM not granted on this host; test requires both granted upfront")
 		case strings.Contains(stderrSnap, "Secure Event Input"):
 			t.Skip("SecureEventInput active on host; close it and re-run")
+		case strings.Contains(stderrSnap, "required Shortcuts not found"):
+			t.Skip("dndmode-on / dndmode-off Shortcuts missing; create them in Shortcuts.app and re-run")
+		case strings.Contains(stderrSnap, "another instance is holding"):
+			t.Skip("another dndmode instance is holding the awake-lock; SIGTERM it and re-run")
 		}
 		t.Fatalf("did not see active banner; stdout:\n%s\nstderr:\n%s", stdoutSnap, stderrSnap)
 	}
@@ -345,34 +400,39 @@ func TestAcceptance_LIFE06_PushOrder(t *testing.T) {
 	signalAndWait(t, cmd, syscall.SIGINT, 10*time.Second)
 
 	s := stderr.String()
-	// LIFE-06 cleanup execution order (LIFO unwind of P2 D-13 push order,
-	// updated by Phase 3 D-02 — assertion slot is now a REAL powerassert.Assertion):
-	//   1. mock-tap          (Phase 4 — currently mocked; first to release)
+	// LIFE-06 cleanup execution order (LIFO unwind of push order, finalised
+	// by Phase 5 — runtime-file slot is now a REAL runtime.Manager AND a
+	// new focus slot lands between assertion and runtime-file):
+	//   1. mock-tap          (Phase 4 — still mocked; first to release)
 	//   2. windows           (controller — close all NSWindow)
-	//   3. dndmode active    (REAL IOPMAssertion — Phase 3 replaces P2 mock-assertion)
-	//   4. mock-runtime-file (Phase 5 — currently mocked; last to release)
+	//   3. "dndmode active"  (REAL IOPMAssertion — Phase 3 replaces P2 mock)
+	//   4. focus             (REAL focus.Releaser — Phase 5 plan 05-03; new
+	//                         slot inserted between assertion and runtime-file)
+	// 5. runtime-file (REAL runtime.Manager — Phase 5
+	//                         replaces P3 mock-runtime-file)
 	// slog TextHandler quotes string values containing spaces, so the
 	// real Assertion releaser logs as `releaser="dndmode active"` (with
-	// the quotes around the multi-word name). Single-word releaser names
-	// (mock-tap, windows, mock-runtime-file) are unquoted.
+	// quotes). Single-word names (mock-tap, windows, focus, runtime-file)
+	// are unquoted.
 	posTap := strings.Index(s, `releaser=mock-tap`)
 	posWin := strings.Index(s, `releaser=windows`)
 	posAssert := strings.Index(s, `releaser="dndmode active"`)
-	posRuntime := strings.Index(s, `releaser=mock-runtime-file`)
+	posFocus := strings.Index(s, `releaser=focus`)
+	posRuntime := strings.Index(s, `releaser=runtime-file`)
 
-	if posTap < 0 || posWin < 0 || posAssert < 0 || posRuntime < 0 {
-		t.Fatalf("missing release log entries (need all 4 'released' info logs):\n"+
-			"  posTap=%d posWin=%d posAssert(dndmode active)=%d posRuntime=%d\n"+
+	if posTap < 0 || posWin < 0 || posAssert < 0 || posFocus < 0 || posRuntime < 0 {
+		t.Fatalf("missing release log entries (need all 5 'released' info logs):\n"+
+			"  posTap=%d posWin=%d posAssert(dndmode active)=%d posFocus=%d posRuntime=%d\n"+
 			"stderr:\n%s",
-			posTap, posWin, posAssert, posRuntime, s)
+			posTap, posWin, posAssert, posFocus, posRuntime, s)
 	}
 
-	if !(posTap < posWin && posWin < posAssert && posAssert < posRuntime) {
+	if !(posTap < posWin && posWin < posAssert && posAssert < posFocus && posFocus < posRuntime) {
 		t.Errorf("cleanup order violated:\n"+
-			"  tap@%d  windows@%d  dndmode-active@%d  runtime-file@%d\n"+
-			"  expected: tap < windows < dndmode-active < runtime-file (P2 D-13 + Phase 3 D-02 LIFO unwind)\n"+
+			"  tap@%d  windows@%d  dndmode-active@%d  focus@%d  runtime-file@%d\n"+
+			"  expected: tap < windows < dndmode-active < focus < runtime-file (LIFO unwind, Phase 5 D-02)\n"+
 			"stderr:\n%s",
-			posTap, posWin, posAssert, posRuntime, s)
+			posTap, posWin, posAssert, posFocus, posRuntime, s)
 	}
 }
 
@@ -402,6 +462,10 @@ func TestAcceptance_Phase2_OverlayBootstrapsAndShutsDown(t *testing.T) {
 			t.Skip("AX or IM not granted on this host; Phase 2 happy-path requires both granted upfront")
 		case strings.Contains(stderrSnap, "Secure Event Input"):
 			t.Skip("SecureEventInput active on host; close it and re-run")
+		case strings.Contains(stderrSnap, "required Shortcuts not found"):
+			t.Skip("dndmode-on / dndmode-off Shortcuts missing (Phase 5 PreFlight gate); create them and re-run")
+		case strings.Contains(stderrSnap, "another instance is holding"):
+			t.Skip("another dndmode instance is holding the awake-lock; SIGTERM it and re-run")
 		}
 		t.Fatalf("did not see active banner; stderr:\n%s", stderrSnap)
 	}
@@ -461,6 +525,8 @@ func TestAcceptance_Phase3_PreFlight_HappyPath(t *testing.T) {
 			t.Skip("SecureEventInput active on host; close it and re-run")
 		case strings.Contains(stderrSnap, "another instance is holding"):
 			t.Skip("another dndmode instance is holding the awake-lock; SIGTERM it and re-run")
+		case strings.Contains(stderrSnap, "required Shortcuts not found"):
+			t.Skip("dndmode-on / dndmode-off Shortcuts missing (Phase 5 PreFlight gate); create them and re-run")
 		}
 		t.Fatalf("did not see active banner; stdout:\n%s\nstderr:\n%s", stdoutSnap, stderrSnap)
 	}
@@ -503,6 +569,149 @@ func TestAcceptance_Phase3_NoMockAssertion_Regression(t *testing.T) {
 		t.Errorf("%s still contains the literal string %s — Phase 3 should have replaced"+
 			"state.NewMockReleaser(\"mock-assertion\") with a real powerassert.Assertion via Acquire(\"dndmode active\")",
 			mainGoPath, forbidden)
+	}
+}
+
+// TestAcceptance_Phase5_NoMockRuntimeFile_Regression is a static (no
+// subprocess) regression guard against someone re-adding the Phase 3
+// placeholder `state.NewMockReleaser("mock-runtime-file")` to
+// cmd/dndmode/main.go. ordering would still pass if you simply
+// moved the mock to the bottom of the stack — but the Phase 5
+// contract requires the real runtime.Manager in that slot.
+//
+// The test reads main.go from disk and fails if the literal string
+// `"mock-runtime-file"` (Go source quoted) appears anywhere in the
+// file. Comments referring to the old name unquoted are allowed —
+// they document history, not Go literals.
+//
+// Runs on any host (no GUI, no TCC state needed) and is therefore the
+// canonical Phase 5 regression check for CI without permission setup.
+func TestAcceptance_Phase5_NoMockRuntimeFile_Regression(t *testing.T) {
+	repoRoot, err := filepath.Abs("../..")
+	if err != nil {
+		t.Fatalf("resolve repo root: %v", err)
+	}
+	mainGoPath := filepath.Join(repoRoot, "cmd", "dndmode", "main.go")
+	mainGo, err := os.ReadFile(mainGoPath)
+	if err != nil {
+		t.Fatalf("read %s: %v", mainGoPath, err)
+	}
+	const forbidden = `"mock-runtime-file"`
+	if strings.Contains(string(mainGo), forbidden) {
+		t.Errorf("%s still contains the literal string %s — Phase 5 should have replaced"+
+			"state.NewMockReleaser(\"mock-runtime-file\") with a real runtime.Manager via runtimepkg.NewManager(...)",
+			mainGoPath, forbidden)
+	}
+}
+
+// TestAcceptance_CrashScenario verifies Phase 5 end-to-end
+// (validation map ID 5-06-02). Manual prereq: pre-granted AX/IM
+// permissions on the test binary cdhash; `dndmode-on` / `dndmode-off`
+// Shortcuts exist; at least one display attached. Skips cleanly if any
+// prereq is unmet, mirroring TestAcceptance_LIFE06_PushOrder.
+//
+// Steps:
+//
+//  1. Fork subprocess A; wait for "active. press Ctrl-C." → proves
+//     Step 13.3 (Manager.Write) and Step 13.7 (focus.Activate) ran.
+//  2. Verify runtime.json exists under tmpHome/.config/dndmode/.
+//  3. SIGKILL subprocess A (bypasses defer Cleanup → runtime.json +
+//     IOPM orphan + Focus On remain).
+//  4. Verify runtime.json still on disk post-Wait.
+//  5. Fork subprocess B (same tmpHome → reads the SAME runtime.json).
+//  6. Expect stderr B contains "recovery: released orphan assertion".
+//  7. Expect "active. press Ctrl-C." → recovery succeeded.
+//  8. Re-read runtime.json; assert snapshot.PID == cmdB.Process.Pid
+//     (MANDATORY t.Fatalf on mismatch — NOT a skip).
+//  9. SIGINT B; expect exit 0; runtime.json deleted by Manager.Release.
+func TestAcceptance_CrashScenario(t *testing.T) {
+	tmpHome := t.TempDir()
+	runtimeJSON := filepath.Join(tmpHome, ".config", "dndmode", "runtime.json")
+
+	// --- Subprocess A ---
+	ctxA, cancelA := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancelA()
+	cmdA, stdoutA, stderrA := dndmodeCmd(t, ctxA, tmpHome)
+	if err := cmdA.Start(); err != nil {
+		t.Fatalf("Start A: %v", err)
+	}
+	if !waitForStdout(stdoutA, "active. press Ctrl-C.", 10*time.Second) {
+		_ = cmdA.Process.Kill()
+		stderrSnap := stderrA.String()
+		stdoutSnap := stdoutA.String()
+		switch {
+		case strings.Contains(stdoutSnap, "dndmode: waiting"):
+			t.Skip("AX or IM not granted on this host; CrashScenario requires both granted upfront")
+		case strings.Contains(stderrSnap, "no displays detected"):
+			t.Skip("no displays attached; CrashScenario requires GUI session")
+		case strings.Contains(stderrSnap, "Secure Event Input"):
+			t.Skip("SecureEventInput active on host; close it and re-run")
+		case strings.Contains(stderrSnap, "required Shortcuts not found"):
+			t.Skip("dndmode-on / dndmode-off Shortcuts missing; create them in Shortcuts.app and re-run")
+		case strings.Contains(stderrSnap, "another instance is holding"):
+			t.Skip("another dndmode instance is holding the awake-lock; SIGTERM it and re-run")
+		}
+		t.Fatalf("A did not activate: stdout=%s stderr=%s", stdoutSnap, stderrSnap)
+	}
+
+	// Pre-SIGKILL: runtime.json must exist (Step 13.3 fired).
+	if _, err := os.Stat(runtimeJSON); err != nil {
+		_ = cmdA.Process.Kill()
+		t.Fatalf("runtime.json missing before SIGKILL: %v (Step 13.3 did not run?)", err)
+	}
+
+	// SIGKILL — bypasses defer Cleanup; runtime.json + orphan IOPM + Focus remain.
+	if err := cmdA.Process.Signal(syscall.SIGKILL); err != nil {
+		t.Fatalf("SIGKILL A: %v", err)
+	}
+	_, _ = cmdA.Process.Wait()
+
+	// Post-Wait: runtime.json still on disk.
+	if _, err := os.Stat(runtimeJSON); err != nil {
+		t.Fatalf("runtime.json gone after SIGKILL (should remain — A's Cleanup was bypassed): %v", err)
+	}
+
+	// --- Subprocess B — recovery path ---
+	ctxB, cancelB := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancelB()
+	cmdB, stdoutB, stderrB := dndmodeCmd(t, ctxB, tmpHome)
+	if err := cmdB.Start(); err != nil {
+		t.Fatalf("Start B: %v", err)
+	}
+	if !waitForStdout(stdoutB, "active. press Ctrl-C.", 10*time.Second) {
+		_ = cmdB.Process.Kill()
+		t.Fatalf("B did not activate after recovery: stdout=%s stderr=%s",
+			stdoutB.String(), stderrB.String())
+	}
+	if !strings.Contains(stderrB.String(), "recovery: released orphan assertion") {
+		t.Errorf("stderr B missing recovery log line (RecoverFromCrash dead-PID branch did not fire): %s",
+			stderrB.String())
+	}
+
+	// MANDATORY PID-match: re-read runtime.json and assert
+	// snapshot.PID == cmdB.Process.Pid. A mismatch is a BUG (not a skip):
+	// either recovery didn't delete the prior file before B's Write,
+	// B's Write didn't fire, or temp+rename produced a stale read.
+	rawSnap, err := os.ReadFile(runtimeJSON)
+	if err != nil {
+		t.Fatalf("re-read runtime.json after B active: %v (Step 13.3 in B did not run?)", err)
+	}
+	var snap runtimepkg.Snapshot
+	if err := json.Unmarshal(rawSnap, &snap); err != nil {
+		t.Fatalf("unmarshal runtime.json from B: %v (corrupt write?)", err)
+	}
+	if snap.PID != cmdB.Process.Pid {
+		t.Fatalf("runtime.json PID mismatch after recovery: got %d, want %d (cmdB) — Step 13.3 in B may not have overwritten the prior snapshot",
+			snap.PID, cmdB.Process.Pid)
+	}
+
+	// Clean shutdown — exit code 0 + runtime.json deleted via Manager.Release.
+	signalAndWait(t, cmdB, syscall.SIGINT, 10*time.Second)
+	if cmdB.ProcessState.ExitCode() != 0 {
+		t.Errorf("B exit code = %d, want 0", cmdB.ProcessState.ExitCode())
+	}
+	if _, err := os.Stat(runtimeJSON); !os.IsNotExist(err) {
+		t.Errorf("runtime.json still exists after B clean exit (Manager.Release did not delete): %v", err)
 	}
 }
 
