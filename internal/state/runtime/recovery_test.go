@@ -260,6 +260,73 @@ func TestRecoverFromCrash_DeadPID_ShortcutsFail_WarnContinue(t *testing.T) {
 	}
 }
 
+// TestRecoverFromCrash_SuspectPID_ZeroPID_TreatsAsDead — regression.
+// snap.PID == 0 is the kernel sentinel that POSIX kill(0,0) interprets as
+// "broadcast to my process group" → returns nil ("alive") → exit 5 every
+// launch. The validation gate must reject this BEFORE the IsAlive call,
+// treat the snapshot as dead, remove the file, and return nil so PreFlight
+// continues. mockLive MUST NOT be invoked (gomock fails on unexpected calls
+// — implicit assertion).
+func TestRecoverFromCrash_SuspectPID_ZeroPID_TreatsAsDead(t *testing.T) {
+	rd := newRecoveryDeps(t)
+	writeSnapshot(t, rd.mgr, runtime.Snapshot{PID: 0, AssertionID: 0xabcd})
+
+	// No EXPECT calls: live.IsAlive, rel.Release, runner.Run must all be skipped.
+
+	ctx := context.Background()
+	err := runtime.RecoverFromCrash(ctx, rd.mgr, rd.mockRel, rd.mockRunner, rd.mockLive, rd.log)
+	if err != nil {
+		t.Fatalf("RecoverFromCrash on PID=0 returned %v; want nil (treat as dead, continue PreFlight)", err)
+	}
+	if !strings.Contains(rd.logBuf.String(), "refusing to dispatch on suspect PID") {
+		t.Errorf("log buffer missing suspect-PID warn; got:\n%s", rd.logBuf.String())
+	}
+	if _, err := os.Stat(rd.tmpPath); !errors.Is(err, fs.ErrNotExist) {
+		t.Errorf("file not removed after suspect-PID branch: stat err = %v", err)
+	}
+}
+
+// TestRecoverFromCrash_SuspectPID_OwnPID_TreatsAsDead — regression.
+// snap.PID == os.Getpid() of the recovering process trivially passes
+// kill(pid, 0) ("can signal myself") → "alive" → exit 5 every launch.
+// Validation gate rejects.
+func TestRecoverFromCrash_SuspectPID_OwnPID_TreatsAsDead(t *testing.T) {
+	rd := newRecoveryDeps(t)
+	writeSnapshot(t, rd.mgr, runtime.Snapshot{PID: os.Getpid(), AssertionID: 0xabcd})
+
+	ctx := context.Background()
+	err := runtime.RecoverFromCrash(ctx, rd.mgr, rd.mockRel, rd.mockRunner, rd.mockLive, rd.log)
+	if err != nil {
+		t.Fatalf("RecoverFromCrash on PID==own returned %v; want nil", err)
+	}
+	if !strings.Contains(rd.logBuf.String(), "refusing to dispatch on suspect PID") {
+		t.Errorf("log buffer missing suspect-PID warn; got:\n%s", rd.logBuf.String())
+	}
+	if _, err := os.Stat(rd.tmpPath); !errors.Is(err, fs.ErrNotExist) {
+		t.Errorf("file not removed after own-PID branch: stat err = %v", err)
+	}
+}
+
+// TestRecoverFromCrash_SuspectPID_NegativePID_TreatsAsDead
+// regression. snap.PID == -1 is POSIX "kill every process I can signal"
+// (returns nil → "alive"). Validation gate rejects.
+func TestRecoverFromCrash_SuspectPID_NegativePID_TreatsAsDead(t *testing.T) {
+	rd := newRecoveryDeps(t)
+	writeSnapshot(t, rd.mgr, runtime.Snapshot{PID: -1, AssertionID: 0xabcd})
+
+	ctx := context.Background()
+	err := runtime.RecoverFromCrash(ctx, rd.mgr, rd.mockRel, rd.mockRunner, rd.mockLive, rd.log)
+	if err != nil {
+		t.Fatalf("RecoverFromCrash on PID=-1 returned %v; want nil", err)
+	}
+	if !strings.Contains(rd.logBuf.String(), "refusing to dispatch on suspect PID") {
+		t.Errorf("log buffer missing suspect-PID warn; got:\n%s", rd.logBuf.String())
+	}
+	if _, err := os.Stat(rd.tmpPath); !errors.Is(err, fs.ErrNotExist) {
+		t.Errorf("file not removed after negative-PID branch: stat err = %v", err)
+	}
+}
+
 // TestRecoverFromCrash_DeadPID_FileDeleteFail_ErrFileDeletePersistent —
 // validation map ID 5-05-08. Induce os.Remove failure deterministically
 // by chmod-ing the file's PARENT directory (not the t.TempDir root) to

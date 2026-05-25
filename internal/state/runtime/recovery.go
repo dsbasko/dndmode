@@ -8,10 +8,22 @@ import (
 	"fmt"
 	"io/fs"
 	"log/slog"
+	"os"
 
 	"github.com/dsbasko/dndmode/internal/macos/focus"
 	"github.com/dsbasko/dndmode/internal/macos/powerassert"
 )
+
+// minValidPID is the smallest PID value RecoverFromCrash will accept for a
+// liveness probe. PID 1 is launchd (never a dndmode parent),
+// PID 0 is the kernel sentinel that POSIX `kill(0, sig)` interprets as
+// "broadcast to the caller's process group" (returns nil success →
+// spurious "alive" verdict), and negative PIDs are POSIX "kill every
+// process the caller can signal" (same DoS surface). Anything below 2
+// is rejected as suspect — a crafted or corrupted runtime.json with
+// such a value otherwise permanently bricks dndmode into exit 5 with no
+// way forward except manual `rm`.
+const minValidPID = 2
 
 // RecoverFromCrash reads runtime.json and reconciles the state left by
 // a SIGKILL'd previous dndmode. Composes Manager.Read
@@ -76,6 +88,31 @@ func RecoverFromCrash(
 			log.Warn("recovery: best-effort runtime.json remove failed",
 				slog.String("path", mgr.Path()),
 				slog.Any("err", relErr))
+		}
+		return nil
+	}
+
+	// validate snap.PID before passing it to live.IsAlive. The
+	// production kernLiveChecker uses kill(pid, 0) which has pathological
+	// semantics for pid<=0 (process-group broadcast / "kill every process
+	// I can") and for pid==os.Getpid() of the recovering process (trivially
+	// "alive"). All three cases force exit code 5 every launch — a
+	// permanent DoS achievable by anyone able to write
+	// ~/.config/dndmode/runtime.json (or by a power-cycle during the first
+	// ever Write leaving a zero-value snapshot on disk).
+	//
+	// Treat suspect PIDs as dead: log a warn, attempt the file delete
+	// (so the next launch can recover), and continue PreFlight. We do NOT
+	// dispatch on AssertionID release / Focus deactivate because the
+	// snapshot is untrusted; the Phase 3 powerassert.CleanupOrphans
+	// fallback at Step 11 still picks up any genuine orphan IOPM assertion
+	// via the name+type+dead-PID heuristic.
+	if snap.PID < minValidPID || snap.PID == os.Getpid() {
+		log.Warn("recovery: refusing to dispatch on suspect PID; treating as dead",
+			slog.Int("pid", snap.PID),
+			slog.Int("own_pid", os.Getpid()))
+		if relErr := mgr.Release(); relErr != nil {
+			return fmt.Errorf("%w (%s): %w", ErrFileDeletePersistent, mgr.Path(), relErr)
 		}
 		return nil
 	}
