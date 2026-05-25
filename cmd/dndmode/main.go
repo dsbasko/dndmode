@@ -34,9 +34,11 @@ import (
 	"github.com/dsbasko/dndmode/internal/config"
 	"github.com/dsbasko/dndmode/internal/config/hotkey"
 	"github.com/dsbasko/dndmode/internal/macos/cocoa"
+	"github.com/dsbasko/dndmode/internal/macos/focus"
 	"github.com/dsbasko/dndmode/internal/macos/permissions"
 	"github.com/dsbasko/dndmode/internal/macos/powerassert"
 	"github.com/dsbasko/dndmode/internal/state"
+	runtimepkg "github.com/dsbasko/dndmode/internal/state/runtime"
 	"github.com/dsbasko/dndmode/internal/supervisor"
 )
 
@@ -54,8 +56,8 @@ const (
 	exitPermissionDenied    = 3 // SIGINT in polling loop
 	exitSecureInputConflict = 4 // SecureEventInput active
 	exitConcurrentInstance  = 5 // live-PID match on orphan IOPMAssertion
-	// Reserved: 6 = exitFocusSetup (Phase 5 FOC-01),
-	//           7 = exitRuntimeJSON (Phase 5 CRR-04).
+	exitFocusSetup          = 6 // Phase 5 required Shortcuts not found
+	exitRuntimeJSON         = 7 // Phase 5 cannot delete stale runtime file
 )
 
 // cancelStopper adapts context.CancelFunc to the supervisor.Stopper
@@ -90,10 +92,17 @@ func main() {
 //	 7. stdout config banner.
 //	 8. permissions.CheckPlatform — PERM-01/02; exit 2 on ErrNonArm64/ErrMacOSBelow14.
 //	 9. permissions.WaitForGrants — PERM-03/04/05 polling; ctx.Canceled → exit 3.
+//	 9.5. focus.CheckShortcuts — FOC-01 D-01..D-04; ErrShortcutsMissing → exit 6.
 //	10. permissions.IsSecureEventInputActive — PERM-06 D-15; true → exit 4.
+//	10.5. runtimepkg.RecoverFromCrash — CRR-03/04 D-09..D-12; live-PID → exit 5;
+//	      ErrFileDeletePersistent → exit 7; other → exit 2.
 //	11. powerassert.CleanupOrphans — POW-04 D-10/11/12; ErrConcurrentInstance → exit 5.
-//	12. rs.Push(state.NewMockReleaser("mock-runtime-file")) — Phase 5 заменит.
+//	12. rs.Push(runtimepkg.NewManager(...)) — Phase 5 replaces mock-runtime-file.
 //	13. powerassert.Acquire("dndmode active") — POW-01/02/03; rs.Push(assertion).
+//	13.3. runtimepkg.Manager.Write({pid, started_at, prior_focus=nil, assertion_id})
+//	      — atomic temp+rename per CONTEXT D-06.
+//	13.7. focus.Activate (warn on fail per FOC-02) + rs.Push(focus.NewReleaser(...))
+//	      — slot #4 in LIFE-06 LIFO.
 //	14. cocoa.Init — D-01 (moved DOWN after permission checks).
 //	15. cocoa.NewController + CreateWindowsForAllScreens — P2 D-09; rs.Push(controller).
 //	16. rs.Push(state.NewMockReleaser("mock-tap")) — Phase 4 заменит.
@@ -101,8 +110,8 @@ func main() {
 //	18. stdout "dndmode: active. press Ctrl-C.".
 //	19. cocoa.RunApp(ctx) → sup.Wait() → return exitOK; defer Cleanup LIFO (LIFE-06).
 //
-// LIFE-06 cleanup execution order via push-stack LIFO unwind:
-// mock-tap → controller (windows) → assertion (dndmode active) → mock-runtime-file.
+// LIFE-06 cleanup execution order via push-stack LIFO unwind (Phase 5 finalizes):
+// mock-tap → windows → "dndmode active" → focus → runtime-file.
 func run() int {
 	// --- Step 1: Parse flags (stdlib flag) ---
 	debug := flag.Bool("debug", false, "enable debug-level logging on stderr")
@@ -201,11 +210,63 @@ func run() int {
 		return exitPlatformErr
 	}
 
+	// --- Step 9.5 (Phase 5..): Shortcuts presence check ---
+	// Single source of truth for the runner — reused at Step 10.5
+	// (RecoverFromCrash) and Step 13.7 (Activate). exec.CommandContext
+	// inside the runner binds the subprocess to ctx so SIGINT during
+	// any of these calls auto-kills the shortcuts CLI child.
+	runner := focus.NewExecRunner()
+	if err := focus.CheckShortcuts(ctx, runner); err != nil {
+		if errors.Is(err, focus.ErrShortcutsMissing) {
+			fmt.Fprintln(os.Stderr,
+				"dndmode: required Shortcuts not found (need: dndmode-on, dndmode-off).\n\n"+
+					"To create them:\n"+
+					"  1. Open the Shortcuts app (⌘+Space → \"Shortcuts\").\n"+
+					"  2. New Shortcut → search \"Set Focus\" → drag in.\n"+
+					"  3. Set: Turn Do Not Disturb On Until Turned Off.\n"+
+					"  4. Save as: dndmode-on\n"+
+					"  5. Repeat steps 2-4 with \"Turn Do Not Disturb Off\", save as: dndmode-off\n\n"+
+					"Then re-run dndmode.")
+			return exitFocusSetup
+		}
+		fmt.Fprintf(os.Stderr, "dndmode: shortcuts check failed: %v. Inspect /usr/bin/shortcuts availability and re-run.\n", err)
+		return exitPlatformErr
+	}
+
 	// --- Step 10 (Phase 3): SecureEventInput check (exit 4) ---
 	if permissions.IsSecureEventInputActive() {
 		fmt.Fprintln(os.Stderr,
 			"dndmode: Secure Event Input is active (typically Terminal sudo prompt, password fields, or 1Password). Close those, then re-run.")
 		return exitSecureInputConflict
+	}
+
+	// --- Step 10.5 (Phase 5..): Crash recovery from runtime.json ---
+	// Reads ~/.config/dndmode/runtime.json (if present), validates liveness
+	// via POSIX kill(pid, 0) (same seam as Phase 3 NewKernLiveChecker), and
+	// on dead PID explicitly releases the stored assertion_id (precise —
+	// not heuristic). BEFORE powerassert.CleanupOrphans so the
+	// explicit-id path wins; CleanupOrphans remains as fallback for crashes
+	// BEFORE Manager.Write fired (window between Step 13 and Step 13.3).
+	mgr := runtimepkg.NewManager(filepath.Join(home, ".config/dndmode/runtime.json"), log)
+	if err := runtimepkg.RecoverFromCrash(ctx, mgr,
+		powerassert.NewCgoReleaser(),
+		runner,
+		powerassert.NewKernLiveChecker(),
+		log,
+	); err != nil {
+		if errors.Is(err, runtimepkg.ErrConcurrentInstance) {
+			fmt.Fprintf(os.Stderr,
+				"dndmode: %v. Send SIGTERM or wait for its exit, then re-run.\n", err)
+			return exitConcurrentInstance
+		}
+		if errors.Is(err, runtimepkg.ErrFileDeletePersistent) {
+			fmt.Fprintf(os.Stderr,
+				"dndmode: cannot delete stale runtime file (%s): %v. Fix permissions and re-run.\n",
+				mgr.Path(), err)
+			return exitRuntimeJSON
+		}
+		fmt.Fprintf(os.Stderr, "dndmode: crash recovery failed: %v\n", err)
+		return exitPlatformErr
 	}
 
 	// --- Step 11 (Phase 3): Orphan IOPMAssertion cleanup ---
@@ -229,9 +290,12 @@ func run() int {
 		return exitPlatformErr
 	}
 
-	// --- Step 12 (Phase 3 D-05): Push runtime-file mock (released LAST per LIFE-06) ---
-	// Phase 5 заменит на real runtime.Manager (CRR-01..04).
-	rs.Push(state.NewMockReleaser("mock-runtime-file"))
+	// --- Step 12 (Phase 5 replaces P3 mock-runtime-file with real Manager) ---
+	// Pushed BEFORE Manager.Write so Release is idempotent for the failure
+	// window: if powerassert.Acquire (Step 13) fails, the deferred Cleanup
+	// fires Release on a file that was never written — os.Remove on
+	// ErrNotExist returns nil. mgr was constructed at Step 10.5.
+	rs.Push(mgr)
 
 	// --- Step 13 (Phase 3): Acquire IOPMAssertion ---
 	// Push immediately after successful create per P1 push-after-create
@@ -245,6 +309,32 @@ func run() int {
 		return exitPlatformErr
 	}
 	rs.Push(assertion) // released 3rd in LIFO (between controller и runtime-mock)
+
+	// --- Step 13.3 (Phase 5): Write runtime.json with final assertion_id ---
+	// Atomic temp+rename. Records pid + UTC start time + nil PriorFocus
+	// (v1 never restores prior Focus) + the *real* assertion id
+	// from Step 13 for crash recovery in the next launch.
+	if err := mgr.Write(runtimepkg.Snapshot{
+		PID:         os.Getpid(),
+		StartedAt:   time.Now().UTC(),
+		PriorFocus:  nil,
+		AssertionID: assertion.ID(),
+	}); err != nil {
+		fmt.Fprintf(os.Stderr, "dndmode: write runtime.json failed: %v. Inspect %s and re-run.\n", err, mgr.Path())
+		return exitPlatformErr
+	}
+
+	// --- Step 13.7 (Phase 5): Activate Focus + push deactivate Releaser ---
+	// Activate is best-effort: on failure log a warning,
+	// do NOT block startup — the user gets DND-less mode but the rest of
+	// dndmode (overlay, awake-lock) still works.
+	// Push the Releaser regardless: deactivate must still run on Cleanup
+	// even if Activate failed (idempotent via two-layer guard; Run("dndmode-off")
+	// on an already-off Focus is a no-op).
+	if err := focus.Activate(ctx, runner); err != nil {
+		log.Warn("focus activate failed", slog.Any("err", err))
+	}
+	rs.Push(focus.NewReleaser(runner, log))
 
 	// --- Step 14 (Phase 3): cocoa.Init — moved DOWN after permission checks ---
 	// Rationale: TCC permission is binary-identity bound, not
@@ -299,7 +389,7 @@ func run() int {
 	sup.Wait()
 
 	// Return exitOK; defer chain runs (Cleanup LIFO + stdout cleanup banner).
-	// LIFO release order: mock-tap → controller (windows) → assertion
-	// (dndmode active) → mock-runtime-file (LIFE-06).
+	// LIFO release order (Phase 5 finalizes):
+	// mock-tap → windows → "dndmode active" → focus → runtime-file.
 	return exitOK
 }
