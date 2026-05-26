@@ -260,9 +260,16 @@ func run() int {
 			return exitConcurrentInstance
 		}
 		if errors.Is(err, runtimepkg.ErrFileDeletePersistent) {
+			//: concrete user action — `rm -f <path>`
+			// instead of the vague "Fix permissions and re-run". The
+			// user-facing template names the absolute path twice on
+			// purpose: once in the diagnostic, once in the rm command,
+			// so copy-paste from terminal selection is unambiguous.
 			fmt.Fprintf(os.Stderr,
-				"dndmode: cannot delete stale runtime file (%s): %v. Fix permissions and re-run.\n",
-				mgr.Path(), err)
+				"dndmode: cannot delete stale runtime file (%s): %v.\n"+
+					"Run: rm -f %s\n"+
+					"Then re-run dndmode.\n",
+				mgr.Path(), err, mgr.Path())
 			return exitRuntimeJSON
 		}
 		fmt.Fprintf(os.Stderr, "dndmode: crash recovery failed: %v\n", err)

@@ -34,11 +34,14 @@ var ErrConcurrentInstance = errors.New("another dndmode instance is holding the 
 // ErrFileDeletePersistent is returned by RecoverFromCrash
 // when `os.Remove(runtime.json)` fails with an error that is NOT
 // `fs.ErrNotExist`. main.go dispatches via errors.Is and
-// maps to exit code 7 (`exitFileDeletePersistent`), printing a stderr
-// template that includes the absolute path (Manager.Path()) and a
-// suggestion to manually `rm` the file — per CONTEXT D-12, this is a
-// non-recoverable filesystem condition (mounted read-only, ACL deny,
-// disk full preventing journal commit) and the user must intervene.
+// maps to exit code 7. The user-facing stderr template names the
+// absolute path twice (once in the diagnostic, once in the
+// concrete `rm -f <path>` recovery command) per the design notes, so the
+// user can copy-paste the action straight from the terminal selection.
+// This is a non-recoverable filesystem condition (mounted read-only,
+// ACL deny, disk full preventing journal commit) and the user must
+// intervene — but the rendered command makes that intervention a
+// one-line operation rather than a Google search.
 //
 // Disposition: rare. The expected case is that os.Remove succeeds or
 // returns ErrNotExist (treated as success — release-before-write
