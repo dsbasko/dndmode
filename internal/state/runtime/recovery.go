@@ -43,6 +43,17 @@ const minValidPID = 2
 // fallback than exit 5.
 const stalePIDWindow = 24 * time.Hour
 
+// recoveryFocusTimeout bounds the best-effort `shortcuts run dndmode-off`
+// subprocess used during recovery. Recovery runs on a FRESH
+// ctx (not the caller's ctx) for the same reason focus.Releaser.Release
+// builds a fresh ctx in the Cleanup chain: SIGINT arriving during
+// PreFlight cancels the caller's ctx, and exec.CommandContext SIGKILLs
+// the subprocess before it can call the Focus framework — leaving stale
+// Focus On state from the previous crashed run. 5s mirrors
+// focus.Releaser.timeout: Apple's shortcuts CLI usually returns under
+// 1s; 5s gives generous headroom while keeping recovery time-bounded.
+const recoveryFocusTimeout = 5 * time.Second
+
 // RecoverFromCrash reads runtime.json and reconciles the state left by
 // a SIGKILL'd previous dndmode. Composes Manager.Read
 // Phase 3 powerassert seams (AssertionReleaser, LiveChecker) + plan
@@ -82,8 +93,15 @@ const stalePIDWindow = 24 * time.Hour
 //
 // Logger fallback: nil → slog.Default() (mirrors CleanupOrphans /
 // powerassert.Acquire convention).
+//
+// ctx is retained in the signature for future caller-cancellation
+// short-circuits (e.g. SIGINT while we're mid-Read of a large file on
+// a slow disk) but is NOT propagated to the Focus deactivate subprocess
+// see recoveryFocusTimeout for rationale. The underscore
+// is conventional Go for "intentionally unused parameter held for API
+// stability".
 func RecoverFromCrash(
-	ctx context.Context,
+	_ context.Context,
 	mgr *Manager,
 	rel powerassert.AssertionReleaser,
 	runner focus.ShortcutsRunner,
@@ -176,9 +194,17 @@ func RecoverFromCrash(
 			slog.Int("pid", snap.PID))
 	}
 
-	if err := runner.Run(ctx, "dndmode-off"); err != nil {
+	// build a FRESH ctx for runner.Run — the caller's ctx may
+	// already be cancelled if SIGINT arrived during PreFlight, and a
+	// cancelled ctx SIGKILLs the shortcuts subprocess before it can call
+	// into the Focus framework, leaving stale Focus On state. Mirrors
+	// focus.Releaser.Release (releaser.go:112) which addresses the
+	// symmetric Cleanup-time scenario for the same reason.
+	focusCtx, cancel := context.WithTimeout(context.Background(), recoveryFocusTimeout)
+	if err := runner.Run(focusCtx, "dndmode-off"); err != nil {
 		log.Warn("recovery: focus deactivate failed", slog.Any("err", err))
 	}
+	cancel()
 
 	if err := mgr.Release(); err != nil {
 		// Strict: file MUST be deletable. Wrap as ErrFileDeletePersistent
