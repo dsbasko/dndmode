@@ -210,7 +210,10 @@ func RecoverFromCrash(
 		// Strict: file MUST be deletable. Wrap as ErrFileDeletePersistent
 		// so main.go can errors.Is → exit code 7 → stderr template that
 		// names the absolute path and suggests `rm -f <path>`.
-		return fmt.Errorf("%w (%s): %v", ErrFileDeletePersistent, mgr.Path(), err)
+		// %w for both wrap operands (Go 1.20+ multi-%w) so callers
+		// can errors.Is(err, fs.ErrPermission) etc. to discriminate the
+		// underlying filesystem failure subtype.
+		return fmt.Errorf("%w (%s): %w", ErrFileDeletePersistent, mgr.Path(), err)
 	}
 
 	return nil
