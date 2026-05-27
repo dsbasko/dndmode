@@ -460,4 +460,11 @@ func TestRecoverFromCrash_DeadPID_FileDeleteFail_ErrFileDeletePersistent(t *test
 		t.Errorf("err message %q does not include path %q for the user-facing stderr template",
 			err.Error(), rd.tmpPath)
 	}
+	// regression: underlying fs.ErrPermission must be preserved via
+	// multi-%w wrap so callers can discriminate the failure subtype with
+	// errors.Is. chmod 0o500 on the parent dir induces EACCES → maps to
+	// fs.ErrPermission in Go's stdlib error tree.
+	if !errors.Is(err, fs.ErrPermission) {
+		t.Errorf("errors.Is(err, fs.ErrPermission) = false; want true (inner cause must be preserved via %%w; err=%v)", err)
+	}
 }
