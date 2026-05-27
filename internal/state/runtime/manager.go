@@ -80,6 +80,20 @@ func (m *Manager) Name() string { return "runtime-file" }
 //     for the first Write) intact; no partial observable state.
 //  5. On any error during temp-file Write or Rename: best-effort
 //     os.Remove of the temp file, then return the wrapped error.
+//
+// the temp-file is in the same directory as the final path
+// (`<path>.tmp.<pid>`), so APFS's same-volume rename invariant ensures
+// EXDEV (cross-filesystem error 18) cannot normally occur. The defensive
+// `_ = os.Remove(tmpPath)` on rename failure still matters in two edge
+// cases: (a) the user symlinks `~/.config/dndmode/` to a different
+// volume between Phase 1 config.Load and this call, in which case
+// stdlib's os.Rename surfaces EXDEV without copy-then-remove fallback;
+// (b) partial-create / permission-denied failures where the temp file
+// landed but the rename was rejected (mount remounted read-only mid-
+// write, ACL deny on the destination, disk full preventing the
+// directory-entry update). Without this cleanup, per-PID-suffixed temp
+// files would accumulate in the user's config dir on the rare cross-
+// volume setup.
 func (m *Manager) Write(s Snapshot) error {
 	dir := filepath.Dir(m.path)
 	// 0o700: user-private — matches configDirPerm from Phase 1
@@ -94,10 +108,20 @@ func (m *Manager) Write(s Snapshot) error {
 	}
 	tmpPath := m.path + ".tmp." + strconv.Itoa(os.Getpid())
 	if err := os.WriteFile(tmpPath, data, 0o600); err != nil {
+		// Best-effort cleanup of any partial temp-file artifact (the
+		// WriteFile pattern is open+write+close; on close-failure a
+		// zero-or-partial file may remain). defense-in-depth.
+		_ = os.Remove(tmpPath)
 		return fmt.Errorf("write runtime temp file %q: %w", tmpPath, err)
 	}
 	if err := os.Rename(tmpPath, m.path); err != nil {
-		// Best-effort cleanup of the temp file on rename failure.
+		// best-effort cleanup of the temp file on rename
+		// failure. Critical on cross-volume EXDEV (stdlib does NOT
+		// auto-fallback to copy-then-remove, unlike `cp` / `mv(1)`)
+		// and on partial-create / permission-denied failures (e.g.
+		// mount remounted read-only mid-write). Without this, the
+		// `<path>.tmp.<pid>` file would accumulate forever in the
+		// user's ~/.config/dndmode/ directory.
 		_ = os.Remove(tmpPath)
 		return fmt.Errorf("rename runtime temp file %q -> %q: %w", tmpPath, m.path, err)
 	}
