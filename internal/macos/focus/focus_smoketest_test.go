@@ -25,23 +25,34 @@ package focus_test
 
 import (
 	"context"
+	cryptorand "crypto/rand"
 	"encoding/hex"
-	"math/rand"
 	"os"
 	"os/exec"
+	"strconv"
 	"testing"
 	"time"
 
 	"github.com/dsbasko/dndmode/internal/macos/focus"
 )
 
-// randHex returns 8 lowercase hex characters derived from the given
-// random source. Used to build a name that is statistically guaranteed
-// to NOT exist in the user's Shortcuts library, so the smoke test does
-// not depend on a specific library state.
-func randHex(rng *rand.Rand) string {
+// randHex returns 8 lowercase hex characters derived from a crypto/rand
+// source. The previous implementation seeded math/rand from
+// time.Now().UnixNano() which collides on two parallel CI runs sharing
+// the same nanosecond clock reading — fine for the current smoke test
+// (it asserts nothing) but flaky if anyone later promotes the synthetic
+// name to a stricter assertion.
+//
+// crypto/rand.Read is fail-safe on darwin (backed by /dev/urandom);
+// the documented fallback path is a wall-clock nanosecond reading
+// stringified to base16 — which is the math/rand-equivalent — kept here
+// purely as a belt-and-suspenders measure for the impossible case where
+// /dev/urandom returns an error.
+func randHex() string {
 	var buf [4]byte
-	_, _ = rng.Read(buf[:])
+	if _, err := cryptorand.Read(buf[:]); err != nil {
+		return strconv.FormatInt(time.Now().UnixNano(), 16)
+	}
 	return hex.EncodeToString(buf[:])
 }
 
@@ -78,8 +89,7 @@ func TestShortcuts_RunMissing_ExitCode_Smoke(t *testing.T) {
 	if _, err := exec.LookPath("shortcuts"); err != nil {
 		t.Skipf("shortcuts CLI not available: %v", err)
 	}
-	rng := rand.New(rand.NewSource(time.Now().UnixNano()))
-	name := "nonexistent-dndmode-" + randHex(rng)
+	name := "nonexistent-dndmode-" + randHex()
 	cmd := exec.Command("shortcuts", "run", name)
 	_ = cmd.Run()
 	t.Logf("shortcuts run %q exit code: %d (informational; document in design notes)",
