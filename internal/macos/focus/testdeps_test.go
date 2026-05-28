@@ -64,16 +64,28 @@ type fakeRunner struct {
 	runFn  func(context.Context, string) error
 }
 
-// List implements focus.ShortcutsRunner.
+// List implements focus.ShortcutsRunner. Honors ctx-cancellation
+// before invoking the closure — production exec.CommandContext
+// behaves the same way: a pre-cancelled ctx makes List return ctx.Err()
+// without spawning a subprocess.
 func (f *fakeRunner) List(ctx context.Context) ([]string, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	if f.listFn == nil {
 		return nil, nil
 	}
 	return f.listFn(ctx)
 }
 
-// Run implements focus.ShortcutsRunner.
+// Run implements focus.ShortcutsRunner. Honors ctx-cancellation
+// before invoking the closure — production exec.CommandContext
+// SIGKILLs a subprocess spawned with a pre-cancelled ctx, so the fake
+// must mirror that contract for tests that exercise cancellation paths.
 func (f *fakeRunner) Run(ctx context.Context, name string) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	if f.runFn == nil {
 		return nil
 	}
