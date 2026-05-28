@@ -183,7 +183,19 @@ func RecoverFromCrash(
 	}
 
 	// Dead-PID branch: three best-effort steps + one strict.
-	if err := rel.Release(snap.AssertionID); err != nil {
+	// skip the IOPMAssertionRelease call when AssertionID == 0
+	// either Manager.Write never landed (crashed between
+	// powerassert.Acquire and Manager.Write) or runtime.json is corrupted
+	// to a zero-value Snapshot. In both cases the Phase 3
+	// CleanupOrphans heuristic (name+type+dead-PID) at Step 11 in main.go
+	// is the correct path for any genuine orphan assertion. Calling
+	// IOPMAssertionRelease(0) is wasted work at best ("recovery: released
+	// orphan assertion id=0" is misleading — no orphan was actually
+	// released) and IOKit log spam at worst.
+	if snap.AssertionID == 0 {
+		log.Warn("recovery: no assertion id stored, skipping IOPMAssertion release (Phase 3 CleanupOrphans is the fallback)",
+			slog.Int("pid", snap.PID))
+	} else if err := rel.Release(snap.AssertionID); err != nil {
 		log.Warn("recovery: release stored assertion failed",
 			slog.Int("id", int(snap.AssertionID)),
 			slog.Int("pid", snap.PID),

@@ -285,6 +285,42 @@ func TestRecoverFromCrash_DeadPID_DeletesFile(t *testing.T) {
 	}
 }
 
+// TestRecoverFromCrash_DeadPID_ZeroAssertionID_SkipsRelease
+// regression. snapshot has dead PID but AssertionID == 0 (either
+// Manager.Write never landed, or runtime.json is corrupted to a zero
+// snapshot field). Recovery MUST skip rel.Release(0) — calling
+// IOPMAssertionRelease(0) is wasted work (misleading "released orphan
+// id=0" log line) and IOKit log noise. Phase 3 CleanupOrphans at
+// Step 11 handles any genuine orphan via name+type+dead-PID heuristic.
+// mockRel MUST NOT be invoked (gomock fails on unexpected calls). The
+// Focus deactivate + file delete steps still run.
+func TestRecoverFromCrash_DeadPID_ZeroAssertionID_SkipsRelease(t *testing.T) {
+	rd := newRecoveryDeps(t)
+	const deadPID = 99999
+	writeSnapshot(t, rd.mgr, runtime.Snapshot{
+		PID:         deadPID,
+		StartedAt:   time.Now().UTC().Add(-1 * time.Minute),
+		AssertionID: 0, // explicit zero — the trigger.
+	})
+
+	gomock.InOrder(
+		rd.mockLive.EXPECT().IsAlive(deadPID).Return(false),
+		// rd.mockRel.EXPECT().Release intentionally NOT registered.
+		rd.mockRunner.EXPECT().Run(gomock.Any(), "dndmode-off").Return(nil),
+	)
+
+	ctx := context.Background()
+	if err := runtime.RecoverFromCrash(ctx, rd.mgr, rd.mockRel, rd.mockRunner, rd.mockLive, rd.log); err != nil {
+		t.Fatalf("RecoverFromCrash returned %v; want nil", err)
+	}
+	if !strings.Contains(rd.logBuf.String(), "no assertion id stored") {
+		t.Errorf("log buffer missing 'no assertion id stored' warn; got:\n%s", rd.logBuf.String())
+	}
+	if _, err := os.Stat(rd.tmpPath); !errors.Is(err, fs.ErrNotExist) {
+		t.Errorf("file not removed after zero-AssertionID recovery: stat err = %v", err)
+	}
+}
+
 // TestRecoverFromCrash_DeadPID_AssertionReleaseFail_WarnContinue —
 // validation map ID 5-05-09. AssertionReleaser.Release returns an
 // error: log a warn and CONTINUE (best-effort; kernel auto-reaps on
