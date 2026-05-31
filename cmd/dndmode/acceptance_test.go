@@ -154,7 +154,7 @@ func TestAcceptance_DefaultConfigCreatedOnMissing(t *testing.T) {
 			t.Skip("SecureEventInput active on host; close it and re-run")
 		case strings.Contains(stderrSnap, "required Shortcuts not found"):
 			t.Skip("dndmode-on / dndmode-off Shortcuts missing (Phase 5 PreFlight gate); create them and re-run")
-		case strings.Contains(stderrSnap, "another instance is holding"):
+		case strings.Contains(stderrSnap, "another instance is holding") || strings.Contains(stderrSnap, "another instance is already active"):
 			t.Skip("another dndmode instance is holding the awake-lock; SIGTERM it and re-run")
 		}
 		t.Fatalf("did not see active banner in stdout within 10s; got:\n%s\nstderr:\n%s", stdoutSnap, stderrSnap)
@@ -211,7 +211,7 @@ func TestAcceptance_SIGINT_ExitZeroWithCleanupBanner(t *testing.T) {
 			t.Skip("SecureEventInput active on host; close it and re-run")
 		case strings.Contains(stderrSnap, "required Shortcuts not found"):
 			t.Skip("dndmode-on / dndmode-off Shortcuts missing (Phase 5 PreFlight gate); create them and re-run")
-		case strings.Contains(stderrSnap, "another instance is holding"):
+		case strings.Contains(stderrSnap, "another instance is holding") || strings.Contains(stderrSnap, "another instance is already active"):
 			t.Skip("another dndmode instance is holding the awake-lock; SIGTERM it and re-run")
 		}
 		t.Fatalf("did not see active banner: stdout=%s stderr=%s", stdoutSnap, stderrSnap)
@@ -251,7 +251,7 @@ func TestAcceptance_DoubleSIGINT_NoOp(t *testing.T) {
 			t.Skip("SecureEventInput active on host; close it and re-run")
 		case strings.Contains(stderrSnap, "required Shortcuts not found"):
 			t.Skip("dndmode-on / dndmode-off Shortcuts missing (Phase 5 PreFlight gate); create them and re-run")
-		case strings.Contains(stderrSnap, "another instance is holding"):
+		case strings.Contains(stderrSnap, "another instance is holding") || strings.Contains(stderrSnap, "another instance is already active"):
 			t.Skip("another dndmode instance is holding the awake-lock; SIGTERM it and re-run")
 		}
 		t.Fatalf("did not see active banner: stdout=%s stderr=%s", stdoutSnap, stderrSnap)
@@ -391,7 +391,7 @@ func TestAcceptance_LIFE06_PushOrder(t *testing.T) {
 			t.Skip("SecureEventInput active on host; close it and re-run")
 		case strings.Contains(stderrSnap, "required Shortcuts not found"):
 			t.Skip("dndmode-on / dndmode-off Shortcuts missing; create them in Shortcuts.app and re-run")
-		case strings.Contains(stderrSnap, "another instance is holding"):
+		case strings.Contains(stderrSnap, "another instance is holding") || strings.Contains(stderrSnap, "another instance is already active"):
 			t.Skip("another dndmode instance is holding the awake-lock; SIGTERM it and re-run")
 		}
 		t.Fatalf("did not see active banner; stdout:\n%s\nstderr:\n%s", stdoutSnap, stderrSnap)
@@ -464,7 +464,7 @@ func TestAcceptance_Phase2_OverlayBootstrapsAndShutsDown(t *testing.T) {
 			t.Skip("SecureEventInput active on host; close it and re-run")
 		case strings.Contains(stderrSnap, "required Shortcuts not found"):
 			t.Skip("dndmode-on / dndmode-off Shortcuts missing (Phase 5 PreFlight gate); create them and re-run")
-		case strings.Contains(stderrSnap, "another instance is holding"):
+		case strings.Contains(stderrSnap, "another instance is holding") || strings.Contains(stderrSnap, "another instance is already active"):
 			t.Skip("another dndmode instance is holding the awake-lock; SIGTERM it and re-run")
 		}
 		t.Fatalf("did not see active banner; stderr:\n%s", stderrSnap)
@@ -523,7 +523,7 @@ func TestAcceptance_Phase3_PreFlight_HappyPath(t *testing.T) {
 			t.Skip("no displays attached; Phase 3 happy-path requires GUI session")
 		case strings.Contains(stderrSnap, "Secure Event Input"):
 			t.Skip("SecureEventInput active on host; close it and re-run")
-		case strings.Contains(stderrSnap, "another instance is holding"):
+		case strings.Contains(stderrSnap, "another instance is holding") || strings.Contains(stderrSnap, "another instance is already active"):
 			t.Skip("another dndmode instance is holding the awake-lock; SIGTERM it and re-run")
 		case strings.Contains(stderrSnap, "required Shortcuts not found"):
 			t.Skip("dndmode-on / dndmode-off Shortcuts missing (Phase 5 PreFlight gate); create them and re-run")
@@ -648,7 +648,7 @@ func TestAcceptance_CrashScenario(t *testing.T) {
 			t.Skip("SecureEventInput active on host; close it and re-run")
 		case strings.Contains(stderrSnap, "required Shortcuts not found"):
 			t.Skip("dndmode-on / dndmode-off Shortcuts missing; create them in Shortcuts.app and re-run")
-		case strings.Contains(stderrSnap, "another instance is holding"):
+		case strings.Contains(stderrSnap, "another instance is holding") || strings.Contains(stderrSnap, "another instance is already active"):
 			t.Skip("another dndmode instance is holding the awake-lock; SIGTERM it and re-run")
 		}
 		t.Fatalf("A did not activate: stdout=%s stderr=%s", stdoutSnap, stderrSnap)
@@ -712,6 +712,64 @@ func TestAcceptance_CrashScenario(t *testing.T) {
 	}
 	if _, err := os.Stat(runtimeJSON); !os.IsNotExist(err) {
 		t.Errorf("runtime.json still exists after B clean exit (Manager.Release did not delete): %v", err)
+	}
+}
+
+// TestAcceptance_LIFE12_Stderr is a static-grep regression test that asserts
+// the stderr template in cmd/dndmode/main.go Step 5c stays in sync
+// with the LOCKED the design notes wording. If a future commit alters the
+// wording (e.g., translates to Russian, drops the PID interpolation, drops
+// the actionable next-step), this test fails — protects user-facing
+// stability across rebuilds.
+//
+// Mirror of TestAcceptance_Phase5_NoMockRuntimeFile_Regression and
+// TestAcceptance_Phase3_NoMockAssertion_Regression patterns — both use
+// static file-grep against main.go to lock down architectural invariants.
+func TestAcceptance_LIFE12_Stderr(t *testing.T) {
+	src, err := os.ReadFile("main.go")
+	if err != nil {
+		t.Fatalf("read main.go: %v", err)
+	}
+	body := string(src)
+
+	// Invariant 1: Step 5c block must exist and be commented as such.
+	if !strings.Contains(body, "Step 5c (Phase 6)") {
+		t.Errorf("main.go missing 'Step 5c (Phase 6)' comment marker; wire-up may have regressed")
+	}
+
+	// Invariant 2: IsLiveInstance must be invoked.
+	if !strings.Contains(body, "runtimepkg.IsLiveInstance(") {
+		t.Errorf("main.go missing runtimepkg.IsLiveInstance call; helper not wired")
+	}
+
+	// Invariant 3: stderr template must match the design notes LOCKED wording.
+	const wantTemplate = "dndmode: another instance is already active (PID=%d). Send SIGTERM or wait for its exit, then re-run."
+	if !strings.Contains(body, wantTemplate) {
+		t.Errorf("main.go missing stderr template:\n want: %q\n (found in main.go: %v)", wantTemplate, strings.Contains(body, "another instance is already active"))
+	}
+
+	// Invariant 4: alive=true path must return exitConcurrentInstance (= 5),
+	// reusing the existing constant — no new exit code.
+	idx := strings.Index(body, "another instance is already active (PID=%d)")
+	if idx < 0 {
+		t.Fatalf("template not found (covered by Invariant 3)")
+	}
+	tail := body[idx:]
+	if len(tail) > 400 {
+		tail = tail[:400]
+	}
+	if !strings.Contains(tail, "return exitConcurrentInstance") {
+		t.Errorf("alive-path does not return exitConcurrentInstance (must reuse exit code 5, not introduce new code)")
+	}
+
+	// Invariant 5: read-failure path must log warn + continue (NOT exit).
+	if !strings.Contains(body, `log.Warn(" pre-check inconclusive"`) {
+		t.Errorf("read-failure path does not log warn ' pre-check inconclusive' (must be warn-not-fatal per the design notes)")
+	}
+
+	// Invariant 6: Phase 4 boundary preserved — mock-tap still pushed (CONTEXT D-11).
+	if !strings.Contains(body, `rs.Push(state.NewMockReleaser("mock-tap"))`) {
+		t.Errorf("Phase 4 boundary regressed — mock-tap push removed; LIFE-06 5-element LIFO chain broken")
 	}
 }
 

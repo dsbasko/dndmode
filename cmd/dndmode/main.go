@@ -81,34 +81,38 @@ func main() {
 //
 // Step ordering (Phase 3 —..,; verbatim per the design notes):
 //
-//	 1. Parse --debug flag (P1 D-03).
-//	 2. slog logger to stderr (P1 D-01/D-02).
-//	 3. signal.NotifyContext(ctx, SIGINT, SIGTERM, SIGHUP) (D-04 — replaces the
-//	    plain-context cancel pattern used in Phase 2; SIGINT/SIGTERM/SIGHUP now
-//	    flow into ctx.Done directly).
-//	 4. RestoreState + defer Cleanup + stdout "cleaning up… done." banner (P1).
-//	 5. Resolve home dir.
-//	 6. Load config (CFG-01..03) + parse hotkey (CFG-04/05).
-//	 7. stdout config banner.
-//	 8. permissions.CheckPlatform — PERM-01/02; exit 2 on ErrNonArm64/ErrMacOSBelow14.
-//	 9. permissions.WaitForGrants — PERM-03/04/05 polling; ctx.Canceled → exit 3.
-//	 9.5. focus.CheckShortcuts — FOC-01 D-01..D-04; ErrShortcutsMissing → exit 6.
-//	10. permissions.IsSecureEventInputActive — PERM-06 D-15; true → exit 4.
-//	10.5. runtimepkg.RecoverFromCrash — CRR-03/04 D-09..D-12; live-PID → exit 5;
-//	      ErrFileDeletePersistent → exit 7; other → exit 2.
-//	11. powerassert.CleanupOrphans — POW-04 D-10/11/12; ErrConcurrentInstance → exit 5.
-//	12. rs.Push(runtimepkg.NewManager(...)) — Phase 5 replaces mock-runtime-file.
-//	13. powerassert.Acquire("dndmode active") — POW-01/02/03; rs.Push(assertion).
-//	13.3. runtimepkg.Manager.Write({pid, started_at, prior_focus=nil, assertion_id})
-//	      — atomic temp+rename per CONTEXT D-06.
-//	13.7. focus.Activate (warn on fail per FOC-02) + rs.Push(focus.NewReleaser(...))
-//	      — slot #4 in LIFE-06 LIFO.
-//	14. cocoa.Init — D-01 (moved DOWN after permission checks).
-//	15. cocoa.NewController + CreateWindowsForAllScreens — P2 D-09; rs.Push(controller).
-//	16. rs.Push(state.NewMockReleaser("mock-tap")) — Phase 4 заменит.
-//	17. supervisor.New(log, stopper) + supervisor.Start(ctx).
-//	18. stdout "dndmode: active. press Ctrl-C.".
-//	19. cocoa.RunApp(ctx) → sup.Wait() → return exitOK; defer Cleanup LIFO (LIFE-06).
+// 1. Parse --debug flag (P1).
+// 2. slog logger to stderr (P1 /).
+// 3. signal.NotifyContext(ctx, SIGINT, SIGTERM, SIGHUP) (replaces the
+//     plain-context cancel pattern used in Phase 2; SIGINT/SIGTERM/SIGHUP now
+//     flow into ctx.Done directly).
+//  4. RestoreState + defer Cleanup + stdout "cleaning up… done." banner (P1).
+//  5. Resolve home dir.
+// 6. Load config + parse hotkey.
+//     6.5. runtimepkg.IsLiveInstance (Phase 6 LIFE-12) — cold-start single-instance
+//     gate; alive peer → stderr template + exit 5 (mirrors Step 10.5
+//     ErrConcurrentInstance dispatch). Constructed runtimeMgr is reused
+// at Steps 10.5, 12, 13.3 (single Manager invariant per Phase 5).
+//  7. stdout config banner.
+// 8. permissions.CheckPlatform —; exit 2 on ErrNonArm64/ErrMacOSBelow14.
+// 9. permissions.WaitForGrants — polling; ctx.Canceled → exit 3.
+// 9.5. focus.CheckShortcuts —..; ErrShortcutsMissing → exit 6.
+// 10. permissions.IsSecureEventInputActive —; true → exit 4.
+// 10.5. runtimepkg.RecoverFromCrash —..; live-PID → exit 5;
+//     ErrFileDeletePersistent → exit 7; other → exit 2.
+// 11. powerassert.CleanupOrphans —; ErrConcurrentInstance → exit 5.
+//  12. rs.Push(runtimepkg.NewManager(...)) — Phase 5 replaces mock-runtime-file.
+// 13. powerassert.Acquire("dndmode active") —; rs.Push(assertion).
+//     13.3. runtimepkg.Manager.Write({pid, started_at, prior_focus=nil, assertion_id})
+// atomic temp+rename per the design notes.
+// 13.7. focus.Activate (warn on fail per) + rs.Push(focus.NewReleaser(...))
+// slot #4 in LIFO.
+// 14. cocoa.Init — (moved DOWN after permission checks).
+// 15. cocoa.NewController CreateWindowsForAllScreens — P2; rs.Push(controller).
+//  16. rs.Push(state.NewMockReleaser("mock-tap")) — Phase 4 заменит.
+//  17. supervisor.New(log, stopper) + supervisor.Start(ctx).
+//  18. stdout "dndmode: active. press Ctrl-C.".
+//  19. cocoa.RunApp(ctx) → sup.Wait() → return exitOK; defer Cleanup LIFO (LIFE-06).
 //
 // LIFE-06 cleanup execution order via push-stack LIFO unwind (Phase 5 finalizes):
 // mock-tap → windows → "dndmode active" → focus → runtime-file.
@@ -155,6 +159,31 @@ func run() int {
 	if _, err := hotkey.Parse(cfg.Hotkey); err != nil {
 		fmt.Fprintf(os.Stderr, "dndmode: invalid hotkey %q: %v. Fix the hotkey grammar in ~/.config/dndmode/config.yml.\n", cfg.Hotkey, err)
 		return exitConfigErr
+	}
+
+	// --- Step 5c (Phase 6): single-instance enforcement ---
+	// Cold-start check: bail fast if another live dndmode instance owns
+	// runtime.json — BEFORE platform check, TCC prompts, IOKit acquires.
+	// Distinct from Step 10.5 RecoverFromCrash (which handles dead-PID
+	// resource release + sentinel-error dispatch); LIFE-12 is the LIVE-peer
+	// fail-fast gate returning a plain (alive bool, pid int, err error)
+	// triple — no errors.Is sentinel dispatch (per CONTEXT D-09 / RESEARCH
+	// Pattern S4 deviation).
+	//
+	// The Manager constructed here is reused at Steps 10.5 + 12 + 13.3
+	// (no double-construction — Phase 5 D-08 single-instance discipline).
+	runtimeMgr := runtimepkg.NewManager(filepath.Join(home, ".config/dndmode/runtime.json"), log)
+	if alive, peerPID, err := runtimepkg.IsLiveInstance(runtimeMgr, powerassert.NewKernLiveChecker(), log); err != nil {
+		// Read failure (corrupted file, permission denied) — not fatal here.
+		// Step 10.5 RecoverFromCrash will surface persistent IO/permission
+		// errors via ErrFileDeletePersistent → exit 7. stays
+		// warn-not-fatal because corrupted state is recovery's domain.
+		log.Warn("pre-check inconclusive", slog.Any("err", err))
+	} else if alive {
+		fmt.Fprintf(os.Stderr,
+			"dndmode: another instance is already active (PID=%d). Send SIGTERM or wait for its exit, then re-run.\n",
+			peerPID)
+		return exitConcurrentInstance
 	}
 
 	// --- Step 6: Print banner (stdout-only) ---
@@ -247,8 +276,9 @@ func run() int {
 	// not heuristic). BEFORE powerassert.CleanupOrphans so the
 	// explicit-id path wins; CleanupOrphans remains as fallback for crashes
 	// BEFORE Manager.Write fired (window between Step 13 and Step 13.3).
-	mgr := runtimepkg.NewManager(filepath.Join(home, ".config/dndmode/runtime.json"), log)
-	if err := runtimepkg.RecoverFromCrash(ctx, mgr,
+	// (runtimeMgr was constructed at Step 5c — reused here per Phase 5 D-08
+	// single-instance discipline.)
+	if err := runtimepkg.RecoverFromCrash(ctx, runtimeMgr,
 		powerassert.NewCgoReleaser(),
 		runner,
 		powerassert.NewKernLiveChecker(),
@@ -269,7 +299,7 @@ func run() int {
 				"dndmode: cannot delete stale runtime file (%s): %v.\n"+
 					"Run: rm -f %s\n"+
 					"Then re-run dndmode.\n",
-				mgr.Path(), err, mgr.Path())
+				runtimeMgr.Path(), err, runtimeMgr.Path())
 			return exitRuntimeJSON
 		}
 		fmt.Fprintf(os.Stderr, "dndmode: crash recovery failed: %v\n", err)
@@ -301,8 +331,8 @@ func run() int {
 	// Pushed BEFORE Manager.Write so Release is idempotent for the failure
 	// window: if powerassert.Acquire (Step 13) fails, the deferred Cleanup
 	// fires Release on a file that was never written — os.Remove on
-	// ErrNotExist returns nil. mgr was constructed at Step 10.5.
-	rs.Push(mgr)
+	// ErrNotExist returns nil. runtimeMgr was constructed at Step 5c.
+	rs.Push(runtimeMgr)
 
 	// --- Step 13 (Phase 3): Acquire IOPMAssertion ---
 	// Push immediately after successful create per P1 push-after-create
@@ -321,13 +351,13 @@ func run() int {
 	// Atomic temp+rename. Records pid + UTC start time + nil PriorFocus
 	// (v1 never restores prior Focus) + the *real* assertion id
 	// from Step 13 for crash recovery in the next launch.
-	if err := mgr.Write(runtimepkg.Snapshot{
+	if err := runtimeMgr.Write(runtimepkg.Snapshot{
 		PID:         os.Getpid(),
 		StartedAt:   time.Now().UTC(),
 		PriorFocus:  nil,
 		AssertionID: assertion.ID(),
 	}); err != nil {
-		fmt.Fprintf(os.Stderr, "dndmode: write runtime.json failed: %v. Inspect %s and re-run.\n", err, mgr.Path())
+		fmt.Fprintf(os.Stderr, "dndmode: write runtime.json failed: %v. Inspect %s and re-run.\n", err, runtimeMgr.Path())
 		return exitPlatformErr
 	}
 
