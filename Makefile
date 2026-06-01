@@ -54,7 +54,11 @@ audit-net-runtime:
 	@PID=$$(pgrep -x dndmode | head -1); \
 	if [ -z "$$PID" ]; then echo "FAIL: dndmode not running (start it in another terminal first)"; exit 1; fi; \
 	echo "Checking PID $$PID for open network sockets..."; \
-	lsof -p $$PID 2>/dev/null | awk 'NR==1 || $$5 ~ /(IPv4|IPv6)/ || $$8 ~ /(TCP|UDP)/' | grep -qE "(IPv4|IPv6|TCP|UDP)" && echo "FAIL: network sockets detected" || echo "PASS: no network sockets open"
+	if lsof -p $$PID 2>/dev/null | awk 'NR==1 || $$5 ~ /(IPv4|IPv6)/ || $$8 ~ /(TCP|UDP)/' | grep -qE "(IPv4|IPv6|TCP|UDP)"; then \
+		echo "FAIL: network sockets detected"; exit 1; \
+	else \
+		echo "PASS: no network sockets open"; \
+	fi
 
 release-check:
 	@if [ -z "$(VERSION)" ]; then echo "ERROR: VERSION required (e.g., make release VERSION=1.0.0)"; exit 1; fi
