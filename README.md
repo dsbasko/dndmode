@@ -36,21 +36,36 @@ killing the long-running task and without leaving the machine wide open to a pas
 
 ## Install
 
-Two paths:
+Pick ONE install path and stay on it — mixing `go install` and `make install`
+yields two separate binaries (`~/go/bin/dndmode` and `/usr/local/bin/dndmode`)
+with different cdhashes, and TCC treats them as different apps (each needs its
+own Accessibility + Input Monitoring grant).
 
-- **Quick:** `go install github.com/dsbasko/dndmode@latest` — installs the binary
-  into `$(go env GOPATH)/bin/`. After this first install, run `make install` once
-  from a clone for stable codesign — otherwise TCC re-prompts for Accessibility +
-  Input Monitoring on every upgrade. See
-  [Troubleshooting](#troubleshooting) for the cdhash / TCC mechanics.
 - **From source (recommended for stable TCC across rebuilds):**
   ```bash
   git clone https://github.com/dsbasko/dndmode
   cd dndmode
   make install
   ```
-  This builds with ad-hoc codesign identifier `com.dsbasko.dndmode` and copies
-  the binary to `/usr/local/bin/dndmode` via `sudo cp`.
+  Builds with ad-hoc codesign identifier `com.dsbasko.dndmode` and copies the
+  binary to `/usr/local/bin/dndmode` via `sudo cp`. Subsequent
+  `git pull && make install` upgrades preserve TCC grants because the codesign
+  identifier (and therefore cdhash) is stable across rebuilds. Always invoke
+  `/usr/local/bin/dndmode` (ensure `/usr/local/bin` precedes `~/go/bin` in
+  `$PATH`).
+- **Quick (`go install`):** `go install github.com/dsbasko/dndmode@latest`
+  installs the binary into `$(go env GOPATH)/bin/dndmode`. Each
+  `go install ...@latest` rebuild changes the binary's cdhash → TCC re-prompts
+  for Accessibility + Input Monitoring on every upgrade. **Caveat:** running
+  `make install` from a clone afterwards does NOT fix the GOPATH-bin binary —
+  it creates a SECOND binary at `/usr/local/bin/dndmode` with its own (stable)
+  cdhash. If `~/go/bin` precedes `/usr/local/bin` in `$PATH`, you still execute
+  the unstable GOPATH copy. Workaround: either delete the GOPATH copy
+  (`rm "$(go env GOPATH)/bin/dndmode"`), put `/usr/local/bin` first in
+  `$PATH`, or always invoke `/usr/local/bin/dndmode` explicitly. After every
+  subsequent `go install ...@latest` upgrade, re-run `make install` to refresh
+  the `/usr/local/bin` copy. See [Troubleshooting](#troubleshooting) for the
+  cdhash / TCC mechanics.
 
 Note: Homebrew is **not** supported in v1 (requires Apple Developer ID; deferred to
 v2).
