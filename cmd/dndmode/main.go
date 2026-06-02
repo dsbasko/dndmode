@@ -208,10 +208,13 @@ func run() int {
 	// error) triple — no errors.Is sentinel dispatch (per the design notes
 	// the design notes deviation).
 	//
-	// The Manager constructed here is reused at Steps 10.5 + 12 + 13.3
-	// (no double-construction — Phase 5 D-08 single-instance discipline).
+	// The Manager and LiveChecker constructed here are reused at Steps 10.5
+	// 11 + 12 + 13.3 (single-instance discipline applies to all
+	// seam constructors, not just runtimeMgr — Phase 5 promise made
+	// general across powerassert.LiveChecker too).
 	runtimeMgr := runtimepkg.NewManager(filepath.Join(home, ".config/dndmode/runtime.json"), log)
-	if alive, peerPID, err := runtimepkg.IsLiveInstance(runtimeMgr, powerassert.NewKernLiveChecker(), log); err != nil {
+	liveChecker := powerassert.NewKernLiveChecker()
+	if alive, peerPID, err := runtimepkg.IsLiveInstance(runtimeMgr, liveChecker, log); err != nil {
 		// Read failure (corrupted file, permission denied) — not fatal here.
 		// Step 10.5 RecoverFromCrash will surface persistent IO/permission
 		// errors via ErrFileDeletePersistent → exit 7. stays
@@ -278,12 +281,13 @@ func run() int {
 	// not heuristic). BEFORE powerassert.CleanupOrphans so the
 	// explicit-id path wins; CleanupOrphans remains as fallback for crashes
 	// BEFORE Manager.Write fired (window between Step 13 and Step 13.3).
-	// (runtimeMgr was constructed at Step 5c — reused here per Phase 5 D-08
-	// single-instance discipline.)
+	// (runtimeMgr and liveChecker were constructed at Step 5c — reused here
+	// per Phase 5 single-instance discipline; extends this to
+	// powerassert.LiveChecker.)
 	if err := runtimepkg.RecoverFromCrash(ctx, runtimeMgr,
 		powerassert.NewCgoReleaser(),
 		runner,
-		powerassert.NewKernLiveChecker(),
+		liveChecker,
 		log,
 	); err != nil {
 		if errors.Is(err, runtimepkg.ErrConcurrentInstance) {
@@ -317,7 +321,7 @@ func run() int {
 	if err := powerassert.CleanupOrphans(
 		powerassert.NewCgoEnumerator(),
 		powerassert.NewCgoReleaser(),
-		powerassert.NewKernLiveChecker(),
+		liveChecker,
 		log,
 	); err != nil {
 		if errors.Is(err, powerassert.ErrConcurrentInstance) {
