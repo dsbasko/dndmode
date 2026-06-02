@@ -41,7 +41,7 @@ install: build
 
 audit-deps:
 	@echo "=== Static dependency audit (production binary only) ==="
-	@$(GO) list -deps ./cmd/dndmode 2>/dev/null | grep -iE "(^|/)(net|http|grpc|tls|websocket|sock)(/|$$)" | grep -v "^go " && echo "FAIL: network deps in production closure" && exit 1 || echo "PASS: no network deps in production closure"
+	@$(GO) list -deps ./cmd/dndmode 2>/dev/null | grep -iE "(^|/)(net|http|grpc|tls|websocket|sock)(/|$$)" && echo "FAIL: network deps in production closure" && exit 1 || echo "PASS: no network deps in production closure"
 
 audit-net: audit-deps
 	@echo ""
