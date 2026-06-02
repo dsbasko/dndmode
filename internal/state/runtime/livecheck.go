@@ -67,6 +67,17 @@ func IsLiveInstance(mgr *Manager, live powerassert.LiveChecker, log *slog.Logger
 	if log == nil {
 		log = slog.Default()
 	}
+	// Symmetric defensive nil guards: IsLiveInstance is on the
+	// cold-start path — a panic in production gives the user a Go stack
+	// trace instead of the stderr template. Return a wrapped
+	// error so the caller logs warn-and-continue (per Step 5c semantics)
+	// rather than aborting with a crash.
+	if mgr == nil {
+		return false, 0, fmt.Errorf("pre-check: nil manager")
+	}
+	if live == nil {
+		return false, 0, fmt.Errorf("pre-check: nil live checker")
+	}
 
 	snap, err := mgr.Read()
 	if err != nil {
