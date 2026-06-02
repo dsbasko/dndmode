@@ -89,12 +89,13 @@ func main() {
 //  4. RestoreState + defer Cleanup + stdout "cleaning up… done." banner (P1).
 //  5. Resolve home dir.
 // 6. Load config + parse hotkey.
-//     6.5. runtimepkg.IsLiveInstance (Phase 6 LIFE-12) — cold-start single-instance
-//     gate; alive peer → stderr template + exit 5 (mirrors Step 10.5
-//     ErrConcurrentInstance dispatch). Constructed runtimeMgr is reused
-// at Steps 10.5, 12, 13.3 (single Manager invariant per Phase 5).
 //  7. stdout config banner.
 // 8. permissions.CheckPlatform —; exit 2 on ErrNonArm64/ErrMacOSBelow14.
+// 8.5. runtimepkg.IsLiveInstance (Phase 6, ordering) — cold-start
+//     single-instance gate; alive peer → stderr template + exit 5 (mirrors Step
+//     10.5 ErrConcurrentInstance dispatch). Runs AFTER platform check so
+//     cross-arch / pre-Sonoma users surface exit 2 first; runtimeMgr is reused
+// at Steps 10.5, 12, 13.3 (single Manager invariant per Phase 5).
 // 9. permissions.WaitForGrants — polling; ctx.Canceled → exit 3.
 // 9.5. focus.CheckShortcuts —..; ErrShortcutsMissing → exit 6.
 // 10. permissions.IsSecureEventInputActive —; true → exit 4.
@@ -161,31 +162,6 @@ func run() int {
 		return exitConfigErr
 	}
 
-	// --- Step 5c (Phase 6): single-instance enforcement ---
-	// Cold-start check: bail fast if another live dndmode instance owns
-	// runtime.json — BEFORE platform check, TCC prompts, IOKit acquires.
-	// Distinct from Step 10.5 RecoverFromCrash (which handles dead-PID
-	// resource release + sentinel-error dispatch); LIFE-12 is the LIVE-peer
-	// fail-fast gate returning a plain (alive bool, pid int, err error)
-	// triple — no errors.Is sentinel dispatch (per CONTEXT D-09 / RESEARCH
-	// Pattern S4 deviation).
-	//
-	// The Manager constructed here is reused at Steps 10.5 + 12 + 13.3
-	// (no double-construction — Phase 5 D-08 single-instance discipline).
-	runtimeMgr := runtimepkg.NewManager(filepath.Join(home, ".config/dndmode/runtime.json"), log)
-	if alive, peerPID, err := runtimepkg.IsLiveInstance(runtimeMgr, powerassert.NewKernLiveChecker(), log); err != nil {
-		// Read failure (corrupted file, permission denied) — not fatal here.
-		// Step 10.5 RecoverFromCrash will surface persistent IO/permission
-		// errors via ErrFileDeletePersistent → exit 7. stays
-		// warn-not-fatal because corrupted state is recovery's domain.
-		log.Warn("pre-check inconclusive", slog.Any("err", err))
-	} else if alive {
-		fmt.Fprintf(os.Stderr,
-			"dndmode: another instance is already active (PID=%d). Send SIGTERM or wait for its exit, then re-run.\n",
-			peerPID)
-		return exitConcurrentInstance
-	}
-
 	// --- Step 6: Print banner (stdout-only) ---
 	if created {
 		fmt.Fprintf(os.Stdout, "dndmode: created default config at %s\n", cfgPath)
@@ -220,6 +196,32 @@ func run() int {
 			fmt.Fprintf(os.Stderr, "dndmode: platform check failed: %v. Re-run on macOS 14+ Apple Silicon.\n", err)
 		}
 		return exitPlatformErr
+	}
+
+	// --- Step 5c (Phase 6): single-instance enforcement ---
+	// Cold-start check: bail fast if another live dndmode instance owns
+	// runtime.json — AFTER platform check (Step 8 surfaces ErrNonArm64 /
+	// ErrMacOSBelow14 with exit 2 first), BEFORE TCC prompts / IOKit
+	// acquires. Distinct from Step 10.5 RecoverFromCrash (which handles
+	// dead-PID resource release + sentinel-error dispatch); is the
+	// LIVE-peer fail-fast gate returning a plain (alive bool, pid int, err
+	// error) triple — no errors.Is sentinel dispatch (per the design notes
+	// the design notes deviation).
+	//
+	// The Manager constructed here is reused at Steps 10.5 + 12 + 13.3
+	// (no double-construction — Phase 5 D-08 single-instance discipline).
+	runtimeMgr := runtimepkg.NewManager(filepath.Join(home, ".config/dndmode/runtime.json"), log)
+	if alive, peerPID, err := runtimepkg.IsLiveInstance(runtimeMgr, powerassert.NewKernLiveChecker(), log); err != nil {
+		// Read failure (corrupted file, permission denied) — not fatal here.
+		// Step 10.5 RecoverFromCrash will surface persistent IO/permission
+		// errors via ErrFileDeletePersistent → exit 7. stays
+		// warn-not-fatal because corrupted state is recovery's domain.
+		log.Warn("pre-check inconclusive", slog.Any("err", err))
+	} else if alive {
+		fmt.Fprintf(os.Stderr,
+			"dndmode: another instance is already active (PID=%d). Send SIGTERM or wait for its exit, then re-run.\n",
+			peerPID)
+		return exitConcurrentInstance
 	}
 
 	// --- Step 9 (Phase 3): WaitForGrants ---
