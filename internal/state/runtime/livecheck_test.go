@@ -162,6 +162,49 @@ func TestIsLiveInstance_Malformed_ReturnsErr(t *testing.T) {
 	}
 }
 
+// TestIsLiveInstance_NilManager_ReturnsErr validates the defensive
+// nil-pointer guard: passing a nil *Manager returns a wrapped
+// error rather than panicking on mgr.Read().
+func TestIsLiveInstance_NilManager_ReturnsErr(t *testing.T) {
+	d := newLiveCheckDeps(t)
+	// No mockLive.EXPECT() — IsAlive must NOT be invoked when mgr is nil.
+
+	alive, pid, err := runtime.IsLiveInstance(nil, d.mockLive, d.log)
+	if err == nil {
+		t.Fatalf("IsLiveInstance(nil mgr) returned nil err; want non-nil")
+	}
+	if alive {
+		t.Errorf("alive = true; want false (nil manager)")
+	}
+	if pid != 0 {
+		t.Errorf("pid = %d; want 0 (nil manager)", pid)
+	}
+	if !strings.Contains(err.Error(), "nil manager") {
+		t.Errorf("err = %q; want substring 'nil manager'", err.Error())
+	}
+}
+
+// TestIsLiveInstance_NilLiveChecker_ReturnsErr validates the defensive
+// nil-pointer guard: passing a nil LiveChecker returns a wrapped
+// error rather than panicking on live.IsAlive(...).
+func TestIsLiveInstance_NilLiveChecker_ReturnsErr(t *testing.T) {
+	d := newLiveCheckDeps(t)
+
+	alive, pid, err := runtime.IsLiveInstance(d.mgr, nil, d.log)
+	if err == nil {
+		t.Fatalf("IsLiveInstance(nil live) returned nil err; want non-nil")
+	}
+	if alive {
+		t.Errorf("alive = true; want false (nil live checker)")
+	}
+	if pid != 0 {
+		t.Errorf("pid = %d; want 0 (nil live checker)", pid)
+	}
+	if !strings.Contains(err.Error(), "nil live checker") {
+		t.Errorf("err = %q; want substring 'nil live checker'", err.Error())
+	}
+}
+
 // TestIsLiveInstance_InvalidPID_ReturnsNotAlive validates the defensive
 // guard against zero/negative PIDs in a corrupted runtime.json — skip
 // the IsAlive call entirely to avoid POSIX kill(0/-N, sig) edge cases.
