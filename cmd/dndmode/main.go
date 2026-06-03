@@ -225,6 +225,14 @@ func run() int {
 			"dndmode: another instance is already active (PID=%d). Send SIGTERM or wait for its exit, then re-run.\n",
 			peerPID)
 		return exitConcurrentInstance
+	} else if peerPID > 0 {
+		// dead-PID branch — runtime.json exists but snap.PID is dead.
+		// returns this triple so the caller can log debug context
+		// (per livecheck.go docstring "caller can log debug context but takes
+		// no action itself"). Step 10.5 RecoverFromCrash owns the cleanup;
+		// this log line lets an operator chasing "why did recovery fire"
+		// trace the pre-observation.
+		log.Debug("prior runtime.json with dead PID; recovery will clean it up", slog.Int("pid", peerPID))
 	}
 
 	// --- Step 9 (Phase 3): WaitForGrants ---
