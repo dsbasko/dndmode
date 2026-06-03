@@ -63,6 +63,10 @@ audit-net-runtime:
 release-check:
 	@if [ -z "$(VERSION)" ]; then echo "ERROR: VERSION required (e.g., make release VERSION=1.0.0)"; exit 1; fi
 	@if ! echo "$(VERSION)" | grep -qE "^[0-9]+\.[0-9]+\.[0-9]+$$"; then echo "ERROR: VERSION must be x.y.z (no leading v)"; exit 1; fi
+	@BRANCH=$$(git rev-parse --abbrev-ref HEAD); \
+	if [ "$$BRANCH" != "main" ] && [ "$$BRANCH" != "master" ]; then \
+		echo "ERROR: release must be tagged from main/master branch (current: $$BRANCH)"; exit 1; \
+	fi
 	@if ! git diff-index --quiet HEAD --; then echo "ERROR: working tree not clean"; exit 1; fi
 	@if git rev-parse --verify "v$(VERSION)" >/dev/null 2>&1; then echo "ERROR: tag v$(VERSION) already exists"; exit 1; fi
 
