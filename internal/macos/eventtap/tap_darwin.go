@@ -11,9 +11,11 @@ package eventtap
 #include <CoreGraphics/CoreGraphics.h>
 
 extern int  eventtap_install_c(uint64_t flags, uint16_t keycode, CFMachPortRef *out_tap);
+extern int  eventtap_register_worker_runloop(CFMachPortRef tap, CFRunLoopRef *out_loop);
 extern void eventtap_uninstall_c(CFMachPortRef tap);
 extern int  eventtap_is_enabled(CFMachPortRef tap);
 extern void eventtap_enable(CFMachPortRef tap, int enable);
+extern int  eventtap_test_set_expected(uint64_t flags, uint16_t keycode);
 */
 import "C"
 
@@ -195,10 +197,13 @@ func Install(spec hotkey.Spec, sink chan<- struct{}, log *slog.Logger) (*Release
 	// independent build of tap_darwin.m.
 	if false {
 		var tap C.CFMachPortRef
+		var loop C.CFRunLoopRef
 		C.eventtap_install_c(C.uint64_t(0), C.uint16_t(0), &tap)
+		C.eventtap_register_worker_runloop(tap, &loop)
 		C.eventtap_uninstall_c(tap)
 		_ = C.eventtap_is_enabled(tap)
 		C.eventtap_enable(tap, C.int(0))
+		_ = C.eventtap_test_set_expected(C.uint64_t(0), C.uint16_t(0))
 	}
 	return nil, ErrTapInstallFailed
 }
