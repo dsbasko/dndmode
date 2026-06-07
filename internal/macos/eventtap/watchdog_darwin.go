@@ -16,7 +16,10 @@ extern void watchdog_stop(void);
 import "C"
 
 import (
+	"fmt"
+	"log/slog"
 	"sync/atomic"
+	"time"
 	"unsafe"
 )
 
@@ -30,6 +33,17 @@ import (
 // `static const int` literal — both sources of truth are explicitly
 // pinned to 5 with a cross-reference comment).
 const watchdogFailThreshold = 5
+
+// watchdogPollInterval is how often the Go-side `pollWatchdogThreshold`
+// goroutine checks the `watchdogThresholdHit` atomic latch. The watchdog
+// itself ticks every 5s with a 500ms leeway, so a 100ms poll cadence on
+// the Go side adds < 100ms latency to the 25s detection window —
+// negligible vs the watchdog's own period. We deliberately use a coarser
+// cadence than the matched-key poller (which ticks at 10ms because every
+// extra ms of latency translates directly to user-visible unlock latency)
+// because the threshold-hit path is the slow-failure case, not the hot
+// path; 100ms × 10× = 10× less CPU spent on no-op Loads.
+const watchdogPollInterval = 100 * time.Millisecond
 
 // watchdogThresholdHit is the package-level latch flipped by the //export
 // Go helper eventtap_watchdog_failed, which is invoked from the C-side
@@ -124,25 +138,28 @@ func (s *watchdogState) Probe(isEnabled bool) (reset bool, thresholdReached bool
 
 // startWatchdog wires the Go-side cgo bridge into `watchdog_start`
 // (watchdog_darwin.m), which creates the GCD timer source + event
-// handler. Wave 1 04-03 fills the C-side body; this Go side stays as a
-// thin pass-through. Returns nil on success; non-nil error if the C side
-// reports a GCD allocation failure (in practice GCD does not fail under
-// normal load — the return type is preserved for symmetry with the rest
-// of the package).
+// handler. Returns nil on success; non-nil error if the C side
+// reports a failure (rc != 0).
 //
-// MUST be called from the main goroutine because the C side queries
-// `dispatch_get_global_queue(...)` which is thread-safe but the run-loop
-// invariants for the broader Install path require main-thread setup.
+// Return-code mapping from watchdog_darwin.m:
+//   - 0 = success → nil
+//   - 1 = tap NULL → caller-supplied error before this wrapper would also
+//         have caught it via the `tap == nil` Go-side guard; preserved
+//         for defence-in-depth
+//   - 2 = watchdog already started (double-start without stop) — defensive
+//   - 3 = GCD allocation failure (dispatch_source_create returned NULL)
 //
-// Wave 0 stub: returns nil. Wave 1 04-03 replaces the body.
+// MUST be called from the main goroutine because the broader Install path
+// holds invariants on main-thread setup ordering. The C
+// side itself queries `dispatch_get_global_queue` which is thread-safe,
+// but the caller chain requires main.
 func startWatchdog(tap unsafe.Pointer) error {
-	_ = tap
-	// Reference the cgo binding so dead-code elimination keeps the C
-	// symbol linked through Wave 0 even before Wave 1 wires production
-	// install logic.
-	if false {
-		var t C.CFMachPortRef
-		_ = C.watchdog_start(t)
+	if tap == nil {
+		return fmt.Errorf("watchdog: tap is nil")
+	}
+	rc := C.watchdog_start(C.CFMachPortRef(tap))
+	if rc != 0 {
+		return fmt.Errorf("watchdog_start: rc=%d", int(rc))
 	}
 	return nil
 }
@@ -152,10 +169,136 @@ func startWatchdog(tap unsafe.Pointer) error {
 // Called by Releaser.Release as part of the LIFO teardown chain.
 //
 // Idempotent — safe to call when no watchdog has been started.
-//
-// Wave 0 stub: no-op.
 func stopWatchdog() {
-	if false {
-		C.watchdog_stop()
+	C.watchdog_stop()
+}
+
+// StartWatchdog installs the GCD watchdog timer and spawns the Go-side
+// threshold poller goroutine. Returns a `stop` closure that tears down
+// both halves (poller goroutine + GCD source) in the correct order, and
+// an error if the C-side `watchdog_start` failed.
+//
+// Wiring contract (composed with tap.Install in main.go):
+//
+//   - The `tap` parameter MUST be the `CFMachPortRef` returned by the
+// successful `eventtap_install_c` call in. Passing a freed or
+//     nil tap is a programming error (returns an error eagerly).
+//
+//   - The `sink` channel MUST be `supervisor.ExitTrigger()` — the same
+// channel that the matched-key poller writes to. The
+//     watchdog forwards a single struct{} send on threshold-hit; the
+//     supervisor treats it identically to a matched key (LIFO unwind
+// via Release order, exit code 4 per actual exit code
+//     resolution lives in supervisor, not here).
+//
+//   - The `log` parameter MAY be nil — falls back to slog.Default()
+//     (mirrors `cocoa.NewController` and `powerassert.Acquire`).
+//
+// The returned `stop` closure does:
+//
+//  1. Close the poller's internal stop channel — the goroutine exits its
+//     ticker loop on the next iteration (<= 100ms).
+//  2. Call `stopWatchdog()` — cancels the GCD source and nils the global
+//     in watchdog_darwin.m. After this returns, the timer block will not
+//     fire again (an in-flight invocation may still complete on the GCD
+//     queue, but it sees `g_watchdog == nil` is irrelevant — the handler
+//     captured `tap` by value, and the defensive null-check in the block
+//     covers the freed-tap race).
+//
+// IMPORTANT: the closure does NOT release the underlying tap port —
+// that ownership stays with `tap.Install`'s Releaser. main.go
+// composes both: `stop()` first, then `tapReleaser.Release()`. Inverted
+// order is unsafe (GCD handler in-flight may still call CGEventTapIsEnabled
+// on a freed port).
+//
+// Safe to call from any goroutine, but expected to run from main (Install
+// chain).
+func StartWatchdog(tap unsafe.Pointer, sink chan<- struct{}, log *slog.Logger) (stop func(), err error) {
+	if log == nil {
+		log = slog.Default()
+	}
+	// Reset latch on every fresh Start — supports test fixtures and the
+	// theoretical Stop-then-Start cycle, even though production has a
+	// single Start per process lifetime (Install runs once).
+	watchdogThresholdHit.Store(false)
+
+	if err := startWatchdog(tap); err != nil {
+		return nil, err
+	}
+
+	stopPoller := make(chan struct{})
+	go pollWatchdogThreshold(stopPoller, &watchdogThresholdHit, sink, log)
+
+	stop = func() {
+		// Stop the poller FIRST so it cannot observe a stale latch flip
+		// between watchdog_stop and the close below. (Even if the GCD
+		// block managed to flip the latch after we stop the C side, the
+		// poller goroutine is already on its way out — a benign late
+		// Store(true) just goes nowhere.)
+		close(stopPoller)
+		stopWatchdog()
+	}
+	return stop, nil
+}
+
+// pollWatchdogThreshold is the Go-side goroutine that bridges the C-side
+// atomic latch (`watchdogThresholdHit`, written by the GCD block via the
+// //export eventtap_watchdog_failed callback) to the sink channel and
+// stderr log line.
+//
+// Single-shot semantics: as soon as `flag.CompareAndSwap(true, false)`
+// observes a flipped latch, the goroutine
+//
+// 1. Logs the message verbatim ("eventtap watchdog: tap dead after
+//     5 re-enable failures, exiting to restore input").
+//  2. Performs a non-blocking sink send (`select { default: }`) so that a
+//     full supervisor channel (race against a matched-key send) does not
+//     deadlock the watchdog.
+//  3. Returns — the poller does NOT process subsequent latch flips.
+//     Repeated threshold-hits from a still-running GCD block (in the
+//     window between Store(true) here and stopWatchdog's
+//     dispatch_source_cancel) are dropped silently. The supervisor only
+//     needs ONE signal to unwind; duplicates would queue a second exit
+// and confuse the LIFO sequence.
+//
+// The `stop` channel terminates the goroutine cleanly even when the
+// threshold was never hit (the common case — a healthy tap that never
+// gets disabled). `time.Ticker.Stop` runs in defer.
+//
+// The `flag` parameter is taken by pointer for testability — production
+// passes `&watchdogThresholdHit`, but unit tests (if added in)
+// could pass a local atomic.Bool to exercise the poller without standing
+// up cgo.
+//
+// SAFETY: this goroutine is NOT pinned to an OS thread via
+// runtime.LockOSThread because it only does atomic Loads + channel
+// operations + stderr writes — none of which require thread affinity.
+// The matched-key poller in 04-02 DOES use LockOSThread because its
+// 10ms ticker contends with GCD blocks on the same Go scheduler; the
+// watchdog poller at 100ms has no such contention budget.
+func pollWatchdogThreshold(stop <-chan struct{}, flag *atomic.Bool, sink chan<- struct{}, log *slog.Logger) {
+	ticker := time.NewTicker(watchdogPollInterval)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-stop:
+			return
+		case <-ticker.C:
+		}
+		if flag.CompareAndSwap(true, false) {
+			// verbatim — must match watchdog_test.go acceptance
+			// (and errors.go ErrWatchdogExitThreshold docstring).
+			log.Error("eventtap watchdog: tap dead after 5 re-enable failures, exiting to restore input")
+			// Non-blocking send — a full sink (race with matched-key
+			// send) MUST NOT deadlock the watchdog. The supervisor
+			// only needs one signal to start unwinding either way.
+			select {
+			case sink <- struct{}{}:
+			default:
+			}
+			// Single-shot: stop processing further latch flips.
+			return
+		}
 	}
 }
