@@ -31,6 +31,56 @@ static dispatch_source_t g_watchdog = nil;
 // because the GCD block has no Go-side allocation budget.
 static int g_fail_count = 0;
 
+// g_observed_tap is the canonical "current tap" pointer shared between the
+// watchdog GCD block (this file) and the NSWorkspace wake-observer blocks
+// (wake_darwin.m). The pointer is:
+//
+//   - WRITTEN from the main goroutine (via `eventtap_set_observed_tap`)
+//     during Install (seed = real tap) and during Release Step 1 (NULL).
+//   - READ from the GCD high-priority worker thread (watchdog handler) and
+//     from `[NSOperationQueue mainQueue]` (wake / session-active blocks).
+//
+// `volatile` is REQUIRED because writer and reader live on different threads
+// and the compiler must not cache the value in a register. On darwin/arm64
+// an aligned pointer load/store is atomic per Apple's memory model — see
+// "Multithreading Programming Guide" + libplatform/atomic.h notes; a single
+// `volatile CFMachPortRef` is therefore sufficient for the cross-thread
+// signal here (no __c11_atomic_load / OSAtomicCompareAndSwapPtr ceremony).
+//
+// Threat model: Release order per is:
+//   Step 1: eventtap_enable(tap, false) + eventtap_set_observed_tap(NULL)
+//   Step 2: CFRunLoopRemoveSource
+//   Step 3: CFRelease(source) + CFRelease(tap)
+//   Step 4: watchdog_stop (dispatch_source_cancel + drain)
+//   Step 5: wake_observer_remove
+// Between Step 1 and Step 4, the watchdog GCD handler may still be IN-FLIGHT
+// (Apple's libdispatch does not synchronously drain handlers across
+// `dispatch_source_cancel`). Without this guard, that in-flight handler
+// would call `CGEventTapIsEnabled(g_tap)` AFTER Step 3 has released the
+// mach port — UB. With this guard, the handler snapshots `g_observed_tap`
+// at the top, sees NULL (because Step 1 wrote NULL atomically), and
+// returns immediately. Race window closed without violating order.
+//
+// The same guard protects the wake-observer blocks (wake_darwin.m) against
+// the symmetric race in the window between Step 1 and Step 5 — both
+// blocks `extern` this same global. There is exactly one definition of
+// `g_observed_tap` in the binary (here); wake_darwin.m declares `extern`.
+volatile CFMachPortRef g_observed_tap = NULL;
+
+// eventtap_set_observed_tap is the single writer for g_observed_tap.
+// Called from Go (via cgo) at two moments:
+//
+//   - InstallAll Step (post wake-observer install): seed with the real tap.
+//   - Release Step 1 (immediately after eventtap_enable(tap, 0)): write NULL.
+//
+// Plain volatile pointer store is atomic on darwin/arm64 (see g_observed_tap
+// comment above). No barrier / no atomic intrinsic needed: readers only
+// branch on (snapshot == NULL), and a stale non-NULL read at most causes
+// one extra CGEventTapIsEnabled probe on a still-valid tap — safe.
+void eventtap_set_observed_tap(CFMachPortRef tap) {
+    g_observed_tap = tap;
+}
+
 // watchdog_start creates a GCD timer source on DISPATCH_QUEUE_PRIORITY_HIGH
 // with a 5s interval + 500ms leeway and installs the event handler
 // block that probes `CGEventTapIsEnabled(tap)` every cycle.
@@ -98,30 +148,49 @@ int watchdog_start(CFMachPortRef tap) {
         500 * NSEC_PER_MSEC);
 
     dispatch_source_set_event_handler(g_watchdog, ^{
-        // Defensive null check: the source is cancelled before this block
-        // can be torn down, but a fire that was already enqueued may still
-        // run. The tap pointer was captured by value at create-time, so
-        // it cannot be re-nil'd from Go-side — but Release-during-fire is
-        // still possible, in which case CGEventTapIsEnabled on a freed
-        // port is UB. We guard via the cancel-then-nil sequence in
-        // `watchdog_stop`.
-        if (tap == NULL) {
+        // guard (FIRST line — invariant):
+        // snapshot g_observed_tap BEFORE any CG* call. The handler may
+        // still be in-flight on the GCD HIGH queue after Release Step 1
+        // wrote NULL but before Step 4's dispatch_source_cancel drained
+        // pending invocations. If we see NULL → no-op; otherwise we hold
+        // a local snapshot that remains valid for the lifetime of this
+        // block (Release Step 4 waits for cancel to drain handlers, and
+        // CFRelease at Step 3 cannot happen before Step 4 because the
+        // Releaser.mu mutex serialises the whole chain).
+        //
+        // Volatile read here pairs with the volatile write in
+        // `eventtap_set_observed_tap` — both ends documented in the
+        // g_observed_tap declaration comment above.
+        CFMachPortRef tap_snap = g_observed_tap;
+        if (tap_snap == NULL) {
             return;
         }
+
+        // Legacy defensive null check on the captured `tap` parameter is
+        // now subsumed by the snapshot above — the captured `tap` was
+        // never nil'd from Go side (CFMachPortRef passed by value at
+        // create time), so this check would always pass. Kept as a
+        // belt-and-suspenders cheap branch for future readers who may
+        // re-introduce dynamic `tap` rebinding.
+        (void)tap; // silence unused-warning if future refactors drop the capture
 
         // healthy probe → reset counter. This covers BOTH the normal
         // case AND (kCGEventTapDisabledByUserInput re-enable performed
         // by the tap's own inline callback in).
-        if (CGEventTapIsEnabled(tap)) {
+        //
+        // All CG* calls below use `tap_snap` (the snapshot), NOT the
+        // captured `tap` parameter — the snapshot is the post-guard
+        // single source of truth.
+        if (CGEventTapIsEnabled(tap_snap)) {
             g_fail_count = 0;
             return;
         }
 
         // Tap is disabled — attempt to re-enable.
-        CGEventTapEnable(tap, true);
+        CGEventTapEnable(tap_snap, true);
 
         // Re-probe. If re-enable succeeded → also a healthy state, reset.
-        if (CGEventTapIsEnabled(tap)) {
+        if (CGEventTapIsEnabled(tap_snap)) {
             g_fail_count = 0;
             return;
         }
@@ -140,6 +209,16 @@ int watchdog_start(CFMachPortRef tap) {
             eventtap_watchdog_failed();
         }
     });
+
+    // Seed g_observed_tap BEFORE dispatch_resume so the very first handler
+    // fire (5s from now per dispatch_source_set_timer above) sees a
+    // non-NULL snapshot. InstallAll also explicitly calls
+    // `eventtap_set_observed_tap(tap)` after wake_observer_install for
+    // belt-and-suspenders (idempotent — re-sets the same value); this
+    // line keeps watchdog_start self-sufficient for the existing
+    // smoke-test path and for any future caller that exercises
+    // the watchdog without going through InstallAll.
+    g_observed_tap = tap;
 
     // the design notes step 4 — MANDATORY before first fire.: an
     // unresumed source cannot be safely released; always resume before
