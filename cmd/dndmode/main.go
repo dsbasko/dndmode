@@ -28,12 +28,14 @@ import (
 	"os/signal"
 	"path/filepath"
 	"runtime"
+	"runtime/debug"
 	"syscall"
 	"time"
 
 	"github.com/dsbasko/dndmode/internal/config"
 	"github.com/dsbasko/dndmode/internal/config/hotkey"
 	"github.com/dsbasko/dndmode/internal/macos/cocoa"
+	"github.com/dsbasko/dndmode/internal/macos/eventtap"
 	"github.com/dsbasko/dndmode/internal/macos/focus"
 	"github.com/dsbasko/dndmode/internal/macos/permissions"
 	"github.com/dsbasko/dndmode/internal/macos/powerassert"
@@ -47,9 +49,13 @@ const (
 	// os.UserHomeDir (mitigation).
 	configRelPath = ".config/dndmode/config.yml"
 
-	// Granular exit codes per CONTEXT D-16 (Phase 3 expansion). Reserved
-	// slots 6/7 are for Phase 5 (FOC-01 Shortcuts missing / CRR-04 runtime
-	// JSON non-recoverable). Stderr wording per UI-SPEC Copywriting Contract.
+	// Granular exit codes per the design notes (Phase 3 expansion). Slots 6/7
+	// are Phase 5 (Shortcuts missing / runtime JSON
+	// non-recoverable); slot 8 added by Phase 4 for top-level
+	// panic recovery (per the design notes the design notes
+	// originally suggested code 7, but exitRuntimeJSON owns that
+	// slot in Phase 5, so the next-available 8 is the minimum-regression
+	// resolution). Stderr wording per the UI spec Copywriting Contract.
 	exitOK                  = 0 // success
 	exitConfigErr           = 1 // P1 — bad YAML, modifier-only hotkey
 	exitPlatformErr         = 2 // non-arm64, macOS < 14, IOKit fundamentals
@@ -58,6 +64,7 @@ const (
 	exitConcurrentInstance  = 5 // live-PID match on orphan IOPMAssertion
 	exitFocusSetup          = 6 // Phase 5 required Shortcuts not found
 	exitRuntimeJSON         = 7 // Phase 5 cannot delete stale runtime file
+	exitInternalErr         = 8 // Phase 4 top-level recover() in run() (the design notes)
 )
 
 // cancelStopper adapts context.CancelFunc to the supervisor.Stopper
@@ -110,21 +117,53 @@ func main() {
 // slot #4 in LIFO.
 // 14. cocoa.Init — (moved DOWN after permission checks).
 // 15. cocoa.NewController CreateWindowsForAllScreens — P2; rs.Push(controller).
-//  16. rs.Push(state.NewMockReleaser("mock-tap")) — Phase 4 заменит.
-//  17. supervisor.New(log, stopper) + supervisor.Start(ctx).
+//  16. supervisor.New(log, stopper) + supervisor.Start(ctx) — swapped BEFORE
+// eventtap (Phase 4) because InstallAll needs sup.ExitTrigger() as
+//      its sink channel.
+// 17. eventtap.InstallAll(spec, sup.ExitTrigger(), log) — Phase 4;
+//      composes tap + watchdog + wake observer into a single Releaser;
+//      rs.Push(tapRel). Replaces the Phase 3 mock-tap placeholder.
 //  18. stdout "dndmode: active. press Ctrl-C.".
-//  19. cocoa.RunApp(ctx) → sup.Wait() → return exitOK; defer Cleanup LIFO (LIFE-06).
+// 19. cocoa.RunApp(ctx) → sup.Wait() → return exitOK; defer Cleanup LIFO;
+// top-level recover defer (registered FIRST inside run, Phase 4
+//) catches any Cocoa-panic AFTER Cleanup, exits with exitInternalErr=8.
 //
-// LIFE-06 cleanup execution order via push-stack LIFO unwind (Phase 5 finalizes):
-// mock-tap → windows → "dndmode active" → focus → runtime-file.
+// cleanup execution order via push-stack LIFO unwind (Phase 4
+// finalises tap-releaser): eventtap → windows → "dndmode active" → focus
+// → runtime-file.
 func run() int {
+	// --- (Phase 4 the design notes): top-level recover defer ---
+	// Registered FIRST inside `run()` so Go's LIFO defer unwind runs this
+	// defer LAST — AFTER `defer stop()` (Step 3 signal.NotifyContext) and
+	// AFTER `defer func() { rs.Cleanup(); ... }` (Step 3 RestoreState).
+	// By the time `recover()` here returns non-nil:
+	//   - rs.Cleanup has already drained the LIFO release stack (overlay
+	//     hidden, IOPMAssertion released, runtime.json removed, Focus
+	//     deactivated, eventtap released);
+	//   - signal handlers are unregistered;
+	//   - stdout cleanup banner already printed.
+	// All that remains is the os.Exit with a distinct code so subprocess
+	// acceptance tests (TestAcceptance_LIFE10_PanicRecover, added by plan
+	//) can assert the panic-vs-normal path. debug.Stack() is
+	// captured BEFORE Exit so the operator sees a faithful trace.
+	//
+	// Exit code = exitInternalErr (8). the design notes originally suggested
+	// 7, but Phase 5 already owns slot 7 (exitRuntimeJSON /). 8 is
+	// the minimum-regression resolution per the design notes.
+	defer func() {
+		if r := recover(); r != nil {
+			fmt.Fprintf(os.Stderr, "dndmode: PANIC: %v\n%s\n", r, debug.Stack())
+			os.Exit(exitInternalErr)
+		}
+	}()
+
 	// --- Step 1: Parse flags (stdlib flag) ---
-	debug := flag.Bool("debug", false, "enable debug-level logging on stderr")
+	debugFlag := flag.Bool("debug", false, "enable debug-level logging on stderr")
 	flag.Parse()
 
 	// --- Step 2: slog logger to stderr ---
 	level := slog.LevelInfo
-	if *debug {
+	if *debugFlag {
 		level = slog.LevelDebug
 	}
 	log := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: level}))
@@ -412,11 +451,17 @@ func run() int {
 	}
 	rs.Push(controller) // released 2nd in LIFO (Name == "windows")
 
-	// --- Step 16 (Phase 3 D-05): Push tap-mock (released FIRST per LIFE-06) ---
-	// Phase 4 заменит на real CGEventTap releaser (INP-01..04).
-	rs.Push(state.NewMockReleaser("mock-tap"))
-
-	// --- Step 17 (Phase 3 D-05): cancelStopper + supervisor ---
+	// --- Step 16 (Phase 4 supervisor; swapped before eventtap) ---
+	// supervisor is created BEFORE eventtap.InstallAll (the original Phase 3
+	// Step 16) because InstallAll requires `sup.ExitTrigger()` — the same
+	// sink channel that both the matched-key poller and the
+	// watchdog threshold-hit poller write to on a hotkey/dead-tap
+	// event. Original Step 17 thus runs as the new Step 16, and eventtap
+	// follows as the new Step 17. Push order onto rs remains LIFO
+	// compatible: controller (windows) pushed at Step 15, eventtap (tap)
+	// pushed at Step 17 — tap is released FIRST in the LIFO unwind, then
+	// windows, then assertion ("dndmode active"), then focus, then runtime.
+	//
 	// stopper.cancel === signal.NotifyContext stop func (Step 3).
 	// supervisor.Start drives a goroutine that listens to its own signal.Notify
 	// channel and to ctx.Done — both paths converge on cancel; see Step 3
@@ -424,6 +469,44 @@ func run() int {
 	stopper := &cancelStopper{cancel: stop}
 	sup := supervisor.New(log, stopper)
 	sup.Start(ctx)
+
+	// --- Step 17 (Phase 4 eventtap composite; replaces P3 mock-tap) ---
+	// InstallAll wires three subsystems (CGEventTap, dispatch_source_t
+	// watchdog, NSWorkspace wake observer) into a single Releaser that
+	// releases in safe order: tap-disable + g_observed_tap=NULL
+	// (Step 1) → CFRunLoopRemoveSource → CFRelease(source+tap) →
+	// watchdog_stop → wake_remove. The atomic-null guard in
+	// watchdog_darwin.m / wake_darwin.m closes the window
+	// between Step 1 and Step 4-5 (handlers read g_observed_tap first and
+	// no-op on NULL) without violating order.
+	//
+	// `sup.ExitTrigger()` is the sink — matched hotkey OR watchdog
+	// threshold-hit both signal exit through it; supervisor then converges
+	// on stopper.RequestStop → ctx.cancel → cocoa.RunApp returns →
+	// sup.Wait → defer LIFO unwinds.
+	//
+	// Re-parse the hotkey here (already validated at Step 5b — Parse is
+	// idempotent and cheap). The matcher.UserIntentionalMask pre-masking
+	// happens inside Install per.
+	spec, parseErr := hotkey.Parse(cfg.Hotkey)
+	if parseErr != nil {
+		// Unreachable: Step 5b already validated. Defensive only — keeps
+		// the failure surface explicit instead of relying on global state.
+		fmt.Fprintf(os.Stderr, "dndmode: re-parse hotkey failed: %v\n", parseErr)
+		return exitConfigErr
+	}
+	tapRel, err := eventtap.InstallAll(spec, sup.ExitTrigger(), log)
+	if err != nil {
+		if errors.Is(err, eventtap.ErrTapInstallFailed) {
+			fmt.Fprintf(os.Stderr,
+				"dndmode: install CGEventTap failed: %v.\n"+
+					"Likely causes: Accessibility revoked between PreFlight and now (re-grant via System Settings → Privacy & Security → Accessibility), or another app holds SecureEventInput (close sudo / password fields).\n", err)
+			return exitPlatformErr
+		}
+		fmt.Fprintf(os.Stderr, "dndmode: install eventtap subsystems failed: %v\n", err)
+		return exitPlatformErr
+	}
+	rs.Push(tapRel) // released FIRST in LIFO (Name == "eventtap")
 
 	// --- Step 18 (Phase 3): Active state banner (P2: AFTER controller create) ---
 	fmt.Fprintln(os.Stdout, "dndmode: active. press Ctrl-C.")

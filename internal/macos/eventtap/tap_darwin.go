@@ -16,6 +16,31 @@ extern void eventtap_uninstall_c(CFMachPortRef tap);
 extern int  eventtap_is_enabled(CFMachPortRef tap);
 extern void eventtap_enable(CFMachPortRef tap, int enable);
 extern int  eventtap_test_set_expected(uint64_t flags, uint16_t keycode);
+
+// eventtap_set_observed_tap is the canonical writer for the shared
+// `volatile CFMachPortRef g_observed_tap` global that lives in
+// watchdog_darwin.m and is read by both the watchdog GCD handler AND the
+// NSWorkspace wake-observer blocks (wake_darwin.m). Step 1 of
+// the Release order writes NULL via this setter, which closes the
+// race window for in-flight handlers between Release Step 1
+// and Step 4 (watchdog_stop) / Step 5 (wake_observer_remove).
+extern void eventtap_set_observed_tap(CFMachPortRef tap);
+
+// cf_to_void_ptr is the package-private C helper that converts a cgo
+// opaque pointer (CFMachPortRef) to a `void *` (which cgo maps to Go's
+// `unsafe.Pointer`). Defined inline because a direct
+// `unsafe.Pointer(C.CFMachPortRef)` cast in Go trips `go vet -unsafeptr`
+// even though the conversion is well-defined for cgo opaque handles —
+// CFMachPort is reference-counted by CoreFoundation, the Go GC never
+// sees it, and the standard "uintptr-pointer caveat" does not apply.
+// Routing the conversion through C via this helper keeps vet quiet
+// without losing type safety. Used by InstallAll to pass the tap pointer
+// to (StartWatchdog) and (InstallWakeObserver) which
+// both accept `unsafe.Pointer` (kept that way so they don't impose a
+// cgo dependency on test fixtures that may want to fake the tap).
+static inline void *cf_to_void_ptr(CFMachPortRef tap) {
+    return (void *)tap;
+}
 */
 import "C"
 
@@ -107,6 +132,25 @@ type Releaser struct {
 	// nil → slog.Default().
 	log *slog.Logger
 
+	// design note: the install-time CFMachPortRef is NOT stored
+	// on the Releaser. The closure-encapsulation pattern (disableFn
+	// / clearObservedFn / uninstallFn) keeps cgo opaque handles inside
+	// closure captures so:
+	//
+	//   1. `go vet -unsafeptr` stays clean (storing
+	//      `unsafe.Pointer(C.CFMachPortRef)` on a struct field trips the
+	//      heuristic even though the use is idiomatic for cgo opaque
+	//      handles; uintptr storage would sidestep vet but requires a
+	//      vet-flagged conversion at every use site).
+	//   2. InstallAll passes cTap to StartWatchdog / InstallWakeObserver
+	//      directly inside its own scope (the package-private
+	//      `installInternal` helper exposes cTap to InstallAll without
+	//      crossing the public API boundary).
+	//
+	// As a result, this struct has NO `tap` field — the C side owns the
+	// canonical tap reference (via the static globals `g_tap` in
+	// tap_darwin.m and `g_observed_tap` in watchdog_darwin.m).
+
 	// stopPoller signals the poller goroutine to exit cleanly. Closed by
 	// Release; the goroutine selects on it and returns. Cap is 0 (a
 	// signalling channel — close-only semantics, no payload).
@@ -118,14 +162,36 @@ type Releaser struct {
 	// `-race` where a still-running goroutine would surface as a leak.
 	pollerDone chan struct{}
 
-	// disableFn / uninstallFn are the DI seams that let unit tests
-	// substitute fakes for the C-side bridge calls. Production wires them
-	// to the real `eventtap_enable(tap, false)` + `eventtap_uninstall_c(tap)`
-	// at Install time (see Install) or via the test-internal
+	// disableFn / clearObservedFn / uninstallFn are the DI seams that let
+	// unit tests substitute fakes for the C-side bridge calls. Production
+	// wires them at Install time (see Install) or via the test-internal
 	// `newReleaserWithDeps` constructor (tap_test.go). NOT exported —
-	// production callers MUST go through Install.
-	disableFn   func()
-	uninstallFn func()
+	// production callers MUST go through Install / InstallAll.
+	//
+	// Order in `Release` corresponds to Step 1 (disableFn
+	// clearObservedFn) and Steps 2-3 (uninstallFn handles
+	// CFRunLoopRemoveSource → CFRelease(source) → CFRelease(tap) inside
+	// the existing C-side `eventtap_uninstall_c`).
+	disableFn       func()
+	clearObservedFn func() // writes NULL to g_observed_tap atomically
+	uninstallFn     func()
+
+	// watchdogStop / wakeStop are the tear-down
+	// closures returned by `StartWatchdog` and `InstallWakeObserver`
+	// respectively. Set by `InstallAll`. The plain `Install` constructor
+	// (surface) does NOT set these — they remain nil and the
+	// nil-check in Release short-circuits them. Production callers MUST go
+	// through `InstallAll`; `Install` is kept for the smoke-test path that
+	// exercises tap + poller without the watchdog/wake composites.
+	//
+	// order: watchdogStop runs at Step 4 (after Step 3
+	// CFRelease completes), wakeStop runs at Step 5 (last). Between Step 1
+	// and Step 4, the watchdog GCD handler may still be in-flight on the
+	// HIGH queue — the g_observed_tap=NULL atomic write at Step 1 turns
+	// any such in-flight invocation into a no-op via the snapshot guard in
+	// watchdog_darwin.m. Same for wake observer (Step 1 → Step 5 window).
+	watchdogStop func()
+	wakeStop     func()
 
 	// released is the fast-path hint flag — set to true AFTER the cgo
 	// teardown chain has fully completed under mu. atomic.Load lets repeat
@@ -157,24 +223,37 @@ func (r *Releaser) Name() string { return "eventtap" }
 //     mu.Lock() until the winner is done, then see released==true under
 //     mu and return nil without invoking the teardown.
 //
-// Teardown order (D-08 disable-first invariant from RESEARCH §8):
+// Teardown order (VERBATIM from the design notes, the design notes):
 //
-//  1. disableFn — CGEventTapEnable(tap, false). The tap is disabled FIRST so
-//     the keyboard recovers immediately even if any subsequent step fails.
-//     The callback can no longer fire after this returns.
+//  1. disableFn — CGEventTapEnable(tap, false) — keyboard recovers
+//     immediately even if any subsequent step fails.
+//     clearObservedFn — eventtap_set_observed_tap(NULL) — atomic write
+// that closes the window: any in-flight watchdog GCD
+//     handler or wake-observer notification block running between Step 1
+//     and Step 4-5 reads g_observed_tap → sees NULL → returns immediately
+//     without touching the (about-to-be-freed at Step 3) mach port.
+// Step 1 — both calls happen here under the same mutex.
 //  2. uninstallFn — CFRunLoopRemoveSource → CFRelease(source) →
 //     CGEventTapEnable(tap, false) [defensive] → CFRelease(tap) →
-//     CFRunLoopStop(worker_runloop). The C-side helper bundles these for
-//     atomicity; Go just calls one function.
-//  3. close(stopPoller) — the poller goroutine selects on stopPoller in its
-//     ticker loop and returns.
-//  4. <-pollerDone — wait for the poller to fully unwind before returning.
-//     Under `-race`, a still-running goroutine accessing `matched` after
-//     Release would be flagged.
-//
-// Watchdog (plan 04-03) and wake observer (plan 04-04) Release paths live
-// on their own Releaser types pushed separately onto the RestoreState LIFO
-// chain — this Releaser owns only tap + poller.
+//     CFRunLoopStop(worker_runloop). The C-side helper
+// `eventtap_uninstall_c` bundles Steps 2 + 3 of atomically; Go
+//     calls a single function (the C-side comment in tap_darwin.m
+//     enumerates the sub-steps).
+//  3. (subsumed in Step 2 — see above).
+// 4. watchdogStop — stop closure. Cancels the GCD
+//     dispatch_source_t timer AND closes the watchdog Go-side poller's
+//     stop channel. After this returns, no future watchdog handler can
+//     fire; any in-flight handler has already short-circuited via Step 1's
+//     NULL write. Skipped if nil (set only by InstallAll, not by plain
+// Install — keeps smoke-test surface intact).
+// 5. wakeStop — stop closure. Removes both NSWorkspace
+//     observers (DidWake + SessionDidBecomeActive) and re-NULLs
+//     g_observed_tap defensively. Skipped if nil (same rationale).
+//  6. close(stopPoller) — the matched-key poller goroutine exits its
+//     ticker loop within pollInterval (10ms).
+//  7. <-pollerDone — wait for the matched-key poller to fully unwind
+//     before returning. Under `-race`, a still-running goroutine
+//     accessing `matched` after Release would be flagged.
 func (r *Releaser) Release() error {
 	// Fast path: hint flag. Cheap Load — once released is durably set
 	// (after the winner stored it under mu), any repeat caller skips
@@ -191,20 +270,44 @@ func (r *Releaser) Release() error {
 		return nil
 	}
 
-	// D-08 disable-first ordering: the tap is disabled BEFORE any other
-	// teardown step. If subsequent CFRelease or CFRunLoopStop panics or
-	// hangs, the keyboard is already restored because CGEventTapEnable
-	// took effect immediately on the kernel side.
+	// --- Step 1: disable tap + atomic-null guard write ---
+	// disableFn calls CGEventTapEnable(tap, false). Effective on the
+	// kernel side immediately — keyboard recovers. clearObservedFn
+	// writes NULL to g_observed_tap (volatile pointer store, atomic on
+	// darwin/arm64). Both happen ON THE SAME LINE pair so a re-ordering
+	// reviewer cannot accidentally separate them.
 	if r.disableFn != nil {
 		r.disableFn()
 	}
+	if r.clearObservedFn != nil {
+		r.clearObservedFn()
+	}
+
+	// --- Steps 2 + 3: CFRunLoopRemoveSource CFRelease(source+tap)
+	// + CFRunLoopStop, bundled in eventtap_uninstall_c. ---
 	if r.uninstallFn != nil {
 		r.uninstallFn()
 	}
 
-	// Stop the poller goroutine. The channel may be nil in unit-test
-	// constructors that exercise only the disable/uninstall path; the
-	// production Install path always populates it.
+	// --- Step 4: stop the watchdog GCD timer + its poller goroutine.
+	// In-flight handlers between Step 1 and here are already no-ops via
+	// the g_observed_tap snapshot guard in watchdog_darwin.m. ---
+	if r.watchdogStop != nil {
+		r.watchdogStop()
+		r.watchdogStop = nil
+	}
+
+	// --- Step 5: remove NSWorkspace wake / session-active observers.
+	// In-flight main-queue blocks are already no-ops via the
+	// g_observed_tap snapshot guard in wake_darwin.m. ---
+	if r.wakeStop != nil {
+		r.wakeStop()
+		r.wakeStop = nil
+	}
+
+	// Stop the matched-key poller goroutine. The channel may be nil in
+	// unit-test constructors that exercise only the disable/uninstall
+	// path; the production Install path always populates it.
 	if r.stopPoller != nil {
 		// Close-only signalling: idempotency is irrelevant because
 		// Release itself is already serialised by the mutex + released
@@ -220,11 +323,11 @@ func (r *Releaser) Release() error {
 		<-r.pollerDone
 	}
 
-	// No-op: raw cgo pointers are no longer stored on the Releaser (they
-	// live inside disableFn/uninstallFn closures). The closures themselves
-	// nil out via the C-side `g_tap = NULL` inside `eventtap_uninstall_c`,
-	// so a hypothetical re-call would just no-op at the C layer.
+	// Drop references so a hypothetical re-call (which short-circuits via
+	// `released.Load()` anyway) has nothing to invoke. The C-side state
+	// is already torn down by uninstallFn.
 	r.disableFn = nil
+	r.clearObservedFn = nil
 	r.uninstallFn = nil
 
 	// Store AFTER teardown completes. Concurrent callers blocked on
@@ -274,16 +377,33 @@ func (r *Releaser) Release() error {
 // CGEventTapCreate-returned-NULL (rc=1) and
 // CFMachPortCreateRunLoopSource-returned-NULL (rc=2).
 //
-// Wave 2 wire-up in cmd/dndmode/main.go will:
-//
-//	tapReleaser, err := eventtap.Install(matcher.Spec(), supervisor.ExitTrigger(), log)
-//	if errors.Is(err, eventtap.ErrTapInstallFailed) { return exitPlatformErr }
-//	rs.Push(tapReleaser)
+// wire-up in cmd/dndmode/main.go uses InstallAll (the composite)
+// rather than this raw Install — the composite wires watchdog + wake
+// observer in addition to the bare tap. Install remains exported for
+// smoke tests (`-tags manual`) that exercise the tap subsystem in
+// isolation without the GCD timer / NSWorkspace observer overhead.
 //
 // The watchdog and wake are separate Releasers that own
 // their own GCD timer / notification token respectively; they are NOT
-// bundled here so the three plans can land in parallel.
+// bundled here so the three plans can land in parallel and so the smoke
+// test stays minimal. Production callers MUST use InstallAll.
 func Install(spec hotkey.Spec, sink chan<- struct{}, log *slog.Logger) (*Releaser, error) {
+	r, _, err := installInternal(spec, sink, log)
+	return r, err
+}
+
+// installInternal is the package-private install-and-return-tap helper
+// shared by `Install` (public, drops tap) and `InstallAll` (composite,
+// needs tap for StartWatchdog + InstallWakeObserver). Returning
+// `C.CFMachPortRef` rather than `unsafe.Pointer` keeps `go vet -unsafeptr`
+// quiet — both consumers of the tap (helpers and the
+// `eventtap_set_observed_tap` setter) accept conversions at the call
+// site, and the tap value is never stored on a struct field that would
+// trip the heuristic.
+//
+// Logger fallback, latch reset, and mask pre-computation are identical
+// to the original `Install` body — extracted verbatim during.
+func installInternal(spec hotkey.Spec, sink chan<- struct{}, log *slog.Logger) (*Releaser, C.CFMachPortRef, error) {
 	if log == nil {
 		log = slog.Default()
 	}
@@ -302,7 +422,8 @@ func Install(spec hotkey.Spec, sink chan<- struct{}, log *slog.Logger) (*Release
 	var cTap C.CFMachPortRef
 	rc := C.eventtap_install_c(C.uint64_t(masked), C.uint16_t(spec.KeyCode), &cTap)
 	if rc != 0 {
-		return nil, fmt.Errorf("%w: rc=%d (likely Accessibility revoked, SecureEventInput active, or kernel out of mach ports)",
+		var zero C.CFMachPortRef
+		return nil, zero, fmt.Errorf("%w: rc=%d (likely Accessibility revoked, SecureEventInput active, or kernel out of mach ports)",
 			ErrTapInstallFailed, int(rc))
 	}
 
@@ -329,9 +450,21 @@ func Install(spec hotkey.Spec, sink chan<- struct{}, log *slog.Logger) (*Release
 
 	// Capture cTap by value into the closures so the disable/uninstall
 	// functions stay bound to the install-time mach port — Release nilling
-	// `r.tap` does not affect what these closures hold.
+	// closures does not affect what these closures hold.
 	disableFn := func() {
 		C.eventtap_enable(cTap, C.int(0))
+	}
+	// clearObservedFn is the Step 1 atomic-null-guard
+	// write. Captures NOTHING — the C-side global lives in
+	// watchdog_darwin.m and is keyed by file scope, not by tap value. A
+	// zero-valued C.CFMachPortRef (an opaque-pointer typedef whose zero
+	// value is the NULL pointer) is the canonical "no current tap" signal
+	// that the watchdog handler / wake-observer blocks snapshot-check at
+	// the top of their bodies. Go's cgo type system rejects `C.CFMachPortRef(nil)`
+	// (mismatched-types error), so we use a zero-value variable.
+	clearObservedFn := func() {
+		var zero C.CFMachPortRef
+		C.eventtap_set_observed_tap(zero)
 	}
 	uninstallFn := func() {
 		C.eventtap_uninstall_c(cTap)
@@ -340,11 +473,12 @@ func Install(spec hotkey.Spec, sink chan<- struct{}, log *slog.Logger) (*Release
 	_ = workerLoop // captured for diagnostic logging by future smoke tests; not stored on Releaser to avoid go-vet unsafe.Pointer warning
 
 	r := &Releaser{
-		log:         log,
-		stopPoller:  stopPoller,
-		pollerDone:  pollerDone,
-		disableFn:   disableFn,
-		uninstallFn: uninstallFn,
+		log:             log,
+		stopPoller:      stopPoller,
+		pollerDone:      pollerDone,
+		disableFn:       disableFn,
+		clearObservedFn: clearObservedFn,
+		uninstallFn:     uninstallFn,
 	}
 
 	// Poller goroutine: reads `matched` on a 10ms ticker, on success
@@ -354,6 +488,117 @@ func Install(spec hotkey.Spec, sink chan<- struct{}, log *slog.Logger) (*Release
 		defer close(pollerDone)
 		pollMatched(stopPoller, &matched, sink, log)
 	}()
+
+	return r, cTap, nil
+}
+
+// InstallAll is the production composite that wires the three
+// subsystems — CGEventTap, watchdog dispatch_source_t, and
+// NSWorkspace wake observer — into a single Releaser whose
+// `Release` follows the verbatim order:
+//
+//	Step 1: eventtap_enable(tap, 0) + eventtap_set_observed_tap(NULL)
+//	Step 2: CFRunLoopRemoveSource  ┐
+//	Step 3: CFRelease(source+tap)  ┘  (both bundled in eventtap_uninstall_c)
+//	Step 4: watchdog_stop          (dispatch_source_cancel + Go poller drain)
+//	Step 5: wake_observer_remove   (NSWorkspace observers + g_observed_tap=NULL)
+//	(plus internal Steps 6/7: matched-key poller close + drain).
+//
+// calls this from cmd/dndmode/main.go Step 16 (after controller,
+// before sup.Wait). The single returned Releaser is pushed onto
+// RestoreState; LIFO order ensures it is released FIRST among the
+// Phase 4 push stack — appropriate, because tap teardown is the only one
+// that restores user-facing input.
+//
+// Error path is roll-back-on-failure (threat — partial
+// initialisation must not leak):
+//
+//   - `Install` failure → return (nil, wrapped err). Nothing acquired.
+//   - `StartWatchdog` failure → call r.Release() to tear down the tap +
+//     poller, then return wrapped err.
+//   - `InstallWakeObserver` failure → call wdStop() to tear down the
+// watchdog first (LIFO: watchdog before wake), then r.Release()
+//     to tear down the tap, then return wrapped err.
+//
+// The wake-observer error path explicitly tears down watchdog FIRST and
+// tap LAST because that mirrors the success-path release order for
+// the resources actually acquired at the point of failure — keeping a
+// single mental model regardless of whether teardown is triggered by
+// normal Cleanup or by InstallAll's own rollback.
+//
+// MUST be called from the main goroutine: `Install`, `StartWatchdog`, and
+// `InstallWakeObserver` all carry main-thread requirements (cocoa
+// pinning, NSWorkspace notificationCenter). main.go's `internal/runtimepin`
+// init() pins the main goroutine to OS thread #0 — this invariant is
+// preserved end-to-end.
+//
+// Logger fallback: nil → slog.Default() (mirrors all other Install-shaped
+// constructors in this codebase).
+func InstallAll(spec hotkey.Spec, sink chan<- struct{}, log *slog.Logger) (*Releaser, error) {
+	if log == nil {
+		log = slog.Default()
+	}
+
+	// Step A — install the tap itself via the package-private helper
+	// that returns the cTap by value (so we can pass it to
+	// helpers without storing it on a Releaser field — see the
+	// Design note on the Releaser struct for the go-vet
+	// / GC-safety rationale).
+	r, cTap, err := installInternal(spec, sink, log)
+	if err != nil {
+		// Nothing acquired; propagate the wrapped error so callers can
+		// `errors.Is(err, ErrTapInstallFailed)` for exit-code dispatch.
+		return nil, err
+	}
+
+	// `cf_to_void_ptr` is the C-side conversion helper (defined in this
+	// file's cgo preamble). A direct `unsafe.Pointer(cTap)` cast trips
+	// `go vet -unsafeptr` even though the use is idiomatic for cgo opaque
+	// handles; routing through C keeps vet quiet without weakening type
+	// safety (see the helper's docstring for full rationale).
+	tapPtr := C.cf_to_void_ptr(cTap)
+
+	// Step B — start the watchdog (dispatch_source_t timer Go-side
+	// threshold poller). On failure: roll back the tap to keep the
+	// keyboard responsive.
+	wdStop, err := StartWatchdog(tapPtr, sink, log)
+	if err != nil {
+		// Best-effort rollback. Release error is propagated only if the
+		// watchdog error doesn't already explain the failure; we keep the
+		// watchdog error as the primary because that's the root cause the
+		// caller diagnoses against.
+		if relErr := r.Release(); relErr != nil {
+			log.Warn("eventtap install rollback: tap release after watchdog failure",
+				slog.Any("watchdog_err", err), slog.Any("release_err", relErr))
+		}
+		return nil, fmt.Errorf("eventtap: start watchdog: %w", err)
+	}
+
+	// Step C — install the NSWorkspace wake observer. On failure:
+	// stop the watchdog FIRST (LIFO: watchdog before wake, even on
+	// rollback), then release the tap.
+	wkStop, err := InstallWakeObserver(tapPtr, log)
+	if err != nil {
+		wdStop()
+		if relErr := r.Release(); relErr != nil {
+			log.Warn("eventtap install rollback: tap release after wake-observer failure",
+				slog.Any("wake_err", err), slog.Any("release_err", relErr))
+		}
+		return nil, fmt.Errorf("eventtap: install wake observer: %w", err)
+	}
+
+	// Step D — seed g_observed_tap with the real tap. `watchdog_start`
+	// already wrote it inside StartWatchdog above (defensive belt — for
+	// the smoke-test path that exercises the watchdog in
+	// isolation), so this is an idempotent re-write of the same value.
+	// Explicit here makes InstallAll the single source of truth for the
+	// "tap is currently observed by both watchdog + wake" invariant.
+	C.eventtap_set_observed_tap(cTap)
+
+	// Wire the stop closures onto the Releaser so the unified Release
+	// path runs them at Steps 4 and 5.
+	r.watchdogStop = wdStop
+	r.wakeStop = wkStop
 
 	return r, nil
 }

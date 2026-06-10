@@ -19,13 +19,18 @@ static id g_wake_token = nil;
 // it depending on the other user's SecureEventInput state).
 static id g_session_token = nil;
 
-// g_observed_tap caches the CFMachPortRef pointer so the observer block
-// can call `CGEventTapEnable(g_observed_tap, true)` without an extra
-// indirection through Go. The pointer is owned by the install path
-// (`tap_darwin.m` g_tap) — the wake module borrows it for the lifetime of
-// the observer subscription. NULL-check inside the block guards against
-// out-of-order teardown where the tap is released before the observer.
-static CFMachPortRef g_observed_tap = NULL;
+// g_observed_tap is DEFINED in watchdog_darwin.m (single binary-wide
+// definition; this TU sees it via `extern`). Both the watchdog GCD block
+// and the NSWorkspace wake / session-active blocks read this same global
+// so Release Step 1 (eventtap_set_observed_tap(NULL)) closes the race
+// window for BOTH subsystems in a single atomic write. See the docstring
+// above the definition in watchdog_darwin.m for full rationale.
+//
+// `volatile` is mandatory here too: this file's blocks run on
+// `[NSOperationQueue mainQueue]` while the writer runs on the goroutine
+// that drives Release (typically also main, but cross-thread invariants
+// are defended unconditionally).
+extern volatile CFMachPortRef g_observed_tap;
 
 // wake_observer_install subscribes to NSWorkspace wake + session-active
 // notifications via `[[NSWorkspace sharedWorkspace] notificationCenter]`
@@ -50,6 +55,11 @@ int wake_observer_install(CFMachPortRef tap) {
         return 2;
     }
 
+    // Seed the shared global (defined in watchdog_darwin.m). For an InstallAll
+    // call site this is also re-set explicitly after wake_observer_install
+    // returns — idempotent re-write. For a wake-observer-only caller (none in
+    // production v1.0, but the API stays callable in isolation for smoke
+    // tests / future refactors) this line is the sole writer.
     g_observed_tap = tap;
     NSNotificationCenter *nc = [[NSWorkspace sharedWorkspace] notificationCenter];
 
@@ -58,9 +68,18 @@ int wake_observer_install(CFMachPortRef tap) {
                                     queue:[NSOperationQueue mainQueue]
                                usingBlock:^(NSNotification *n) {
         (void)n;
-        if (g_observed_tap != NULL) {
-            CGEventTapEnable(g_observed_tap, true);
+        // guard: snapshot g_observed_tap BEFORE
+        // any CGEventTapEnable call. Between Release Step 1 (NULL write)
+        // and Step 5 (wake_observer_remove), this block may still fire
+        // from a pending main-queue dispatch. Snapshot pattern ensures
+        // either we no-op safely (snap == NULL) or we hold a local that
+        // remained valid throughout — same rationale as the watchdog
+        // handler in watchdog_darwin.m.
+        CFMachPortRef tap_snap = g_observed_tap;
+        if (tap_snap == NULL) {
+            return;
         }
+        CGEventTapEnable(tap_snap, true);
     }];
 
     g_session_token = [nc addObserverForName:NSWorkspaceSessionDidBecomeActiveNotification
@@ -68,9 +87,16 @@ int wake_observer_install(CFMachPortRef tap) {
                                        queue:[NSOperationQueue mainQueue]
                                   usingBlock:^(NSNotification *n) {
         (void)n;
-        if (g_observed_tap != NULL) {
-            CGEventTapEnable(g_observed_tap, true);
+        // Same guard as the DidWake block above — identical
+        // rationale, identical pattern. Kept duplicated rather than
+        // factored into a helper because Objective-C blocks capturing
+        // function pointers across notification names obscure stack
+        // traces, and a 4-line snapshot pattern is its own documentation.
+        CFMachPortRef tap_snap = g_observed_tap;
+        if (tap_snap == NULL) {
+            return;
         }
+        CGEventTapEnable(tap_snap, true);
     }];
 
     return 0;
@@ -96,7 +122,10 @@ void wake_observer_remove(void) {
         [nc removeObserver:g_session_token];
         g_session_token = nil;
     }
-    // Guard against stale tap-pointer use after Releaser.Release teardown
-    // chain unwinds the tap before the observer (D-08 step 5 ordering).
+    // Defence-in-depth: Release Step 1 already wrote NULL via
+    // eventtap_set_observed_tap (BEFORE Step 5 reaches here), so this
+    // assignment is a redundant re-NULL — kept so the wake-observer
+    // teardown is self-contained for any caller exercising it in
+    // isolation (smoke tests; unit tests).
     g_observed_tap = NULL;
 }
