@@ -508,6 +508,18 @@ func run() int {
 	}
 	rs.Push(tapRel) // released FIRST in LIFO (Name == "eventtap")
 
+	// --- Step 18.0 (Phase 4 — acceptance test hook) ---
+	// Production-safe env-var-guarded panic injection. Used ONLY by
+	// TestAcceptance_LIFE10_PanicRecover subprocess test. Default OFF
+	// переменная не упоминается в README/docs; production пользователи не
+	// увидят. При DNDMODE_TEST_PANIC=1 паника выстреливает после всех Push'ей,
+	// что позволяет валидировать: (a) top-level recover в run() (
+	// mitigation) catch'ит панику; (b) rs.Cleanup() уже отработал к моменту
+	// os.Exit (через LIFO unwind defers); (c) exit code = exitInternalErr (8).
+	if os.Getenv("DNDMODE_TEST_PANIC") == "1" {
+		panic("test panic (DNDMODE_TEST_PANIC=1)")
+	}
+
 	// --- Step 18 (Phase 3): Active state banner (P2: AFTER controller create) ---
 	fmt.Fprintln(os.Stdout, "dndmode: active. press Ctrl-C.")
 
