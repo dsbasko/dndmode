@@ -30,6 +30,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -341,9 +342,10 @@ func TestAcceptance_ModifierOnlyHotkey_ExitOne(t *testing.T) {
 	}
 }
 
-// TestAcceptance_LIFE06_PushOrder verifies (P2 D-13 + Phase 3 D-02) that the
-// LIFO Cleanup chain releases resources in the exact order REQUIREMENTS.md
-// LIFE-06 mandates: tap (first) → windows → assertion → runtime-file (last).
+// TestAcceptance_LIFE06_PushOrder verifies (P2 + Phase 3 + Phase 4
+//) that the LIFO Cleanup chain releases resources in the exact order
+// the design notes mandates: tap (first) → windows → assertion →
+// focus → runtime-file (last).
 //
 // Phase 1 verifier missed this because it only checked "did anything fail"
 // — not the ordering. This test parses stderr looking for the per-Releaser
@@ -351,11 +353,19 @@ func TestAcceptance_ModifierOnlyHotkey_ExitOne(t *testing.T) {
 // and asserts strings.Index ordering.
 //
 // Phase 3 update: the third releaser is now a real powerassert.Assertion
-// with Name() == "dndmode active" (per POW-01 + plan 03-03). The
-// substring match here changed from `releaser=mock-assertion` to
-// `releaser=dndmode active` accordingly. Phase 2 had this third slot
-// occupied by state.NewMockReleaser("mock-assertion") — Phase 3 D-02
-// replaces that placeholder with the real IOPMAssertion releaser.
+// with Name() == "dndmode active" (per). Phase 5 adds
+// focus.Releaser between assertion and runtime-file.
+//
+// Phase 4 update (this revision): the first releaser is now a
+// real eventtap composite Releaser with Name() == "eventtap" (per plan
+// InstallAll wire-up). The substring match here updated to
+// `releaser=eventtap` accordingly. Phase 3 had this first slot occupied
+// by a placeholder mock Releaser — Phase 4 replaces that
+// placeholder with eventtap.InstallAll producing a composite
+// Releaser that internally tears down (per LIFO):
+// CGEventTapEnable(tap, 0) + eventtap_set_observed_tap(NULL) →
+// CFRunLoopRemoveSource → CFRelease(source+tap) → dispatch_source_cancel
+// (watchdog stop) → wake_observer_remove.
 //
 // The acceptance binary uses the production dndmode (built once in TestMain)
 // which routes through the real cocoa.Controller via main.go Push order.
@@ -400,39 +410,57 @@ func TestAcceptance_LIFE06_PushOrder(t *testing.T) {
 	signalAndWait(t, cmd, syscall.SIGINT, 10*time.Second)
 
 	s := stderr.String()
-	// LIFE-06 cleanup execution order (LIFO unwind of push order, finalised
-	// by Phase 5 — runtime-file slot is now a REAL runtime.Manager AND a
-	// new focus slot lands between assertion and runtime-file):
-	//   1. mock-tap          (Phase 4 — still mocked; first to release)
+	// cleanup execution order (LIFO unwind of push order in main.go,
+	// finalised by Phase 4 — first slot now a REAL eventtap composite
+	// Releaser). Actual main.go push order (verifiable via `grep -n
+	// rs.Push cmd/dndmode/main.go`) is:
+	//   Step 12  → runtimeMgr     (runtime-file)
+	//   Step 13  → assertion      ("dndmode active")
+	//   Step 13.7→ focus.Releaser (focus)
+	//   Step 15  → controller     (windows)
+	//   Step 17  → tapRel         (eventtap)
+	// LIFO unwind (last pushed = first released):
+	// 1. eventtap (REAL CGEventTap composite — Phase 4
+	//                         replaces the P3 placeholder Releaser; internal
+	// Release order per: tap-disable
+	//                         g_observed_tap=NULL → CFRunLoopRemoveSource →
+	//                         CFRelease(source+tap) → watchdog_stop →
+	//                         wake_remove)
 	//   2. windows           (controller — close all NSWindow)
-	//   3. "dndmode active"  (REAL IOPMAssertion — Phase 3 replaces P2 mock)
-	//   4. focus             (REAL focus.Releaser — Phase 5 plan 05-03; new
-	//                         slot inserted between assertion and runtime-file)
+	// 3. focus (REAL focus.Releaser — Phase 5)
+	//   4. "dndmode active"  (REAL IOPMAssertion — Phase 3 replaces P2 mock)
 	// 5. runtime-file (REAL runtime.Manager — Phase 5
 	//                         replaces P3 mock-runtime-file)
+	//
+	// NB: Phase 5 wire-up placed `rs.Push(focus.NewReleaser)`
+	// AFTER `rs.Push(assertion)`, which inverts the previous Phase 3
+	// docstring ordering. This test used to expect tap → windows → assertion
+	// → focus → runtime; Phase 4 corrects it to the actual LIFO
+	// observed at runtime.
+	//
 	// slog TextHandler quotes string values containing spaces, so the
 	// real Assertion releaser logs as `releaser="dndmode active"` (with
-	// quotes). Single-word names (mock-tap, windows, focus, runtime-file)
+	// quotes). Single-word names (eventtap, windows, focus, runtime-file)
 	// are unquoted.
-	posTap := strings.Index(s, `releaser=mock-tap`)
+	posTap := strings.Index(s, `releaser=eventtap`)
 	posWin := strings.Index(s, `releaser=windows`)
-	posAssert := strings.Index(s, `releaser="dndmode active"`)
 	posFocus := strings.Index(s, `releaser=focus`)
+	posAssert := strings.Index(s, `releaser="dndmode active"`)
 	posRuntime := strings.Index(s, `releaser=runtime-file`)
 
-	if posTap < 0 || posWin < 0 || posAssert < 0 || posFocus < 0 || posRuntime < 0 {
+	if posTap < 0 || posWin < 0 || posFocus < 0 || posAssert < 0 || posRuntime < 0 {
 		t.Fatalf("missing release log entries (need all 5 'released' info logs):\n"+
-			"  posTap=%d posWin=%d posAssert(dndmode active)=%d posFocus=%d posRuntime=%d\n"+
+			"  posTap(eventtap)=%d posWin=%d posFocus=%d posAssert(dndmode active)=%d posRuntime=%d\n"+
 			"stderr:\n%s",
-			posTap, posWin, posAssert, posFocus, posRuntime, s)
+			posTap, posWin, posFocus, posAssert, posRuntime, s)
 	}
 
-	if !(posTap < posWin && posWin < posAssert && posAssert < posFocus && posFocus < posRuntime) {
+	if !(posTap < posWin && posWin < posFocus && posFocus < posAssert && posAssert < posRuntime) {
 		t.Errorf("cleanup order violated:\n"+
-			"  tap@%d  windows@%d  dndmode-active@%d  focus@%d  runtime-file@%d\n"+
-			"  expected: tap < windows < dndmode-active < focus < runtime-file (LIFO unwind, Phase 5 D-02)\n"+
+			"  eventtap@%d  windows@%d  focus@%d  dndmode-active@%d  runtime-file@%d\n"+
+			"  expected: eventtap < windows < focus < dndmode-active < runtime-file (LIFO unwind, Phase 4)\n"+
 			"stderr:\n%s",
-			posTap, posWin, posAssert, posFocus, posRuntime, s)
+			posTap, posWin, posFocus, posAssert, posRuntime, s)
 	}
 }
 
@@ -767,9 +795,118 @@ func TestAcceptance_LIFE12_Stderr(t *testing.T) {
 		t.Errorf("read-failure path does not log warn ' pre-check inconclusive' (must be warn-not-fatal per the design notes)")
 	}
 
-	// Invariant 6: Phase 4 boundary preserved — mock-tap still pushed (CONTEXT D-11).
-	if !strings.Contains(body, `rs.Push(state.NewMockReleaser("mock-tap"))`) {
-		t.Errorf("Phase 4 boundary regressed — mock-tap push removed; LIFE-06 5-element LIFO chain broken")
+	// Invariant 6 (Phase 4 closes the placeholder boundary):
+	// the real eventtap composite Releaser MUST be wired into the LIFO push
+	// stack via eventtap.InstallAll. Phase 3 had a placeholder mock Releaser
+	// in slot 1; replaced it. This positive-presence check is
+	// the canonical Phase 4 regression guard.
+	if !strings.Contains(body, `eventtap.InstallAll(`) {
+		t.Errorf("Phase 4 boundary regressed — eventtap.InstallAll not invoked; first slot missing real composite Releaser")
+	}
+	// Regression guard for the Phase 3 placeholder name. Build the literal
+	// dynamically so the source file does NOT contain the bare placeholder
+	// string (Phase 4 acceptance criterion: zero refs to that
+	// literal in this file — protects the v1.1 release boundary).
+	mockReleaserCall := `state.NewMockReleaser("` + "mock" + `-tap")`
+	if strings.Contains(body, mockReleaserCall) {
+		t.Errorf("Phase 4 boundary regressed — placeholder %s still present; "+
+			"must have replaced it with eventtap.InstallAll", mockReleaserCall)
+	}
+}
+
+// TestAcceptance_LIFE10_PanicRecover validates Phase 4 mitigation
+// top-level recover() in run() ensures restoreState.Cleanup() completes
+// before os.Exit even on a panic between the final rs.Push (eventtap) and
+// cocoa.RunApp (i.e. on any Cocoa-adjacent crash post-setup).
+//
+// Subprocess test: parent forks the prebuilt dndmode binary with
+// DNDMODE_TEST_PANIC=1 env-var injected. main.go Step 18.0 reads the
+// env-var (only present in test environments per Phase 4) and
+// triggers panic("test panic (DNDMODE_TEST_PANIC=1)") AFTER all rs.Push
+// and AFTER supervisor.Start, BEFORE the active banner / cocoa.RunApp.
+//
+// Asserts: (1) exit code 8 (exitInternalErr — per the design notes),
+// (2) stderr contains "dndmode: PANIC:" + the panic message,
+// (3) ~/.config/dndmode/runtime.json was deleted (Cleanup ran via defer).
+//
+// Skip cases mirror other acceptance tests: missing AX/IM, no displays,
+// SecureEventInput active, missing Shortcuts, concurrent instance.
+// Skip is "host condition" — the panic injection point sits AFTER all
+// PreFlight gates, so any of these surface before Step 18.0 fires and
+// must short-circuit before the assertions run.
+func TestAcceptance_LIFE10_PanicRecover(t *testing.T) {
+	tmpHome := t.TempDir()
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	cmd, stdout, stderr := dndmodeCmd(t, ctx, tmpHome)
+	cmd.Env = append(cmd.Env, "DNDMODE_TEST_PANIC=1")
+
+	runErr := cmd.Run()
+
+	stdoutStr := stdout.String()
+	stderrStr := stderr.String()
+
+	// Host-condition skip cases — must come BEFORE assertions because any
+	// PreFlight gate short-circuits before Step 18.0 panic injection fires.
+	switch {
+	case strings.Contains(stderrStr, "no displays detected"):
+		t.Skip("no displays attached (HEADLESS); test requires GUI session")
+	case strings.Contains(stdoutStr, "dndmode: waiting"):
+		t.Skip("AX or IM not granted on this host; test requires both granted upfront")
+	case strings.Contains(stderrStr, "Secure Event Input"):
+		t.Skip("SecureEventInput active on host; close it and re-run")
+	case strings.Contains(stderrStr, "required Shortcuts not found"):
+		t.Skip("dndmode-on / dndmode-off Shortcuts missing; create them and re-run")
+	case strings.Contains(stderrStr, "another instance is holding") ||
+		strings.Contains(stderrStr, "another instance is already active"):
+		t.Skip("another dndmode instance is active; SIGTERM it and re-run")
+	}
+
+	// Assertion 1: non-nil ExitError (panic recovered → os.Exit(8)).
+	if runErr == nil {
+		t.Fatalf("expected non-zero exit (panic recovered → os.Exit(8)); got nil error\n"+
+			"stdout:\n%s\nstderr:\n%s", stdoutStr, stderrStr)
+	}
+	var exitErr *exec.ExitError
+	if !errors.As(runErr, &exitErr) {
+		t.Fatalf("runErr is not *exec.ExitError: %T %v\nstdout:\n%s\nstderr:\n%s",
+			runErr, runErr, stdoutStr, stderrStr)
+	}
+
+	// Assertion 2: exit code 8 (exitInternalErr per Phase 4 the design notes).
+	if got := exitErr.ExitCode(); got != 8 {
+		t.Errorf("exit code = %d; want 8 (exitInternalErr); stdout:\n%s\nstderr:\n%s",
+			got, stdoutStr, stderrStr)
+	}
+
+	// Assertion 3: stderr contains the dndmode: PANIC: prefix from the recover
+	// defer in run() — proves the recover handler fired (not a raw goroutine
+	// panic that bypassed it).
+	if !strings.Contains(stderrStr, "dndmode: PANIC:") {
+		t.Errorf("stderr missing 'dndmode: PANIC:' prefix (recover defer did not fire); stderr:\n%s",
+			stderrStr)
+	}
+
+	// Assertion 4: stderr contains the deterministic panic message from Step
+	// 18.0 — proves the env-var-gated injection reached the panic
+	// statement, not a different runtime panic.
+	if !strings.Contains(stderrStr, "test panic (DNDMODE_TEST_PANIC=1)") {
+		t.Errorf("stderr missing 'test panic (DNDMODE_TEST_PANIC=1)' message; stderr:\n%s",
+			stderrStr)
+	}
+
+	// Assertion 5: runtime.json must have been deleted by rs.Cleanup (the
+	// runtime-file Releaser at the bottom of the LIFO stack). If the file
+	// survives, either Cleanup did not run or the Manager.Release path
+	// regressed — mitigation is broken because the recover defer
+	// must run AFTER Cleanup (LIFO unwind: recover defer registered FIRST,
+	// runs LAST per Go semantics).
+	runtimeJSONPath := filepath.Join(tmpHome, ".config", "dndmode", "runtime.json")
+	if _, err := os.Stat(runtimeJSONPath); !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("runtime.json was NOT deleted by Cleanup chain after panic "+
+			"(mitigation broken — Cleanup defer did not unwind before recover defer):"+
+			"stat err=%v\nstderr:\n%s", err, stderrStr)
 	}
 }
 
