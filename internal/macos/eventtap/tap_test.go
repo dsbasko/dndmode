@@ -274,7 +274,7 @@ func TestEventTapMatched_Function_StoresAtomic(t *testing.T) {
 // TestUserIntentionalMask_MatchesMatcherPackage pins the bit-for-bit
 // equality between the Go-side `matcher.UserIntentionalMask` and the
 // C-side `USER_INTENTIONAL_MASK` constant in tap_darwin.m. Both must
-// produce 0x00CE0000 (Shift|Control|Alternate|Command|SecondaryFn):
+// produce 0x009E0000 (Shift|Control|Alternate|Command|SecondaryFn):
 //
 //	Shift        = 0x00020000
 //	Control      = 0x00040000
