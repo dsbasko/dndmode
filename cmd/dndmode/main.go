@@ -534,6 +534,23 @@ func run() int {
 	// Wait for supervisor goroutine to drain.
 	sup.Wait()
 
+	// distinguish a watchdog-triggered abnormal shutdown from a
+	// normal matched-hotkey exit. The supervisor exit-trigger channel is
+	// shared between the matched-key poller and the watchdog threshold
+	// poller — both send a bare struct{}, so the supervisor cannot tell
+	// the source from the signal alone. The watchdog sets
+	// eventtap.WatchdogTripped to true BEFORE forwarding through the
+	// shared sink (see watchdog_darwin.go), so by the time sup.Wait()
+	// returns the latch is durably visible. exitSecureInputConflict (4)
+	// is the reused slot per errors.go ErrWatchdogExitThreshold +
+	// CONTEXT D-10: an abnormal platform stop. Without this branch,
+	// watchdog-killed runs collapsed to exit 0 — operators saw a healthy
+	// process and the next LiveChecker found no orphan, masking
+	// the silent-disable failure.
+	if eventtap.WatchdogTripped.Load() {
+		return exitSecureInputConflict
+	}
+
 	// Return exitOK; defer chain runs (Cleanup LIFO + stdout cleanup banner).
 	// LIFO release order (Phase 5 finalizes):
 	// mock-tap → windows → "dndmode active" → focus → runtime-file.
