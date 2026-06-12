@@ -55,12 +55,14 @@ int wake_observer_install(CFMachPortRef tap) {
         return 2;
     }
 
-    // Seed the shared global (defined in watchdog_darwin.m). For an InstallAll
-    // call site this is also re-set explicitly after wake_observer_install
-    // returns — idempotent re-write. For a wake-observer-only caller (none in
-    // production v1.0, but the API stays callable in isolation for smoke
-    // tests / future refactors) this line is the sole writer.
-    g_observed_tap = tap;
+    // fix: do NOT seed g_observed_tap here yet. The previous code
+    // wrote `g_observed_tap = tap` BEFORE addObserverForName, so if
+    // addObserverForName failed (rc=2 "already installed" short-circuit
+    // OR a future addition of a fallible second observer) the global
+    // would remain seeded with a tap pointer that no observer references.
+    // The seed now lives at the BOTTOM of the function — after both
+    // observers have non-nil tokens — so failure paths leave the global
+    // pristine for the caller's rollback chain to keep its invariants.
     NSNotificationCenter *nc = [[NSWorkspace sharedWorkspace] notificationCenter];
 
     g_wake_token = [nc addObserverForName:NSWorkspaceDidWakeNotification
@@ -98,6 +100,14 @@ int wake_observer_install(CFMachPortRef tap) {
         }
         CGEventTapEnable(tap_snap, true);
     }];
+
+    // fix: seed the shared global ONLY after both observer
+    // registrations have returned non-nil tokens. For an InstallAll
+    // call site this is also re-set explicitly after wake_observer_install
+    // returns — idempotent re-write. For a wake-observer-only caller
+    // (none in production v1.0, but the API stays callable in isolation
+    // for smoke tests / future refactors) this line is the sole writer.
+    g_observed_tap = tap;
 
     return 0;
 }
