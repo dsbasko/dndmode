@@ -56,6 +56,28 @@ const watchdogPollInterval = 100 * time.Millisecond
 // permitted in the //export callback body per nosplit invariant.
 var watchdogThresholdHit atomic.Bool
 
+// WatchdogTripped is the package-level latch read by cmd/dndmode/main.go
+// AFTER `sup.Wait()` returns, so the process can distinguish a
+// watchdog-triggered abnormal exit (exit code 4 = exitSecureInputConflict
+// per CR-01 fix: the watchdog reuses the slot the way errors.go
+// ErrWatchdogExitThreshold docstring promised — the exit code is the
+// "abnormal-platform-stop" semantic, and CONTEXT D-10 documents the
+// reuse) from a normal matched-hotkey exit (exit code 0).
+//
+// Lifecycle:
+//
+//   - Cleared at StartWatchdog (every fresh Start resets to false).
+//   - Set to true by pollWatchdogThreshold immediately before forwarding
+//     the threshold signal through the shared sink channel.
+//   - Read by main.go after sup.Wait() to choose between exitOK and the
+//     abnormal-exit code.
+//
+// We deliberately use a separate atomic.Bool rather than a typed envelope
+// on supervisor.ExitTrigger to keep the Supervisor API surface unchanged
+// (option (b) of 's two suggested fixes). The shared sink channel
+// continues to carry struct{} signals; this latch encodes the source.
+var WatchdogTripped atomic.Bool
+
 // eventtap_watchdog_failed is the cgo entry point invoked from the GCD
 // timer block in watchdog_darwin.m when the consecutive-failure counter
 // reaches the threshold. It fires on the GCD high-priority dispatch queue
@@ -219,8 +241,12 @@ func StartWatchdog(tap unsafe.Pointer, sink chan<- struct{}, log *slog.Logger) (
 	}
 	// Reset latch on every fresh Start — supports test fixtures and the
 	// theoretical Stop-then-Start cycle, even though production has a
-	// single Start per process lifetime (Install runs once).
+	// single Start per process lifetime (Install runs once). Reset
+	// WatchdogTripped (CR-01) alongside so an aborted prior watchdog
+	// run cannot cause a fresh launch (in tests) to be misread as
+	// abnormal.
 	watchdogThresholdHit.Store(false)
+	WatchdogTripped.Store(false)
 
 	if err := startWatchdog(tap); err != nil {
 		return nil, err
@@ -290,6 +316,21 @@ func pollWatchdogThreshold(stop <-chan struct{}, flag *atomic.Bool, sink chan<- 
 			// verbatim — must match watchdog_test.go acceptance
 			// (and errors.go ErrWatchdogExitThreshold docstring).
 			log.Error("eventtap watchdog: tap dead after 5 re-enable failures, exiting to restore input")
+			// signal the abnormal-exit source BEFORE sending
+			// to the shared sink. The sink channel is shared with the
+			// matched-hotkey poller, so the supervisor cannot tell
+			// which source fired. main.go reads WatchdogTripped AFTER
+			// sup.Wait() returns and maps true → exitPlatformErr
+			// (instead of exitOK), restoring the contract documented
+			// in errors.go ErrWatchdogExitThreshold (CONTEXT D-10).
+			// Store-before-send is critical: the supervisor may
+			// observe the sink signal and run RequestStop → ctx.cancel
+			// → cocoa.RunApp returns → sup.Wait returns → main.go
+			// reads the latch — all of that races us if we stored
+			// AFTER the send. Storing before the send + Go's
+			// happens-before on a channel op published by a single
+			// writer ensures main sees true.
+			WatchdogTripped.Store(true)
 			// Non-blocking send — a full sink (race with matched-key
 			// send) MUST NOT deadlock the watchdog. The supervisor
 			// only needs one signal to start unwinding either way.

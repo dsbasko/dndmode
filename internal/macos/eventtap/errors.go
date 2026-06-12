@@ -37,9 +37,15 @@ var ErrTapInstallFailed = errors.New("eventtap: CGEventTapCreate returned NULL (
 //
 // `main.go` reads this from the supervisor's `ExitTrigger()` path indirectly:
 // the watchdog forwards the signal through the same channel that `matched`
-// events use, and the supervisor cleanly unwinds the LIFO Cleanup chain
-// with exit code 4 (`exitPlatformErr` — reused per D-10). NOT a panic; the
-// idempotent `Releaser.Release` path runs to completion before `os.Exit`.
+// events use, and the supervisor cleanly unwinds the LIFO Cleanup chain.
+// AFTER `sup.Wait()` returns, main.go reads the package-level
+// `WatchdogTripped atomic.Bool` (CR-01 fix) to distinguish the watchdog
+// path from a matched-hotkey path: on true → exit code 4
+// (`exitSecureInputConflict` — the abnormal-platform-stop slot reused per
+// D-10), on false → exit code 0 (`exitOK`). NOT a panic; the idempotent
+// `Releaser.Release` path runs to completion before `os.Exit`. Before
+// CR-01 the watchdog path silently collapsed to exit 0, masking the
+// silent-disable failure from operators + LIFE-12 LiveChecker.
 //
 // Wave 0 ships the bare sentinel so the watchdog tests in this plan
 // (TestWatchdog_Threshold_Triggers_AfterFiveConsecutiveFailures et al.)
