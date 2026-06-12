@@ -812,6 +812,40 @@ func TestAcceptance_LIFE12_Stderr(t *testing.T) {
 		t.Errorf("Phase 4 boundary regressed — placeholder %s still present; "+
 			"must have replaced it with eventtap.InstallAll", mockReleaserCall)
 	}
+
+	// Invariant 7 (fix regression guard): the bare `eventtap.Install(`
+	// helper MUST NOT be invoked from production code. The historical bare
+	// Install returned a *Releaser with nil watchdogStop + nil wakeStop and
+	// silently bypassed both the silent-disable watchdog and the wake-after-sleep
+	// re-arm observer. unexported it (renamed to `installTapOnly`);
+	// this substring check is a belt-and-suspenders guard against a future
+	// maintainer re-exporting it OR a fresh public API that re-introduces
+	// the same shape.
+	//
+	// We rebuild the `eventtap.Install(` literal dynamically so this source
+	// file itself does not contain the bare token (otherwise the literal
+	// inside this comment / error message would self-trigger if main.go
+	// were ever inlined into this test for any reason). The suffix `(`
+	// disambiguates the bare form from `eventtap.InstallAll(` — the byte
+	// right after `eventtap.Install` in `eventtap.InstallAll(` is `A`, not
+	// `(`, so strings.Index for `eventtap.Install(` matches ONLY the bare
+	// form.
+	forbidden := "eventtap.Install" + "("
+	cursor := 0
+	for {
+		off := strings.Index(body[cursor:], forbidden)
+		if off < 0 {
+			break
+		}
+		absolute := cursor + off
+		t.Errorf("fix regressed: bare Install call found in main.go at byte offset %d."+
+			"Use eventtap.InstallAll for production wire-up; the bare helper is unexported "+
+			"(installTapOnly) and reserved for the manual smoke test.",
+			absolute)
+		// Continue scanning so the test reports every offending site, not
+		// just the first.
+		cursor = absolute + len(forbidden)
+	}
 }
 
 // TestAcceptance_LIFE10_PanicRecover validates Phase 4 mitigation

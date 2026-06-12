@@ -338,11 +338,24 @@ func (r *Releaser) Release() error {
 	return nil
 }
 
-// Install installs a CGEventTap at kCGHIDEventTap level configured to match
-// the given hotkey.Spec. On a successful (modifiers, keyCode) match the C
-// callback flips the package-level atomic.Bool `matched`; the poller
-// goroutine reads it on a 10ms ticker and forwards a struct{} send to sink
-// (capacity 1, non-blocking select-default — D-02 / D-04).
+// installTapOnly installs a CGEventTap at kCGHIDEventTap level configured
+// to match the given hotkey.Spec. On a successful (modifiers, keyCode)
+// match the C callback flips the package-level atomic.Bool `matched`; the
+// poller goroutine reads it on a 10ms ticker and forwards a struct{} send
+// to sink (capacity 1, non-blocking select-default).
+//
+// fix: previously exposed as exported `Install`, but the returned
+// `*Releaser` had nil `watchdogStop` + nil `wakeStop` — Release() silently
+// short-circuited past both, leaving the production caller with NO
+// silent-disable recovery and NO post-wake re-arm. doc.go advertised
+// `Install` as THE entry point; a future maintainer reading the docs
+// could reasonably write `eventtap.Install(...)` from main.go, see the
+// binary compile + run, and lose protection on the first user MacBook
+// that goes to sleep or hits a TCC race. The package boundary is unsafe.
+// Renamed to unexported `installTapOnly` to make the smoke-test-only
+// surface clear — production callers MUST go through `InstallAll`. The
+// smoke test that exercises this path is now an internal_test (same
+// package), so it retains access to this helper without re-exporting it.
 //
 // Logger fallback: nil → slog.Default() (mirrors powerassert.Acquire +
 // state.NewRestoreState + cocoa.NewController convention).
@@ -356,17 +369,18 @@ func (r *Releaser) Release() error {
 // (the design notes).
 //
 // Worker thread pattern (the design notes): a dedicated goroutine is spawned
-// inside Install. It calls runtime.LockOSThread() (no Unlock — the Go
-// runtime reaps the OS thread when the goroutine exits via CFRunLoopStop),
-// captures its run loop via eventtap_register_worker_runloop, adds the tap
-// source to it, then blocks on CFRunLoopRun() until Release calls
-// CFRunLoopStop on the captured loop pointer.
+// inside installTapOnly. It calls runtime.LockOSThread() (no Unlock — the
+// Go runtime reaps the OS thread when the goroutine exits via
+// CFRunLoopStop), captures its run loop via
+// eventtap_register_worker_runloop, adds the tap source to it, then
+// blocks on CFRunLoopRun() until Release calls CFRunLoopStop on the
+// captured loop pointer.
 //
 // MUST be called from the main goroutine. The main goroutine is locked to
-// OS thread #0 by internal/runtimepin/init(); Install itself does NOT touch
-// AppKit but the watchdog (plan 04-03) and wake observer (plan 04-04) — which
-// are installed by Wave 2 wire-up AFTER this call — do, so the convention
-// is preserved end-to-end.
+// OS thread #0 by internal/runtimepin/init(); installTapOnly itself does
+// NOT touch AppKit but the watchdog and wake observer
+// — which are installed by wire-up AFTER this call
+// do, so the convention is preserved end-to-end.
 //
 // Error path: a non-zero return code from eventtap_install_c is wrapped via
 // fmt.Errorf("%w: rc=%d ...", ErrTapInstallFailed, rc) so callers can use
@@ -378,8 +392,8 @@ func (r *Releaser) Release() error {
 // CFMachPortCreateRunLoopSource-returned-NULL (rc=2).
 //
 // wire-up in cmd/dndmode/main.go uses InstallAll (the composite)
-// rather than this raw Install — the composite wires watchdog + wake
-// observer in addition to the bare tap. Install remains exported for
+// rather than this raw helper — the composite wires watchdog + wake
+// observer in addition to the bare tap. installTapOnly remains for
 // smoke tests (`-tags manual`) that exercise the tap subsystem in
 // isolation without the GCD timer / NSWorkspace observer overhead.
 //
@@ -387,7 +401,7 @@ func (r *Releaser) Release() error {
 // their own GCD timer / notification token respectively; they are NOT
 // bundled here so the three plans can land in parallel and so the smoke
 // test stays minimal. Production callers MUST use InstallAll.
-func Install(spec hotkey.Spec, sink chan<- struct{}, log *slog.Logger) (*Releaser, error) {
+func installTapOnly(spec hotkey.Spec, sink chan<- struct{}, log *slog.Logger) (*Releaser, error) {
 	r, _, err := installInternal(spec, sink, log)
 	return r, err
 }

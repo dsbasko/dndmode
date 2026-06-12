@@ -1,6 +1,12 @@
 //go:build darwin && manual
 
-package eventtap_test
+// moved from `package eventtap_test` (black-box) to internal
+// `package eventtap` (white-box) so the smoke test can reach the
+// unexported `installTapOnly` helper that replaces the formerly-exported
+// `Install`. The production wire-up (cmd/dndmode/main.go) goes through
+// `InstallAll`; this internal_test exercises the bare tap path in
+// isolation for cgo round-trip validation.
+package eventtap
 
 import (
 	"log/slog"
@@ -8,7 +14,6 @@ import (
 	"testing"
 
 	"github.com/dsbasko/dndmode/internal/config/hotkey"
-	"github.com/dsbasko/dndmode/internal/macos/eventtap"
 	"github.com/dsbasko/dndmode/internal/macos/permissions"
 )
 
@@ -64,7 +69,7 @@ func TestEventTap_Smoketest_InstallUninstall_Roundtrip(t *testing.T) {
 	log := slog.New(slog.NewTextHandler(os.Stderr, nil))
 	sink := make(chan struct{}, 1)
 
-	r, err := eventtap.Install(spec, sink, log)
+	r, err := installTapOnly(spec, sink, log)
 	if err != nil {
 		// CGEventTapCreate returned NULL — the host's Accessibility grant
 		// is stale despite IsAccessibilityTrusted returning true (this is
@@ -73,10 +78,10 @@ func TestEventTap_Smoketest_InstallUninstall_Roundtrip(t *testing.T) {
 		// rather than fail so a developer running `go test -tags manual`
 		// on a freshly-rebuilt binary sees the expected diagnostic
 		// instead of a noisy test failure.
-		t.Skipf("Install failed (likely stale TCC grant): %v", err)
+		t.Skipf("installTapOnly failed (likely stale TCC grant): %v", err)
 	}
 	if r == nil {
-		t.Fatalf("Install returned nil *Releaser without error")
+		t.Fatalf("installTapOnly returned nil *Releaser without error")
 	}
 
 	if err := r.Release(); err != nil {
