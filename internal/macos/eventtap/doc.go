@@ -7,14 +7,25 @@
 // Public API (fully implements; here ships skeleton + sentinel
 // errors + pure-Go watchdog policy):
 //
-//	func Install(spec hotkey.Spec, sink chan<- struct{}, log *slog.Logger) (*Releaser, error)
+//	func InstallAll(spec hotkey.Spec, sink chan<- struct{}, log *slog.Logger) (*Releaser, error)
 //
-// `Install` creates the tap, registers the wake observer, starts the watchdog,
-// and spawns the polling goroutine that reads the atomic `matched` flag (set
-// by the //export Go callback `eventtap_matched`) and forwards it to `sink`.
-// The returned `*Releaser` satisfies `state.Releaser` (`Release() error` +
+// `InstallAll` is THE production entry point. It creates the tap, starts
+// the watchdog (GCD `dispatch_source_t` 5s timer), registers the wake
+// observer (NSWorkspace DidWake + SessionDidBecomeActive), and spawns the
+// polling goroutine that reads the atomic `matched` flag (set by the
+// //export Go callback `eventtap_matched`) and forwards it to `sink`. The
+// returned `*Releaser` satisfies `state.Releaser` (`Release() error` +
 // `Name() string`) and is pushed onto the `RestoreState` LIFO chain in
-// `cmd/dndmode/main.go` Step 16, replacing the Phase 3 `mock-tap` placeholder.
+// `cmd/dndmode/main.go` Step 17, replacing the Phase 3 `mock-tap`
+// placeholder.
+//
+// history: this package previously also exported a bare `Install`
+// helper that wired ONLY the tap + poller — the returned Releaser had nil
+// watchdogStop + nil wakeStop, silently bypassing both subsystems with no
+// compile-time or runtime warning. The bare entry point was unexported
+// (renamed to `installTapOnly`) to remove the foot-gun; the only caller
+// is the manual smoke test (`eventtap_smoketest_internal_test.go`)
+// living inside this package.
 //
 // # Threading invariants (CRITICAL)
 //
