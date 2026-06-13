@@ -299,9 +299,16 @@ func StartWatchdog(tap unsafe.Pointer, sink chan<- struct{}, log *slog.Logger) (
 // SAFETY: this goroutine is NOT pinned to an OS thread via
 // runtime.LockOSThread because it only does atomic Loads + channel
 // operations + stderr writes — none of which require thread affinity.
-// The matched-key poller in 04-02 DOES use LockOSThread because its
-// 10ms ticker contends with GCD blocks on the same Go scheduler; the
-// watchdog poller at 100ms has no such contention budget.
+//
+// history: a prior version of this comment claimed "the matched-
+// key poller in DOES use LockOSThread because its 10ms ticker
+// contends with GCD blocks." That was wrong — the matched-key poller
+// (tap_darwin.go installInternal, pollMatched goroutine) does NOT
+// LockOSThread either, for the same reason this one doesn't: atomic
+// reads + non-blocking channel sends don't require thread affinity.
+// The CGEventTap WORKER goroutine (the one that runs CFRunLoopRun on
+// the C-side run loop) DOES LockOSThread — easy to confuse with the
+// poller, but they are distinct goroutines.
 func pollWatchdogThreshold(stop <-chan struct{}, flag *atomic.Bool, sink chan<- struct{}, log *slog.Logger) {
 	ticker := time.NewTicker(watchdogPollInterval)
 	defer ticker.Stop()

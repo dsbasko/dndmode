@@ -40,10 +40,16 @@
 // `eventtap_matched` — body is exactly `matched.Store(true)`.
 // enforces this via a gold-test on the file's contents.
 //   - The poller goroutine that drains `matched` and forwards to `sink` is
-//     a separate goroutine pinned to its own OS thread via
-//     `runtime.LockOSThread()` (D-02). It uses `time.Ticker(10ms)` and a
+//     a separate goroutine. It is NOT pinned to an OS thread (the worker
+//     goroutine that drives the CGEventTap CFRunLoop DOES use
+//     `runtime.LockOSThread()` — but the poller does not, because its
+//     body is `atomic.CompareAndSwap` + a non-blocking channel send, both
+//     of which are goroutine-local Go-scheduler operations with no
+//     thread-affinity requirement). It uses `time.Ticker(10ms)` and a
 //     non-blocking `select { case sink <- struct{}{}: default: }` so the
 //     post-cancel send is safe even when the supervisor stopped reading.
+// (fix: prior docs incorrectly claimed LockOSThread for the
+//     matched-key poller — implementation is correct, docs were stale.)
 // - The watchdog timer runs on a GCD high-priority dispatch queue
 //     via `dispatch_source_t` (`DISPATCH_SOURCE_TYPE_TIMER`). It calls into
 //     Go via `//export eventtap_watchdog_failed` only after `watchdogState`
