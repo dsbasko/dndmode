@@ -15,7 +15,6 @@ extern int  eventtap_register_worker_runloop(CFMachPortRef tap, CFRunLoopRef *ou
 extern void eventtap_uninstall_c(CFMachPortRef tap);
 extern int  eventtap_is_enabled(CFMachPortRef tap);
 extern void eventtap_enable(CFMachPortRef tap, int enable);
-extern int  eventtap_test_set_expected(uint64_t flags, uint16_t keycode);
 
 // eventtap_set_observed_tap is the canonical writer for the shared
 // `volatile CFMachPortRef g_observed_tap` global that lives in

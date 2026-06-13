@@ -317,18 +317,17 @@ void eventtap_enable(CFMachPortRef tap, int enable) {
     CGEventTapEnable(tap, enable != 0);
 }
 
-// eventtap_test_set_expected is a test-only DI helper that lets unit tests
-// configure the (flags, keycode) globals without going through the full
-// Install path (which would require Accessibility permission and a live
-// CGEventTap). NOT covered by `//go:build manual` — the overhead of always
-// compiling a 3-line setter is negligible and keeping it always-on lets the
-// pure-Go unit tests in tap_test.go remain `darwin`-only without a separate
-// `manual` build tag for this single helper.
-//
-// Returns 0 unconditionally so callers can assert success symmetrically with
-// the production install path.
-int eventtap_test_set_expected(uint64_t flags, uint16_t keycode) {
-    expected_flags  = flags;
-    expected_keycode = keycode;
-    return 0;
-}
+// removed the eventtap_test_set_expected test-only setter. It had
+// no caller (no Go-side `C.eventtap_test_set_expected` invocation in
+// tap_test.go or anywhere else), so it was dead in both the production
+// AND test binary. Keeping it always-compiled added a small but real
+// attack surface: a process-injected adversary could rewrite
+// (expected_flags, expected_keycode) at runtime without going through
+// Accessibility / Install / a configured Spec, locking out the
+// legitimate user with a custom hotkey. The "1KB binary savings" comment
+// optimized the wrong variable (correctness/security > size). If a
+// future test wants the setter back, prefer either (a) a build-tag
+// gated `*_darwin_test.m` companion file that ships ONLY in test
+// binaries, or (b) a `#ifdef DNDMODE_TEST_HELPERS` guard wired to a
+// dedicated `#cgo test_helpers CFLAGS: -DDNDMODE_TEST_HELPERS`. Both
+// keep the helper out of the production binary.
