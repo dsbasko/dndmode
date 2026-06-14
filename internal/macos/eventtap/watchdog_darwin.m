@@ -253,12 +253,25 @@ void watchdog_stop(void) {
     g_fail_count = 0;
 }
 
-// watchdog_test_get_fail_count exposes the C-side counter for cgo smoke
-// tests (build-tag gated, not part of the default `go test` run). Not
-// declared in the Go-side cgo preamble — accessed only via test-only
-// extern declarations in `*_smoketest_test.go` files. Wave 1 04-03
-// includes it so a future smoke test can observe counter behavior end
-// to end without instrumenting the dispatch block.
-int watchdog_test_get_fail_count(void) {
-    return g_fail_count;
-}
+// fix: the test-only `watchdog_test_get_fail_count`
+// getter was removed from this production binary in iteration 2 of the
+// Phase 4 code-review fix loop, mirroring the removal of
+// the sibling `eventtap_test_set_expected` helper.
+//
+// Rationale (same as): the function had ZERO Go-side callers, ZERO
+// `_test.go` references, and ZERO `.m`-side callers — repo-wide grep at
+// a later review confirmed it was dead in both the production AND the
+// test binary. Phase 3 explicitly acknowledged this:
+// "Not used yet — pure-Go DI seam (`watchdogState.Probe`) already covers
+// unit-test acceptance."
+//
+// Attack surface was smaller than the sibling (read-only — an
+// injector could observe `g_fail_count` but not corrupt the watchdog
+// state), but the same "correctness/security > size" rationale applies:
+// dead test-only code in a production binary serves no purpose and
+// widens the symbol table available to a process-injection adversary.
+//
+// If a future smoke test wants to observe `g_fail_count` end-to-end, it
+// should be added in a `*_darwin_test.m` companion file with `//go:build
+// manual` parity (the build-tag-gated alternative proposed in 's
+// "alternative" fix), not by reviving this dead note.
