@@ -538,16 +538,19 @@ func run() int {
 	// normal matched-hotkey exit. The supervisor exit-trigger channel is
 	// shared between the matched-key poller and the watchdog threshold
 	// poller — both send a bare struct{}, so the supervisor cannot tell
-	// the source from the signal alone. The watchdog sets
-	// eventtap.WatchdogTripped to true BEFORE forwarding through the
-	// shared sink (see watchdog_darwin.go), so by the time sup.Wait()
-	// returns the latch is durably visible. exitSecureInputConflict (4)
-	// is the reused slot per errors.go ErrWatchdogExitThreshold +
-	// CONTEXT D-10: an abnormal platform stop. Without this branch,
+	// the source from the signal alone. The watchdog flips its internal
+	// latch to true BEFORE forwarding through the shared sink (see
+	// watchdog_darwin.go), so by the time sup.Wait() returns the latch
+	// is durably visible via the eventtap.WatchdogTrippedSinceLastStart()
+	// read-only accessor. exitSecureInputConflict (4) is the reused slot
+	// per the design notes: an abnormal platform stop. Without this branch,
 	// watchdog-killed runs collapsed to exit 0 — operators saw a healthy
 	// process and the next LiveChecker found no orphan, masking
-	// the silent-disable failure.
-	if eventtap.WatchdogTripped.Load() {
+	// the silent-disable failure.: replaced direct
+	// .Load() on an exported atomic.Bool with the accessor function so
+	// external packages cannot Store(true) and forge the exit-code
+	// contract.
+	if eventtap.WatchdogTrippedSinceLastStart() {
 		return exitSecureInputConflict
 	}
 
