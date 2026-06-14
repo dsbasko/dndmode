@@ -1,3 +1,4 @@
+//go:build darwin
 // +build darwin
 
 #import <Foundation/Foundation.h>
