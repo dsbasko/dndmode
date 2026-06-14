@@ -446,17 +446,57 @@ func installInternal(spec hotkey.Spec, sink chan<- struct{}, log *slog.Logger) (
 	// loop returns; Go runtime reaps the locked OS thread automatically
 	// (no UnlockOSThread needed — the runtime detects goroutine exit on a
 	// locked thread and tears the thread down).
-	runLoopCh := make(chan C.CFRunLoopRef, 1)
+	//
+	// fix: the registration rc is checked instead of discarded. The
+	// C side currently always returns 0, but the integer return type is
+	// preserved "for symmetry with eventtap_install_c and future-proofing"
+	// (tap_darwin.m comment). A future change that makes registration
+	// fallible would have silently regressed under the prior `_ = rc`
+	// discard: the goroutine would push a zero-valued CFRunLoopRef (NULL)
+	// onto runLoopCh and proceed to CFRunLoopRun(), which returns
+	// immediately when called with no sources. The Go side would have a
+	// NULL workerLoop and the teardown chain would try CFRunLoopStop on
+	// NULL. We now push NULL explicitly on rc != 0 AND check on the
+	// receiver side, so a future rc != 0 surfaces as ErrTapInstallFailed
+	// with a distinct rc tag instead of mysterious teardown UB.
+	type workerHandshake struct {
+		loop C.CFRunLoopRef
+		rc   C.int
+	}
+	runLoopCh := make(chan workerHandshake, 1)
 	go func() {
 		runtime.LockOSThread()
 		// Intentionally no defer UnlockOSThread — see comment above.
 		var loop C.CFRunLoopRef
-		_ = C.eventtap_register_worker_runloop(cTap, &loop)
-		runLoopCh <- loop
+		rc := C.eventtap_register_worker_runloop(cTap, &loop)
+		if rc != 0 {
+			// Push a sentinel-only handshake; do NOT call CFRunLoopRun
+			// because no source was added. Goroutine exits and the Go
+			// runtime reaps its locked OS thread.
+			var zero C.CFRunLoopRef
+			runLoopCh <- workerHandshake{loop: zero, rc: rc}
+			return
+		}
+		runLoopCh <- workerHandshake{loop: loop, rc: 0}
 		// Blocks until Release → eventtap_uninstall_c → CFRunLoopStop.
 		C.CFRunLoopRun()
 	}()
-	workerLoop := <-runLoopCh
+	hs := <-runLoopCh
+	if hs.rc != 0 {
+		// Worker run-loop registration failed. Tear down the
+		// already-created tap so the kernel-side mach port doesn't leak.
+		C.eventtap_uninstall_c(cTap)
+		var zero C.CFMachPortRef
+		return nil, zero, fmt.Errorf("%w: worker run-loop registration rc=%d", ErrTapInstallFailed, int(hs.rc))
+	}
+	//: hs.loop is captured by the C-side static
+	// `g_worker_runloop`. The channel handshake itself is load-bearing
+	// (synchronizes with the worker goroutine's runtime.LockOSThread()
+	// completion) but the Go-side loop pointer is never re-used — the
+	// C-side static is the canonical store. Underscore-binding makes
+	// "we read the value to synchronize, then discard it" explicit
+	// instead of pretending it's "captured for future diagnostic logging."
+	_ = hs.loop
 
 	stopPoller := make(chan struct{})
 	pollerDone := make(chan struct{})
@@ -482,8 +522,6 @@ func installInternal(spec hotkey.Spec, sink chan<- struct{}, log *slog.Logger) (
 	uninstallFn := func() {
 		C.eventtap_uninstall_c(cTap)
 	}
-
-	_ = workerLoop // captured for diagnostic logging by future smoke tests; not stored on Releaser to avoid go-vet unsafe.Pointer warning
 
 	r := &Releaser{
 		log:             log,
