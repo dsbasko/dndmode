@@ -47,6 +47,7 @@ import (
 	"fmt"
 	"log/slog"
 	"runtime"
+	"runtime/debug"
 	"sync"
 	"sync/atomic"
 
@@ -463,8 +464,51 @@ func installInternal(spec hotkey.Spec, sink chan<- struct{}, log *slog.Logger) (
 		loop C.CFRunLoopRef
 		rc   C.int
 	}
+	// rc sentinel: distinct from any value the C side returns so the
+	// install caller can format a panic-specific error message. The C
+	// `eventtap_register_worker_runloop` returns 0=success or small
+	// positive rc (1/2/...) per tap_darwin.m; a large negative sentinel
+	// is reserved for "goroutine panicked before handshake".
+	const workerPanicSentinel C.int = -1
 	runLoopCh := make(chan workerHandshake, 1)
 	go func() {
+		// fix: panic-safe defer. The original review proposed
+		// "wrap the install goroutine with a recover that still pushes a
+		// value through the handshake so a panic in runtime.LockOSThread
+		// / cgo bridge / register_worker_runloop does not deadlock the
+		// install path." An earlier version implemented only the rc-check half of
+		// this defer closes the second half.
+		//
+		// Without this defer: a panic in any of the body's calls
+		// (runtime.LockOSThread is a syscall; cgo bridge can panic on
+		// stack overflow; defensive against future additions of fallible
+		// Go-side calls here) would propagate via Go's default
+		// goroutine-panic mechanism — the goroutine exits WITHOUT sending
+		// on runLoopCh, and the main goroutine blocks forever on
+		// `hs := <-runLoopCh`. main.go hangs at Step 17 with no
+		// diagnostic.
+		//
+		// With this defer: panic → recover → push sentinel handshake
+		// (rc=workerPanicSentinel) → main side sees rc != 0 → returns
+		// wrapped ErrTapInstallFailed. The supervisor unwinds normally.
+		// The panic value itself is logged via slog at Error level so
+		// the original stack is not lost — matches the top-level
+		// recover pattern in cmd/dndmode/main.go.
+		defer func() {
+			if r := recover(); r != nil {
+				log.Error("eventtap worker-install goroutine panicked",
+					slog.Any("panic", r),
+					slog.String("stack", string(debug.Stack())))
+				// Buffered channel cap=1 + this defer is the ONLY late
+				// sender after recover, so the send cannot block.
+				// (A normal-path send earlier on the happy line already
+				// consumed the buffer slot? No — happy path returns
+				// BEFORE this defer fires only because there is no
+				// panic, so this send and the happy send are mutually
+				// exclusive. The recover-then-send is racefree.)
+				runLoopCh <- workerHandshake{rc: workerPanicSentinel}
+			}
+		}()
 		runtime.LockOSThread()
 		// Intentionally no defer UnlockOSThread — see comment above.
 		var loop C.CFRunLoopRef
@@ -487,6 +531,14 @@ func installInternal(spec hotkey.Spec, sink chan<- struct{}, log *slog.Logger) (
 		// already-created tap so the kernel-side mach port doesn't leak.
 		C.eventtap_uninstall_c(cTap)
 		var zero C.CFMachPortRef
+		if hs.rc == workerPanicSentinel {
+			// distinguish goroutine panic from C-side rc!= 0.
+			// The panic stack itself was already logged inside the
+			// goroutine's recover defer above; here we surface the
+			// category in the error returned to main.go so the
+			// top-level recover doesn't double-log.
+			return nil, zero, fmt.Errorf("%w: worker goroutine panicked before run-loop handshake", ErrTapInstallFailed)
+		}
 		return nil, zero, fmt.Errorf("%w: worker run-loop registration rc=%d", ErrTapInstallFailed, int(hs.rc))
 	}
 	//: hs.loop is captured by the C-side static
