@@ -49,8 +49,11 @@ const watchdogPollInterval = 100 * time.Millisecond
 // Go helper eventtap_watchdog_failed, which is invoked from the C-side
 // GCD timer block (watchdog_darwin.m) when the consecutive-failure counter
 // reaches FAIL_THRESHOLD. wires the C side; the poller
-// goroutine (Wave 1 04-02) reads this latch alongside `matched` and, on
-// true, forwards ErrWatchdogExitThreshold through the sink channel.
+// goroutine reads this latch and, on true, flips
+// `watchdogTripped` to true and forwards a bare `struct{}` through the
+// shared sink channel (typed sentinel forwarding
+// was replaced with the atomic.Bool + bare-channel pair; see errors.go
+// docstring for full history).
 //
 // As with `matched`, atomic.Bool is the only storage primitive
 // permitted in the //export callback body per nosplit invariant.
@@ -153,7 +156,9 @@ type watchdogState struct {
 //
 //   - If `thresholdHit` is already true → return `(false, false)`
 //     unconditionally. Idempotent contract; further pumping a dead tap
-//     must not enqueue duplicate ErrWatchdogExitThreshold signals.
+//     must not enqueue duplicate watchdogTripped-flip signals into the
+// sink channel (was previously typed
+//     ErrWatchdogExitThreshold; see errors.go docstring).
 //
 //   - Else if `isEnabled` is true → reset `failCount` to 0, return
 // `(true, false)`. Mirrors "UserInput disable is normal" — any
@@ -351,7 +356,9 @@ func pollWatchdogThreshold(stop <-chan struct{}, flag *atomic.Bool, sink chan<- 
 		}
 		if flag.CompareAndSwap(true, false) {
 			// verbatim — must match watchdog_test.go acceptance
-			// (and errors.go ErrWatchdogExitThreshold docstring).
+			// (and the errors.go "Watchdog signalling contract" docstring,
+			// which absorbed the deletion of the typed
+			// ErrWatchdogExitThreshold sentinel).
 			log.Error("eventtap watchdog: tap dead after 5 re-enable failures, exiting to restore input")
 			// signal the abnormal-exit source BEFORE sending
 			// to the shared sink. The sink channel is shared with the
