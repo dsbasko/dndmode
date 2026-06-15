@@ -157,9 +157,13 @@ func TestWatchdog_HealthyProbe_ResetsCounter(t *testing.T) {
 // first tripped, subsequent `Probe(false)` calls return `threshold=false`.
 // The watchdog signals the threshold exactly once: the GCD timer (
 //) cancels itself after the first hit, but if any straggler probe
-// fires before cancellation propagates we MUST NOT re-emit
-// `ErrWatchdogExitThreshold` to the sink channel — that would queue a
-// second supervisor exit and confuse the LIFE-07 unwind.
+// fires before cancellation propagates we MUST NOT re-emit a watchdog
+// trip into the sink channel — that would queue a second supervisor exit
+// and confuse the unwind. (Historical note: prior to
+// this contract was documented as "must not re-emit ErrWatchdogExitThreshold";
+// the typed sentinel was deleted alongside 's atomic-bool fix
+// see errors.go "Watchdog signalling contract" docstring for the full
+// signalling-shape history.)
 func TestWatchdog_Threshold_Idempotent(t *testing.T) {
 	t.Parallel()
 

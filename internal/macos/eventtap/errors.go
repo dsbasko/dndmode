@@ -28,26 +28,33 @@ import "errors"
 // reference it without waiting for the install implementation to land.
 var ErrTapInstallFailed = errors.New("eventtap: CGEventTapCreate returned NULL (missing Accessibility, SecureEventInput, or kernel out of mach ports)")
 
-// ErrWatchdogExitThreshold signals that the watchdog has observed
-// `CGEventTapIsEnabled == false` in 5 consecutive 5-second probe cycles
-// (5 × 5s = 25s wall-clock; D-09). Once the threshold is hit, the watchdog
-// (Wave 1 04-03) sends this sentinel via the `sink` channel of `Install`
-// and emits a stderr log line "eventtap watchdog: tap dead after 5 re-enable
-// failures, exiting to restore input" (D-10).
+// Watchdog signalling contract (note):
 //
-// `main.go` reads this from the supervisor's `ExitTrigger()` path indirectly:
-// the watchdog forwards the signal through the same channel that `matched`
-// events use, and the supervisor cleanly unwinds the LIFO Cleanup chain.
-// AFTER `sup.Wait()` returns, main.go reads the package-level
-// `WatchdogTripped atomic.Bool` (CR-01 fix) to distinguish the watchdog
-// path from a matched-hotkey path: on true → exit code 4
-// (`exitSecureInputConflict` — the abnormal-platform-stop slot reused per
-// D-10), on false → exit code 0 (`exitOK`). NOT a panic; the idempotent
-// `Releaser.Release` path runs to completion before `os.Exit`. Before
-// CR-01 the watchdog path silently collapsed to exit 0, masking the
-// silent-disable failure from operators + LIFE-12 LiveChecker.
+// The watchdog has observed `CGEventTapIsEnabled == false` in 5 consecutive
+// 5-second probe cycles (5 × 5s = 25s wall-clock). On threshold hit
+// the watchdog emits a stderr log line "eventtap watchdog:
+// tap dead after 5 re-enable failures, exiting to restore input" and
+// sends a bare `struct{}` through the `sink` channel of `InstallAll`. The
+// supervisor cannot distinguish this signal from a matched-hotkey send.
 //
-// Wave 0 ships the bare sentinel so the watchdog tests in this plan
-// (TestWatchdog_Threshold_Triggers_AfterFiveConsecutiveFailures et al.)
-// and Wave 1 04-03 implementation can both reference it without coordination.
-var ErrWatchdogExitThreshold = errors.New("eventtap: tap dead after 5 re-enable failures")
+// To preserve the abnormal-platform-stop exit code, the watchdog
+// also flips the package-internal `watchdogTripped atomic.Bool` to true
+// BEFORE the sink send. `cmd/dndmode/main.go` reads
+// `eventtap.WatchdogTrippedSinceLastStart()` AFTER `sup.Wait()` returns
+// to dispatch between exit code 4 (`exitSecureInputConflict`, reused for
+// the watchdog category) and exit code 0 (`exitOK`).
+//
+// NOT a panic; the idempotent `Releaser.Release` path runs to completion
+// before `os.Exit`. Before the fix the watchdog path silently
+// collapsed to exit 0, masking the silent-disable failure from operators
+// the LiveChecker.
+//
+// history: a typed `var ErrWatchdogExitThreshold = errors.New(...)`
+// sentinel was previously exported here so the watchdog could forward it
+// through the sink channel as a typed signal. The fix chose option (b)
+// — `atomic.Bool` latch + bare struct{} channel — making the sentinel
+// dead exported code (no callers, no `errors.Is` reachability, still part
+// of the public API surface). It was removed in; this docstring
+// is its only remaining trace. If a future refactor switches to typed
+// `ExitReason` channels (option (a) of 's original two suggested
+// fixes), the sentinel can come back with a real caller.
