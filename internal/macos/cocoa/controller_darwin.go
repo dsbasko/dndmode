@@ -94,6 +94,14 @@ type Controller struct {
 	debouncer   *time.Timer
 	debounceWin time.Duration
 
+	// cursorHidden guards the one-shot system-cursor hide. Set true after a
+	// successful cold-start reconcile (CreateWindowsForAllScreens) hides the
+	// cursor; reset false in Release after Show. Guarded by c.mu (D-design:
+	// reuse the existing mutex, no new lock). Ensures Hide fires exactly once
+	// per Active session (never per hot-plug rebuild) and Show fires only if a
+	// hide actually happened.
+	cursorHidden bool
+
 	released    atomic.Bool
 	releaseOnce sync.Once
 
@@ -103,6 +111,7 @@ type Controller struct {
 	windowsOf  windowFactory
 	observers  observerRegistrar
 	dispatcher mainDispatcher
+	cursor     cursorHider
 
 	// onScreensChangedFn is the &c.onScreensChanged closure passed to
 	// setOnScreensChanged. We hold it in a field so Release can pass nil
@@ -123,6 +132,7 @@ func NewController(log *slog.Logger) *Controller {
 		cgoWindowFactory{},
 		cgoObserverRegistrar{},
 		cgoMainDispatcher{},
+		cgoCursorHider{},
 		250*time.Millisecond,
 	)
 }
@@ -135,6 +145,7 @@ func newControllerWithDeps(
 	windowsOf windowFactory,
 	observers observerRegistrar,
 	dispatcher mainDispatcher,
+	cursor cursorHider,
 	debounceWin time.Duration,
 ) *Controller {
 	c := &Controller{
@@ -145,6 +156,7 @@ func newControllerWithDeps(
 		windowsOf:   windowsOf,
 		observers:   observers,
 		dispatcher:  dispatcher,
+		cursor:      cursor,
 	}
 	c.onScreensChangedFn = c.onScreensChanged
 	setOnScreensChanged(&c.onScreensChangedFn)
@@ -161,8 +173,22 @@ func (c *Controller) Name() string { return "windows" }
 //
 // MUST be called from the main goroutine BEFORE the "active" banner
 // (ordering).
+//
+// On a successful cold-start reconcile it also hides the system mouse cursor
+// exactly once (cosmetic: the WindowServer otherwise draws a stray arrow on
+// the black shield). The hide lives HERE, not in reconcile(), because
+// reconcile is shared with the hot-plug rebuild path and would otherwise
+// re-hide on every replug. On ErrNoDisplays (D-14) nothing is covered, so the
+// cursor is left visible and the error is propagated unchanged.
 func (c *Controller) CreateWindowsForAllScreens() error {
-	return c.reconcile(true)
+	if err := c.reconcile(true); err != nil {
+		return err // D-14: ErrNoDisplays (and any create failure) propagate; no hide.
+	}
+	c.mu.Lock()
+	c.cursor.Hide()
+	c.cursorHidden = true
+	c.mu.Unlock()
+	return nil
 }
 
 // WindowCount returns the current size of the windows map under lock.
@@ -297,6 +323,17 @@ func (c *Controller) Release() error {
 			for id, w := range c.windows {
 				c.windowsOf.Close(w)
 				delete(c.windows, id)
+			}
+			c.mu.Unlock()
+
+			// 5. Restore the system cursor iff we hid it (cursorHidden guard
+			// makes a Release-without-successful-create a no-op). The
+			// surrounding released-CAS + releaseOnce.Do guarantee this closure
+			// runs exactly once, so Show fires at most once.
+			c.mu.Lock()
+			if c.cursorHidden {
+				c.cursor.Show()
+				c.cursorHidden = false
 			}
 			c.mu.Unlock()
 		})

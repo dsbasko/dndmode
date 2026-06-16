@@ -118,6 +118,40 @@ func (f *fakeObservers) Unregister() int {
 	return f.unregErr
 }
 
+// fakeCursorHider is a test-injectable cursorHider counting Hide/Show calls.
+// Mirrors fakeObservers (sync.Mutex + counters); the HideCount/ShowCount
+// accessors read under lock for the race detector, mirroring
+// fakeWindowFactory.CreateCount.
+type fakeCursorHider struct {
+	mu    sync.Mutex
+	hides int
+	shows int
+}
+
+func (f *fakeCursorHider) Hide() {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.hides++
+}
+
+func (f *fakeCursorHider) Show() {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.shows++
+}
+
+func (f *fakeCursorHider) HideCount() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.hides
+}
+
+func (f *fakeCursorHider) ShowCount() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.shows
+}
+
 // inlineDispatcher executes Dispatch'd functions synchronously inside the
 // caller's goroutine. Production uses cgoMainDispatcher (DispatchMain) which
 // hops to the main run loop; tests do not run NSApp.run, so we collapse the
@@ -141,6 +175,7 @@ type testDeps struct {
 	factory    *fakeWindowFactory
 	observers  *fakeObservers
 	dispatcher *inlineDispatcher
+	cursor     *fakeCursorHider
 	logBuf     *bytes.Buffer
 }
 
@@ -150,17 +185,18 @@ func newTestDeps(t *testing.T, debounceWin time.Duration) *testDeps {
 	fac := newFakeWindowFactory()
 	obs := &fakeObservers{}
 	disp := &inlineDispatcher{}
+	cur := &fakeCursorHider{}
 	logBuf := &bytes.Buffer{}
 	logger := slog.New(slog.NewTextHandler(logBuf, &slog.HandlerOptions{Level: slog.LevelDebug}))
 	if debounceWin == 0 {
 		debounceWin = 250 * time.Millisecond
 	}
-	c := newControllerWithDeps(logger, enum, fac, obs, disp, debounceWin)
+	c := newControllerWithDeps(logger, enum, fac, obs, disp, cur, debounceWin)
 	t.Cleanup(func() {
 		// Detach in case test forgot Release.
 		setOnScreensChanged(nil)
 	})
-	return &testDeps{controller: c, enumerator: enum, factory: fac, observers: obs, dispatcher: disp, logBuf: logBuf}
+	return &testDeps{controller: c, enumerator: enum, factory: fac, observers: obs, dispatcher: disp, cursor: cur, logBuf: logBuf}
 }
 
 func TestController_Reconcile_FullRebuild(t *testing.T) {
@@ -361,6 +397,148 @@ func TestController_Release_Idempotent(t *testing.T) {
 	}
 	if closes2 != closes1 {
 		t.Errorf("close calls after 2nd Release = %d, want %d (idempotent)", closes2, closes1)
+	}
+}
+
+// TestController_CursorHide covers the one-shot system-cursor hide/show wiring:
+// Hide fires once after a successful cold-start, never on ErrNoDisplays, never
+// per hot-plug rebuild; Show fires once on Release iff a hide happened, and is
+// idempotent across repeated Release.
+func TestController_CursorHide(t *testing.T) {
+	tests := []struct {
+		name     string
+		setup    func(td *testDeps)
+		validate func(t *testing.T, td *testDeps)
+	}{
+		{
+			// Case 1: successful cold-start hides exactly once, no show yet.
+			name: "cold-start with screens hides once",
+			setup: func(td *testDeps) {
+				td.enumerator.set([]uint32{1, 2})
+				if err := td.controller.CreateWindowsForAllScreens(); err != nil {
+					t.Fatalf("CreateWindowsForAllScreens: %v", err)
+				}
+			},
+			validate: func(t *testing.T, td *testDeps) {
+				if got := td.cursor.HideCount(); got != 1 {
+					t.Errorf("HideCount = %d, want 1", got)
+				}
+				if got := td.cursor.ShowCount(); got != 0 {
+					t.Errorf("ShowCount = %d, want 0", got)
+				}
+			},
+		},
+		{
+			// Case 2: ErrNoDisplays cold-start must NOT hide (nothing covered).
+			name: "cold-start no displays does not hide",
+			setup: func(td *testDeps) {
+				td.enumerator.set([]uint32{})
+				err := td.controller.CreateWindowsForAllScreens()
+				if !errors.Is(err, ErrNoDisplays) {
+					t.Fatalf("err = %v, want errors.Is ErrNoDisplays", err)
+				}
+			},
+			validate: func(t *testing.T, td *testDeps) {
+				if got := td.cursor.HideCount(); got != 0 {
+					t.Errorf("HideCount = %d, want 0 (no hide on ErrNoDisplays)", got)
+				}
+				if got := td.cursor.ShowCount(); got != 0 {
+					t.Errorf("ShowCount = %d, want 0", got)
+				}
+			},
+		},
+		{
+			// Case 3: Release after a successful create shows exactly once.
+			name: "release after create shows once",
+			setup: func(td *testDeps) {
+				td.enumerator.set([]uint32{1})
+				if err := td.controller.CreateWindowsForAllScreens(); err != nil {
+					t.Fatalf("CreateWindowsForAllScreens: %v", err)
+				}
+				if err := td.controller.Release(); err != nil {
+					t.Fatalf("Release: %v", err)
+				}
+			},
+			validate: func(t *testing.T, td *testDeps) {
+				if got := td.cursor.HideCount(); got != 1 {
+					t.Errorf("HideCount = %d, want 1", got)
+				}
+				if got := td.cursor.ShowCount(); got != 1 {
+					t.Errorf("ShowCount = %d, want 1", got)
+				}
+			},
+		},
+		{
+			// Case 4: Release twice still shows exactly once (idempotency).
+			name: "double release shows once",
+			setup: func(td *testDeps) {
+				td.enumerator.set([]uint32{1})
+				if err := td.controller.CreateWindowsForAllScreens(); err != nil {
+					t.Fatalf("CreateWindowsForAllScreens: %v", err)
+				}
+				if err := td.controller.Release(); err != nil {
+					t.Fatalf("Release #1: %v", err)
+				}
+				if err := td.controller.Release(); err != nil {
+					t.Fatalf("Release #2: %v", err)
+				}
+			},
+			validate: func(t *testing.T, td *testDeps) {
+				if got := td.cursor.ShowCount(); got != 1 {
+					t.Errorf("ShowCount after double Release = %d, want 1 (idempotent)", got)
+				}
+			},
+		},
+		{
+			// Case 5: hot-plug rebuilds after a successful cold-start must NOT
+			// re-hide — Hide stays at exactly 1.
+			name: "hot-plug rebuilds do not re-hide",
+			setup: func(td *testDeps) {
+				td.enumerator.set([]uint32{1, 2})
+				if err := td.controller.CreateWindowsForAllScreens(); err != nil {
+					t.Fatalf("CreateWindowsForAllScreens: %v", err)
+				}
+				// Three hot-plug rebuilds via reconcile(false) (the inline
+				// dispatcher runs synchronously, so no debounce sleep needed).
+				td.enumerator.set([]uint32{3})
+				for i := 0; i < 3; i++ {
+					if err := td.controller.reconcile(false); err != nil {
+						t.Fatalf("reconcile(false) #%d: %v", i+1, err)
+					}
+				}
+			},
+			validate: func(t *testing.T, td *testDeps) {
+				if got := td.cursor.HideCount(); got != 1 {
+					t.Errorf("HideCount after hot-plug rebuilds = %d, want 1 (not per-rebuild)", got)
+				}
+			},
+		},
+		{
+			// Case 6: Release WITHOUT a successful create (cursorHidden==false)
+			// must NOT show.
+			name: "release without create does not show",
+			setup: func(td *testDeps) {
+				if err := td.controller.Release(); err != nil {
+					t.Fatalf("Release: %v", err)
+				}
+			},
+			validate: func(t *testing.T, td *testDeps) {
+				if got := td.cursor.HideCount(); got != 0 {
+					t.Errorf("HideCount = %d, want 0", got)
+				}
+				if got := td.cursor.ShowCount(); got != 0 {
+					t.Errorf("ShowCount = %d, want 0 (no hide → no show)", got)
+				}
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			td := newTestDeps(t, 0)
+			tt.setup(td)
+			tt.validate(t, td)
+		})
 	}
 }
 
