@@ -683,17 +683,15 @@ func InstallAll(spec hotkey.Spec, sink chan<- struct{}, log *slog.Logger) (*Rele
 	wkStop, err := InstallWakeObserver(tapPtr, log)
 	if err != nil {
 		wdStop()
-		// WR-01 defense-in-depth: explicitly NULL g_observed_tap in
-		// the wake-failure rollback path. wake_observer_install (the
-		// C helper) no longer seeds g_observed_tap before its
-		// observer registrations succeed (WR-01 fix in wake_darwin.m),
-		// AND watchdog_start already seeded it inside StartWatchdog.
-		// So at this point g_observed_tap MAY still be the live tap
-		// (set by StartWatchdog) and the Releaser's clearObservedFn
-		// will NULL it during r.Release() below. The explicit write
-		// here makes the invariant "no observer references this tap"
-		// hold for the brief window between the wkStop nil branch
-		// and r.Release() — paranoid but cheap.
+		//: belt-and-suspenders explicit NULL write.
+		// `r.Release()` below calls `clearObservedFn` which performs
+		// the SAME `eventtap_set_observed_tap(zero)` write — both are
+		// idempotent volatile-pointer stores of NULL, so the second is
+		// a no-op. Kept here for self-contained rollback semantics
+		// readable without cross-referencing Release. Cheap (single
+		// store) and documents the invariant "no observer references
+		// this tap by the time we return wrapped error" inline at the
+		// rollback site itself.
 		var zero C.CFMachPortRef
 		C.eventtap_set_observed_tap(zero)
 		if relErr := r.Release(); relErr != nil {
