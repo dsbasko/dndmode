@@ -73,6 +73,23 @@ type cgoMainDispatcher struct{}
 
 func (cgoMainDispatcher) Dispatch(fn func()) { DispatchMain(fn) }
 
+// activationPolicy is the DI seam for the runtime Prohibited↔Accessory flip
+// (revised). Production uses cgoActivationPolicy (NSApp setActivationPolicy
+// via cgo); tests inject a fake that counts Foreground/Background. Mirrors the
+// cursorHider seam — Foreground precedes the cursor Hide on overlay enter,
+// Background follows the cursor Show on overlay teardown.
+type activationPolicy interface {
+	Foreground()
+	Background()
+}
+
+// cgoActivationPolicy is the production implementation backed by appForeground /
+// appBackground (app_darwin.m). Both MUST be invoked on the main goroutine.
+type cgoActivationPolicy struct{}
+
+func (cgoActivationPolicy) Foreground() { appForeground() }
+func (cgoActivationPolicy) Background() { appBackground() }
+
 // Controller manages the per-display overlay NSWindows for Phase 2.
 // Implements state.Releaser (Release() error + Name() string), so it can be
 // pushed into the RestoreState LIFO Cleanup chain by cmd/dndmode/main.go.
@@ -112,6 +129,7 @@ type Controller struct {
 	observers  observerRegistrar
 	dispatcher mainDispatcher
 	cursor     cursorHider
+	activation activationPolicy
 
 	// onScreensChangedFn is the &c.onScreensChanged closure passed to
 	// setOnScreensChanged. We hold it in a field so Release can pass nil
@@ -133,6 +151,7 @@ func NewController(log *slog.Logger) *Controller {
 		cgoObserverRegistrar{},
 		cgoMainDispatcher{},
 		cgoCursorHider{},
+		cgoActivationPolicy{},
 		250*time.Millisecond,
 	)
 }
@@ -146,6 +165,7 @@ func newControllerWithDeps(
 	observers observerRegistrar,
 	dispatcher mainDispatcher,
 	cursor cursorHider,
+	activation activationPolicy,
 	debounceWin time.Duration,
 ) *Controller {
 	c := &Controller{
@@ -157,6 +177,7 @@ func newControllerWithDeps(
 		observers:   observers,
 		dispatcher:  dispatcher,
 		cursor:      cursor,
+		activation:  activation,
 	}
 	c.onScreensChangedFn = c.onScreensChanged
 	setOnScreensChanged(&c.onScreensChangedFn)
@@ -174,17 +195,25 @@ func (c *Controller) Name() string { return "windows" }
 // MUST be called from the main goroutine BEFORE the "active" banner
 // (ordering).
 //
-// On a successful cold-start reconcile it also hides the system mouse cursor
-// exactly once (cosmetic: the WindowServer otherwise draws a stray arrow on
-// the black shield). The hide lives HERE, not in reconcile(), because
-// reconcile is shared with the hot-plug rebuild path and would otherwise
-// re-hide on every replug. On ErrNoDisplays (D-14) nothing is covered, so the
-// cursor is left visible and the error is propagated unchanged.
+// On a successful cold-start reconcile it also flips the app activation policy
+// to Accessory + active and hides the system mouse cursor exactly once. The
+// activation flip (revised) MUST precede the hide: CGDisplayHideCursor is a
+// no-op while the process is Prohibited (never the foreground app), so
+// Foreground() runs first to make the hide take effect. Both are cosmetic to the
+// shield (the WindowServer otherwise draws a stray arrow on the black overlay)
+// and both live HERE, not in reconcile(), because reconcile is shared with the
+// hot-plug rebuild path and would otherwise re-flip/re-hide on every replug. On
+// ErrNoDisplays nothing is covered, so neither Foreground nor Hide fires
+// and the error is propagated unchanged.
 func (c *Controller) CreateWindowsForAllScreens() error {
 	if err := c.reconcile(true); err != nil {
-		return err // D-14: ErrNoDisplays (and any create failure) propagate; no hide.
+		return err // ErrNoDisplays (and any create failure) propagate; no foreground, no hide.
 	}
 	c.mu.Lock()
+	// Foreground BEFORE Hide: the hide only works once the app is the active
+	// (foreground) app. Reuse the single cursorHidden guard (design_decision
+	// guard-reuse) — it now means "overlay active: we did Foreground + Hide".
+	c.activation.Foreground()
 	c.cursor.Hide()
 	c.cursorHidden = true
 	c.mu.Unlock()
@@ -326,13 +355,18 @@ func (c *Controller) Release() error {
 			}
 			c.mu.Unlock()
 
-			// 5. Restore the system cursor iff we hid it (cursorHidden guard
-			// makes a Release-without-successful-create a no-op). The
-			// surrounding released-CAS + releaseOnce.Do guarantee this closure
-			// runs exactly once, so Show fires at most once.
+			// 5. Restore the system cursor and revert the activation policy iff
+			// we hid/flipped (cursorHidden guard makes a Release-without-
+			// successful-create a no-op). Show BEFORE Background: the cursor is
+			// restored while the app is still foreground, then we drop back to
+			// Prohibited (silent at-rest). The surrounding released-CAS +
+			// releaseOnce.Do guarantee this closure runs exactly once, so Show +
+			// Background each fire at most once (matching the single Foreground +
+			// Hide on enter).
 			c.mu.Lock()
 			if c.cursorHidden {
 				c.cursor.Show()
+				c.activation.Background()
 				c.cursorHidden = false
 			}
 			c.mu.Unlock()

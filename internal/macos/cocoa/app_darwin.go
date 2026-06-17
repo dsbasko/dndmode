@@ -11,6 +11,8 @@ package cocoa
 extern void cocoa_init(void);
 extern int  cocoa_run_app(void);
 extern void cocoa_stop_app(int subtype);
+extern void cocoa_app_foreground(void);
+extern void cocoa_app_background(void);
 */
 import "C"
 
@@ -144,3 +146,14 @@ func RunApp(ctx context.Context) error {
 	// control path. Treat as unexpected.
 	return ErrUnexpectedExit
 }
+
+// appForeground flips NSApp to Accessory + active so the active overlay's
+// cursor hide takes effect (CGDisplayHideCursor is a no-op while the process
+// is Prohibited, i.e. never the foreground app — revised). MUST be called
+// on the main goroutine (AppKit invariant; see cocoa_app_foreground).
+func appForeground() { C.cocoa_app_foreground() }
+
+// appBackground reverts NSApp to Prohibited (silent at-rest) on overlay
+// teardown, balancing a prior appForeground. MUST be called on the main
+// goroutine (AppKit invariant; see cocoa_app_background).
+func appBackground() { C.cocoa_app_background() }
