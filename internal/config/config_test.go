@@ -276,6 +276,99 @@ func TestLoader_Load_PrettyErrorOnSyntaxError(t *testing.T) {
 	}
 }
 
+// QUICK-gh8 — overlay_style is an optional string field. yaml.Strict() rejects
+// unknown KEYS but does NOT validate VALUES, so a recognised key with any value
+// parses cleanly; value validation is the caller's job (main.go via
+// config.ValidateOverlayStyle). These 4 cases pin: (1) `matrix` round-trips,
+// (2) `black` round-trips, (3) an ABSENT key leaves OverlayStyle == "" which
+// NormalizeOverlayStyle maps to "black", (4) an invalid VALUE still Load()s but
+// ValidateOverlayStyle rejects it while accepting "", "black", "matrix".
+func TestLoader_Load_OverlayStyle(t *testing.T) {
+	tests := []struct {
+		name         string
+		yamlBody     string
+		validateResp func(t *testing.T, cfg config.Config, created bool, err error)
+	}{
+		{
+			name:     "overlay_style: matrix present",
+			yamlBody: "hotkey: Ctrl+Shift+Q\noverlay_style: matrix\n",
+			validateResp: func(t *testing.T, cfg config.Config, created bool, err error) {
+				if err != nil {
+					t.Fatalf("unexpected error: %v", err)
+				}
+				if created {
+					t.Errorf("created = true, want false (file pre-existed)")
+				}
+				if cfg.OverlayStyle != config.OverlayStyleMatrix {
+					t.Errorf("cfg.OverlayStyle = %q, want %q", cfg.OverlayStyle, config.OverlayStyleMatrix)
+				}
+			},
+		},
+		{
+			name:     "overlay_style: black present",
+			yamlBody: "hotkey: Ctrl+Shift+Q\noverlay_style: black\n",
+			validateResp: func(t *testing.T, cfg config.Config, created bool, err error) {
+				if err != nil {
+					t.Fatalf("unexpected error: %v", err)
+				}
+				if cfg.OverlayStyle != config.OverlayStyleBlack {
+					t.Errorf("cfg.OverlayStyle = %q, want %q", cfg.OverlayStyle, config.OverlayStyleBlack)
+				}
+			},
+		},
+		{
+			name:     "overlay_style absent → empty, normalizes to black",
+			yamlBody: "hotkey: Ctrl+Shift+Q\n",
+			validateResp: func(t *testing.T, cfg config.Config, _ bool, err error) {
+				if err != nil {
+					t.Fatalf("unexpected error: %v", err)
+				}
+				if cfg.OverlayStyle != "" {
+					t.Errorf("cfg.OverlayStyle = %q, want %q (absent key)", cfg.OverlayStyle, "")
+				}
+				if got := config.NormalizeOverlayStyle(cfg.OverlayStyle); got != config.OverlayStyleBlack {
+					t.Errorf("NormalizeOverlayStyle(%q) = %q, want %q", cfg.OverlayStyle, got, config.OverlayStyleBlack)
+				}
+			},
+		},
+		{
+			name:     "overlay_style: neon (invalid value) loads but fails validation",
+			yamlBody: "hotkey: Ctrl+Shift+Q\noverlay_style: neon\n",
+			validateResp: func(t *testing.T, cfg config.Config, _ bool, err error) {
+				// yaml.Strict() rejects unknown KEYS, not unknown VALUES → Load succeeds.
+				if err != nil {
+					t.Fatalf("unexpected Load error for known key / bad value: %v", err)
+				}
+				if cfg.OverlayStyle != "neon" {
+					t.Errorf("cfg.OverlayStyle = %q, want %q", cfg.OverlayStyle, "neon")
+				}
+				// ValidateOverlayStyle is the real gate: rejects "neon", accepts the rest.
+				if verr := config.ValidateOverlayStyle("neon"); verr == nil {
+					t.Errorf("ValidateOverlayStyle(%q) = nil, want non-nil", "neon")
+				}
+				for _, ok := range []string{"", config.OverlayStyleBlack, config.OverlayStyleMatrix} {
+					if verr := config.ValidateOverlayStyle(ok); verr != nil {
+						t.Errorf("ValidateOverlayStyle(%q) = %v, want nil", ok, verr)
+					}
+				}
+			},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			td := newTestDeps(t)
+			if err := os.MkdirAll(filepath.Dir(td.path), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(td.path, []byte(tt.yamlBody), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			cfg, created, err := td.loader.Load()
+			tt.validateResp(t, cfg, created, err)
+		})
+	}
+}
+
 // hot-reload is a permanent non-feature in v1. *Loader must NOT
 // expose Watch/Reload/Subscribe/OnChange/WatchFile methods. This regression
 // guard catches accidental additions silently breaking the contract.

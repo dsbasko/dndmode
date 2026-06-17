@@ -23,6 +23,13 @@ const (
 	//. User can edit the file post-creation.
 	DefaultHotkey = "Ctrl+Option+Cmd+X"
 
+	// OverlayStyleBlack is the v1 default look: a plain opaque-black shield.
+	// An absent/empty overlay_style normalizes to this (NormalizeOverlayStyle).
+	OverlayStyleBlack = "black"
+	// OverlayStyleMatrix renders animated green digital rain over the opaque
+	// black shield (cosmetic only; every window guarantee is unchanged).
+	OverlayStyleMatrix = "matrix"
+
 	// configDirPerm is 0o700 — owner read/write/execute only (
 	// mitigation: world cannot read user config).
 	configDirPerm fs.FileMode = 0o700
@@ -34,6 +41,37 @@ const (
 // forward-compat trojan keys are rejected by yaml.Strict().
 type Config struct {
 	Hotkey string `yaml:"hotkey"`
+	// OverlayStyle selects the overlay look. Absent/empty => "black" (v1
+	// default, via NormalizeOverlayStyle); the only valid non-empty values are
+	// "black" and "matrix". The VALUE is validated by the caller (main.go via
+	// ValidateOverlayStyle), NOT by yaml.Strict() — Strict only guards unknown
+	// KEYS, so a known key with a junk value parses fine (QUICK-gh8).
+	OverlayStyle string `yaml:"overlay_style"`
+}
+
+// NormalizeOverlayStyle is the single source of the empty=>black rule: it
+// returns OverlayStyleBlack when s == "" (a fresh config omits overlay_style)
+// and returns s unchanged otherwise. Callers normalize once and thread the
+// result downstream (main.go -> NewController).
+func NormalizeOverlayStyle(s string) string {
+	if s == "" {
+		return OverlayStyleBlack
+	}
+	return s
+}
+
+// ValidateOverlayStyle accepts "" (treated as black), "black", and "matrix";
+// anything else returns a non-nil error whose message is suitable for
+// embedding in main.go's stderr template. yaml.Strict() cannot catch a bad
+// VALUE (only unknown keys), so this is the real gate before any window is
+// created (T-gh8-01).
+func ValidateOverlayStyle(s string) error {
+	switch s {
+	case "", OverlayStyleBlack, OverlayStyleMatrix:
+		return nil
+	default:
+		return fmt.Errorf("unknown overlay_style %q (valid: black, matrix)", s)
+	}
 }
 
 // Loader reads a single YAML file at a fixed path. NewLoader does not touch

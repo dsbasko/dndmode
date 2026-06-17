@@ -9,7 +9,7 @@ package cocoa
 #include <stdint.h>
 #include <stdlib.h>
 
-extern void* cocoa_create_overlay_window(uint32_t displayID, char** outErr);
+extern void* cocoa_create_overlay_window(uint32_t displayID, const char* style, char** outErr);
 extern void  cocoa_close_overlay_window(void* windowHandle);
 extern long  cocoa_window_level(void* windowHandle);
 extern int   cocoa_window_is_visible(void* windowHandle);
@@ -24,24 +24,39 @@ import (
 	"unsafe"
 )
 
-// createOverlayWindow allocates and configures one full-screen black NSWindow
-// for the given CGDirectDisplayID. Returns the boxed NSWindow pointer (caller
+// createOverlayWindowStyled allocates and configures one full-screen NSWindow
+// for the given CGDirectDisplayID with the requested overlay style ("black" =>
+// plain opaque-black shield; "matrix" => a MatrixView digital-rain contentView
+// over the same opaque-black base). The window keeps every shield guarantee
+// regardless of style (QUICK-gh8). Returns the boxed NSWindow pointer (caller
 // owns; pass to closeOverlayWindow exactly once). On failure returns
 // (nil, error) with the C-side strdup'd message bridged via C.GoString +
 // C.free.
 //
 // MUST be called from the main goroutine (NSWindow + NSScreen API requires
-// main thread). Caller is controller.reconcile, which runs under
-// DispatchMain (ensures main-thread invariant).
-func createOverlayWindow(displayID uint32) (unsafe.Pointer, error) {
+// main thread). Caller is controller.reconcile via cgoWindowFactory, which
+// runs under DispatchMain (ensures main-thread invariant).
+func createOverlayWindowStyled(displayID uint32, style string) (unsafe.Pointer, error) {
+	cStyle := C.CString(style)
+	defer C.free(unsafe.Pointer(cStyle))
 	var cErr *C.char
-	w := C.cocoa_create_overlay_window(C.uint32_t(displayID), &cErr)
+	w := C.cocoa_create_overlay_window(C.uint32_t(displayID), cStyle, &cErr)
 	if w == nil {
 		msg := C.GoString(cErr)
 		C.free(unsafe.Pointer(cErr))
 		return nil, fmt.Errorf("create overlay window for displayID=%d: %s", displayID, msg)
 	}
 	return w, nil
+}
+
+// createOverlayWindow is a thin shim over createOverlayWindowStyled with the
+// "black" style. It preserves the byte-for-byte plain-black path and keeps the
+// window_smoketest_test.go callers (TestSmoke_NSWindow_*) working with zero
+// edits. Both are package-private.
+//
+// MUST be called from the main goroutine (see createOverlayWindowStyled).
+func createOverlayWindow(displayID uint32) (unsafe.Pointer, error) {
+	return createOverlayWindowStyled(displayID, "black")
 }
 
 // closeOverlayWindow orders out + closes the NSWindow and releases the
