@@ -118,26 +118,58 @@ func (f *fakeObservers) Unregister() int {
 	return f.unregErr
 }
 
+// callLog is a shared ordered event recorder threaded into both the cursor and
+// activation fakes so order assertions (Foreground-before-Hide on enter,
+// Show-before-Background on teardown) are cheap. Each fake appends its event
+// name ("foreground"/"hide"/"show"/"background") under lock when the log is
+// non-nil; events() returns a snapshot for the ordering scans.
+type callLog struct {
+	mu     sync.Mutex
+	events []string
+}
+
+func (l *callLog) append(name string) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.events = append(l.events, name)
+}
+
+func (l *callLog) snapshot() []string {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	out := make([]string, len(l.events))
+	copy(out, l.events)
+	return out
+}
+
 // fakeCursorHider is a test-injectable cursorHider counting Hide/Show calls.
 // Mirrors fakeObservers (sync.Mutex + counters); the HideCount/ShowCount
 // accessors read under lock for the race detector, mirroring
-// fakeWindowFactory.CreateCount.
+// fakeWindowFactory.CreateCount. The optional log records Hide/Show in the
+// shared ordered call-log for ordering assertions.
 type fakeCursorHider struct {
 	mu    sync.Mutex
 	hides int
 	shows int
+	log   *callLog
 }
 
 func (f *fakeCursorHider) Hide() {
 	f.mu.Lock()
-	defer f.mu.Unlock()
 	f.hides++
+	f.mu.Unlock()
+	if f.log != nil {
+		f.log.append("hide")
+	}
 }
 
 func (f *fakeCursorHider) Show() {
 	f.mu.Lock()
-	defer f.mu.Unlock()
 	f.shows++
+	f.mu.Unlock()
+	if f.log != nil {
+		f.log.append("show")
+	}
 }
 
 func (f *fakeCursorHider) HideCount() int {
@@ -150,6 +182,47 @@ func (f *fakeCursorHider) ShowCount() int {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return f.shows
+}
+
+// fakeActivationPolicy is a test-injectable activationPolicy counting
+// Foreground/Background calls. Clone of fakeCursorHider (sync.Mutex + counters
+// + accessors under lock for the race detector); the optional log records
+// Foreground/Background in the shared ordered call-log.
+type fakeActivationPolicy struct {
+	mu          sync.Mutex
+	foregrounds int
+	backgrounds int
+	log         *callLog
+}
+
+func (f *fakeActivationPolicy) Foreground() {
+	f.mu.Lock()
+	f.foregrounds++
+	f.mu.Unlock()
+	if f.log != nil {
+		f.log.append("foreground")
+	}
+}
+
+func (f *fakeActivationPolicy) Background() {
+	f.mu.Lock()
+	f.backgrounds++
+	f.mu.Unlock()
+	if f.log != nil {
+		f.log.append("background")
+	}
+}
+
+func (f *fakeActivationPolicy) ForegroundCount() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.foregrounds
+}
+
+func (f *fakeActivationPolicy) BackgroundCount() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.backgrounds
 }
 
 // inlineDispatcher executes Dispatch'd functions synchronously inside the
@@ -176,6 +249,8 @@ type testDeps struct {
 	observers  *fakeObservers
 	dispatcher *inlineDispatcher
 	cursor     *fakeCursorHider
+	activation *fakeActivationPolicy
+	callLog    *callLog
 	logBuf     *bytes.Buffer
 }
 
@@ -185,18 +260,20 @@ func newTestDeps(t *testing.T, debounceWin time.Duration) *testDeps {
 	fac := newFakeWindowFactory()
 	obs := &fakeObservers{}
 	disp := &inlineDispatcher{}
-	cur := &fakeCursorHider{}
+	cl := &callLog{}
+	cur := &fakeCursorHider{log: cl}
+	act := &fakeActivationPolicy{log: cl}
 	logBuf := &bytes.Buffer{}
 	logger := slog.New(slog.NewTextHandler(logBuf, &slog.HandlerOptions{Level: slog.LevelDebug}))
 	if debounceWin == 0 {
 		debounceWin = 250 * time.Millisecond
 	}
-	c := newControllerWithDeps(logger, enum, fac, obs, disp, cur, debounceWin)
+	c := newControllerWithDeps(logger, enum, fac, obs, disp, cur, act, debounceWin)
 	t.Cleanup(func() {
 		// Detach in case test forgot Release.
 		setOnScreensChanged(nil)
 	})
-	return &testDeps{controller: c, enumerator: enum, factory: fac, observers: obs, dispatcher: disp, cursor: cur, logBuf: logBuf}
+	return &testDeps{controller: c, enumerator: enum, factory: fac, observers: obs, dispatcher: disp, cursor: cur, activation: act, callLog: cl, logBuf: logBuf}
 }
 
 func TestController_Reconcile_FullRebuild(t *testing.T) {
@@ -400,10 +477,29 @@ func TestController_Release_Idempotent(t *testing.T) {
 	}
 }
 
-// TestController_CursorHide covers the one-shot system-cursor hide/show wiring:
-// Hide fires once after a successful cold-start, never on ErrNoDisplays, never
-// per hot-plug rebuild; Show fires once on Release iff a hide happened, and is
-// idempotent across repeated Release.
+// assertImmediatelyBefore scans the ordered call-log snapshot and asserts that
+// `pred` occurs immediately before `succ` (i.e. the entry at index-1 of succ is
+// pred). Used to prove Foreground-before-Hide on enter and Show-before-Background
+// on teardown without timing assumptions.
+func assertImmediatelyBefore(t *testing.T, events []string, pred, succ string) {
+	t.Helper()
+	for i, e := range events {
+		if e == succ {
+			if i == 0 || events[i-1] != pred {
+				t.Errorf("expected %q immediately before %q; got events=%v", pred, succ, events)
+			}
+			return
+		}
+	}
+	t.Errorf("event %q not found in call-log; got events=%v", succ, events)
+}
+
+// TestController_CursorHide covers the coupled one-shot activation-flip +
+// cursor hide/show wiring (revised): on a successful cold-start the app
+// flips to Accessory+active (Foreground) BEFORE the cursor Hide, exactly once,
+// never on ErrNoDisplays, never per hot-plug rebuild; on Release the cursor is
+// restored (Show) BEFORE reverting to Prohibited (Background), exactly once iff a
+// hide/flip happened, idempotent across repeated Release.
 func TestController_CursorHide(t *testing.T) {
 	tests := []struct {
 		name     string
@@ -411,7 +507,8 @@ func TestController_CursorHide(t *testing.T) {
 		validate func(t *testing.T, td *testDeps)
 	}{
 		{
-			// Case 1: successful cold-start hides exactly once, no show yet.
+			// Case 1: successful cold-start flips to foreground then hides, both
+			// exactly once; no show / background yet. Foreground precedes Hide.
 			name: "cold-start with screens hides once",
 			setup: func(td *testDeps) {
 				td.enumerator.set([]uint32{1, 2})
@@ -426,10 +523,18 @@ func TestController_CursorHide(t *testing.T) {
 				if got := td.cursor.ShowCount(); got != 0 {
 					t.Errorf("ShowCount = %d, want 0", got)
 				}
+				if got := td.activation.ForegroundCount(); got != 1 {
+					t.Errorf("ForegroundCount = %d, want 1", got)
+				}
+				if got := td.activation.BackgroundCount(); got != 0 {
+					t.Errorf("BackgroundCount = %d, want 0", got)
+				}
+				assertImmediatelyBefore(t, td.callLog.snapshot(), "foreground", "hide")
 			},
 		},
 		{
-			// Case 2: ErrNoDisplays cold-start must NOT hide (nothing covered).
+			// Case 2: ErrNoDisplays cold-start must NOT flip foreground NOR hide
+			// (nothing covered).
 			name: "cold-start no displays does not hide",
 			setup: func(td *testDeps) {
 				td.enumerator.set([]uint32{})
@@ -445,10 +550,15 @@ func TestController_CursorHide(t *testing.T) {
 				if got := td.cursor.ShowCount(); got != 0 {
 					t.Errorf("ShowCount = %d, want 0", got)
 				}
+				if got := td.activation.ForegroundCount(); got != 0 {
+					t.Errorf("ForegroundCount = %d, want 0 (no foreground on ErrNoDisplays)", got)
+				}
 			},
 		},
 		{
-			// Case 3: Release after a successful create shows exactly once.
+			// Case 3: Release after a successful create restores the cursor (Show)
+			// then reverts to Prohibited (Background), each exactly once. Show
+			// precedes Background.
 			name: "release after create shows once",
 			setup: func(td *testDeps) {
 				td.enumerator.set([]uint32{1})
@@ -466,10 +576,15 @@ func TestController_CursorHide(t *testing.T) {
 				if got := td.cursor.ShowCount(); got != 1 {
 					t.Errorf("ShowCount = %d, want 1", got)
 				}
+				if got := td.activation.BackgroundCount(); got != 1 {
+					t.Errorf("BackgroundCount = %d, want 1", got)
+				}
+				assertImmediatelyBefore(t, td.callLog.snapshot(), "show", "background")
 			},
 		},
 		{
-			// Case 4: Release twice still shows exactly once (idempotency).
+			// Case 4: Release twice still shows + backgrounds exactly once
+			// (idempotency).
 			name: "double release shows once",
 			setup: func(td *testDeps) {
 				td.enumerator.set([]uint32{1})
@@ -487,11 +602,14 @@ func TestController_CursorHide(t *testing.T) {
 				if got := td.cursor.ShowCount(); got != 1 {
 					t.Errorf("ShowCount after double Release = %d, want 1 (idempotent)", got)
 				}
+				if got := td.activation.BackgroundCount(); got != 1 {
+					t.Errorf("BackgroundCount after double Release = %d, want 1 (idempotent)", got)
+				}
 			},
 		},
 		{
 			// Case 5: hot-plug rebuilds after a successful cold-start must NOT
-			// re-hide — Hide stays at exactly 1.
+			// re-hide NOR re-foreground — Hide and Foreground stay at exactly 1.
 			name: "hot-plug rebuilds do not re-hide",
 			setup: func(td *testDeps) {
 				td.enumerator.set([]uint32{1, 2})
@@ -511,11 +629,14 @@ func TestController_CursorHide(t *testing.T) {
 				if got := td.cursor.HideCount(); got != 1 {
 					t.Errorf("HideCount after hot-plug rebuilds = %d, want 1 (not per-rebuild)", got)
 				}
+				if got := td.activation.ForegroundCount(); got != 1 {
+					t.Errorf("ForegroundCount after hot-plug rebuilds = %d, want 1 (cold-start only, not per-rebuild)", got)
+				}
 			},
 		},
 		{
 			// Case 6: Release WITHOUT a successful create (cursorHidden==false)
-			// must NOT show.
+			// must NOT show NOR background.
 			name: "release without create does not show",
 			setup: func(td *testDeps) {
 				if err := td.controller.Release(); err != nil {
@@ -528,6 +649,9 @@ func TestController_CursorHide(t *testing.T) {
 				}
 				if got := td.cursor.ShowCount(); got != 0 {
 					t.Errorf("ShowCount = %d, want 0 (no hide → no show)", got)
+				}
+				if got := td.activation.BackgroundCount(); got != 0 {
+					t.Errorf("BackgroundCount = %d, want 0 (no foreground → no background)", got)
 				}
 			},
 		},

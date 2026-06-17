@@ -8,9 +8,18 @@
 //
 // contract:
 //   - [NSApplication sharedApplication] establishes the singleton NSApp.
-// - setActivationPolicy:NSApplicationActivationPolicyProhibited
-//     hides the dndmode process from Dock, Cmd+Tab, and menu bar — the
-//     CLI is the only observable surface (PROJECT.md "silent protection").
+//   - setActivationPolicy:NSApplicationActivationPolicyProhibited is the
+// INITIAL at-rest policy (revised): the process STARTS Prohibited
+//     so it is silent during the "active" banner and the Accessibility /
+//     Input-Monitoring permission prompts — no Dock icon, no Cmd+Tab entry,
+//     no menu bar. This is no longer the permanent identity: the Controller
+//     flips the policy to Accessory + active ONLY while the overlay is up
+//     (cocoa_app_foreground below) and reverts it to Prohibited on teardown
+//     (cocoa_app_background). The flip is required because CGDisplayHideCursor
+//     is a no-op while the app is Prohibited (never the active app), proven by
+//     manual run. Silent-protection intent is preserved: Accessory still hides
+//     the Dock icon and Cmd+Tab entry, and the now-active menu bar is fully
+//     covered by the shield overlay window.
 //   - We DO NOT explicitly invoke the AppKit launch-finalisation method
 //     (the one [NSApp run] calls implicitly on the first iteration of the
 // run loop). Per, AppKit's own run loop entry handles it.
@@ -70,4 +79,29 @@ void cocoa_stop_app(int subtype) {
                      data1:0
                      data2:0];
     [NSApp postEvent:evt atStart:YES];
+}
+
+// cocoa_app_foreground flips NSApp into Accessory + active for the duration of
+// the overlay (revised). Accessory keeps the process out of the Dock and
+// Cmd+Tab while STILL letting it become the active (foreground) app, which is
+// the precondition CGDisplayHideCursor needs — under Prohibited the app is
+// never foreground, so the WindowServer ignores the hide. activateIgnoringOtherApps:YES
+// forces the activation without requiring a user click. The now-active menu bar
+// is covered by the shield overlay, so silent-protection intent is preserved.
+//
+// Mutates NSApp → MUST run on the main thread (AppKit invariant). The Controller
+// invokes it only from the main goroutine, immediately before the cursor hide.
+void cocoa_app_foreground(void) {
+    [NSApp setActivationPolicy:NSApplicationActivationPolicyAccessory];
+    [NSApp activateIgnoringOtherApps:YES];
+}
+
+// cocoa_app_background reverts NSApp to Prohibited on overlay teardown, restoring
+// the silent at-rest state (no Dock icon, no Cmd+Tab entry, no menu bar).
+//
+// Mutates NSApp → MUST run on the main thread (AppKit invariant). The Controller
+// invokes it only from the main goroutine (inside the Release dispatch closure),
+// immediately after the cursor is restored.
+void cocoa_app_background(void) {
+    [NSApp setActivationPolicy:NSApplicationActivationPolicyProhibited];
 }
