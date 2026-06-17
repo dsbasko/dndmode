@@ -201,6 +201,17 @@ func run() int {
 		return exitConfigErr
 	}
 
+	// --- Step 5b.1: Validate overlay_style (QUICK-gh8, T-gh8-01) ---
+	// yaml.Strict() rejects unknown KEYS but not unknown VALUES, so a junk
+	// overlay_style value parses fine — value-validate it HERE, before any
+	// window is created. overlayStyle (normalized: ""=>"black") is declared in
+	// this scope so it is still visible at Step 15 (passed into NewController).
+	if err := config.ValidateOverlayStyle(cfg.OverlayStyle); err != nil {
+		fmt.Fprintf(os.Stderr, "dndmode: invalid overlay_style %q: %v. Fix overlay_style in ~/.config/dndmode/config.yml (valid: black, matrix).\n", cfg.OverlayStyle, err)
+		return exitConfigErr
+	}
+	overlayStyle := config.NormalizeOverlayStyle(cfg.OverlayStyle)
+
 	// --- Step 6: Print banner (stdout-only) ---
 	if created {
 		fmt.Fprintf(os.Stdout, "dndmode: created default config at %s\n", cfgPath)
@@ -438,7 +449,7 @@ func run() int {
 	}
 
 	// --- Step 15 (Phase 3): Controller + per-screen overlay windows (P2) ---
-	controller := cocoa.NewController(log)
+	controller := cocoa.NewController(overlayStyle, log)
 	if err := controller.CreateWindowsForAllScreens(); err != nil {
 		if errors.Is(err, cocoa.ErrNoDisplays) {
 			fmt.Fprintln(os.Stderr,

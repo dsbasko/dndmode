@@ -34,10 +34,14 @@ func (cgoScreenEnumerator) Enumerate() []uint32 { return enumerateScreens() }
 
 // cgoWindowFactory is the production implementation backed by
 // cocoa_create_overlay_window / cocoa_close_overlay_window (window_darwin.m).
-type cgoWindowFactory struct{}
+// The style field (black|matrix, already NormalizeOverlayStyle'd by main.go) is
+// threaded into every Create — this keeps the style out of the windowFactory
+// interface (Create(displayID uint32)), so the test fake and
+// newControllerWithDeps signature are untouched (QUICK-gh8).
+type cgoWindowFactory struct{ style string }
 
-func (cgoWindowFactory) Create(displayID uint32) (unsafe.Pointer, error) {
-	return createOverlayWindow(displayID)
+func (f cgoWindowFactory) Create(displayID uint32) (unsafe.Pointer, error) {
+	return createOverlayWindowStyled(displayID, f.style)
 }
 func (cgoWindowFactory) Close(w unsafe.Pointer) { closeOverlayWindow(w) }
 
@@ -141,13 +145,18 @@ type Controller struct {
 // fallback is slog.Default() if nil (mirrors state.NewRestoreState lines
 // 31-35). The returned Controller has registered its onScreensChanged
 // callback with the package-level activeOnScreensChanged registry.
-func NewController(log *slog.Logger) *Controller {
+//
+// style selects the overlay look (black|matrix, QUICK-gh8); the caller passes
+// the NormalizeOverlayStyle'd value from config. It is threaded into the
+// cgoWindowFactory so every per-display window is created with that style,
+// WITHOUT widening the windowFactory interface.
+func NewController(style string, log *slog.Logger) *Controller {
 	if log == nil {
 		log = slog.Default()
 	}
 	return newControllerWithDeps(log,
 		cgoScreenEnumerator{},
-		cgoWindowFactory{},
+		cgoWindowFactory{style: style},
 		cgoObserverRegistrar{},
 		cgoMainDispatcher{},
 		cgoCursorHider{},

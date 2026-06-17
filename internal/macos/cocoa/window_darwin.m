@@ -4,6 +4,7 @@
 #import <CoreGraphics/CGDirectDisplay.h>  // shield-level Quartz function lives here, NB: not in CGWindowLevel.h
 #import <stdint.h>
 #import <string.h>
+#import "matrixview_darwin.h"  // @interface MatrixView (cgo compiles each .m as a separate TU, so a bare @class forward decl is not enough)
 
 // cocoa_create_overlay_window allocates and fully configures one black
 // full-screen NSWindow for the NSScreen identified by displayID.
@@ -21,6 +22,12 @@
 // visual-only (ignoresMouseEvents YES); Phase 4 adds CGEventTap for input
 // blocking.
 //
+// `style` selects the overlay content (QUICK-gh8): when it equals "matrix" a
+// MatrixView contentView is installed for the green digital-rain look; for
+// "black", NULL, or anything else the current plain-black path is untouched.
+// The window stays setOpaque:YES + black backgroundColor for BOTH styles — the
+// matrix layer is an opaque base on top, never transparent (T-gh8-03).
+//
 // Critical pitfall (the design notes): default releasedWhenClosed=YES
 // combined with ARC + __bridge_retained ownership causes double-free on
 // [w close]. We explicitly disable it immediately after init below.
@@ -29,7 +36,7 @@
 // the four CollectionBehavior flags, opaque-black background, front-ordering
 // without activation) appear exactly once in the body for unambiguous grep
 // audits.
-void* cocoa_create_overlay_window(uint32_t displayID, char** outErr) {
+void* cocoa_create_overlay_window(uint32_t displayID, const char* style, char** outErr) {
     NSScreen *target = nil;
     for (NSScreen *s in [NSScreen screens]) {
         NSNumber *n = [[s deviceDescription] objectForKey:@"NSScreenNumber"];
@@ -72,6 +79,17 @@ void* cocoa_create_overlay_window(uint32_t displayID, char** outErr) {
     [w setCanHide:NO];                                     // 
     [w setHidesOnDeactivate:NO];                           // 
     [w setIgnoresMouseEvents:YES];                         // 
+
+    // QUICK-gh8: matrix style swaps in an animated digital-rain contentView.
+    // The black backgroundColor above stays set (opaque base under the layer);
+    // every other window guarantee is already configured. For "black"/NULL/any
+    // other value we leave the default contentView untouched (byte-identical
+    // black path). MatrixView's @interface comes from matrixview_darwin.h.
+    if (style != NULL && strcmp(style, "matrix") == 0) {
+        MatrixView *mv = [[MatrixView alloc] initWithFrame:[[w contentView] bounds]];
+        [mv setAutoresizingMask:(NSViewWidthSizable | NSViewHeightSizable)];
+        [w setContentView:mv];
+    }
 
     [w orderFrontRegardless];                              // 
 
