@@ -1,39 +1,45 @@
 // +build darwin
 
 #import <Cocoa/Cocoa.h>
-#import <QuartzCore/QuartzCore.h>  // available via -framework QuartzCore (CVDisplayLink, CALayer)
+#import <QuartzCore/QuartzCore.h>  // available via -framework QuartzCore (CALayer)
 #import "matrixview_darwin.h"      // shared @interface MatrixView (also imported by window_darwin.m)
 
-// MatrixView renders a cyberpunk "digital rain" as the contentView of a shield
-// overlay window when config `overlay_style: matrix` is selected. It is a pure
-// cosmetic content swap layered ON TOP of the existing opaque shield NSWindow
-// (window_darwin.m): the window keeps setOpaque:YES, and this view's backing
-// layer is ALSO opaque, so the desktop can never bleed through (T-gh8-03).
+// MatrixView renders a smooth green "digital rain" as the contentView of a
+// shield overlay window when config `overlay_style: matrix` is selected. It is
+// a pure cosmetic content swap on top of the opaque shield NSWindow
+// (window_darwin.m): the window keeps setOpaque:YES, this view's backing layer
+// is opaque black, so the desktop can never bleed through (T-gh8-03).
 //
-// Animation cadence (T-gh8-02): the redraw is FPS-CAPPED, never free-running —
-// an NSTimer at ~30 FPS in NSRunLoopCommonModes on the MAIN run loop, so every
-// state mutation + drawRect: is main-thread-safe with no cross-thread marshalling.
+// Animation model (rebuilt for smoothness — no churn, no flares):
+//   * FIXED GRID. Each column is a fixed grid of cells; every cell holds a
+//     STABLE glyph. Glyphs are NOT re-rolled every frame (that earlier churn is
+//     exactly what read as "twitchy"). A cell's glyph is written ONCE, by the
+//     head as it passes (authentic — the leading edge "types" new characters),
+//     and then stays put until the column wraps and refills.
+//   * CONTINUOUS HEAD. Each column's head slides down at a per-column speed (in
+//     cells/frame, fractional). A cell's brightness is a smooth function of its
+//     distance to the head, so the bright leading glyph + fading trail glide as
+//     a brightness GRADIENT over stationary glyphs — no per-frame redraw jitter.
+//   * NO random bright "flare" flickers (removed — that was the random
+//     single-symbol popping the user saw).
 //
-// Lifecycle — the leak-free contract (CRITICAL must_have):
-//   * START the timer in viewDidMoveToWindow when self.window != nil.
-//   * STOP + RELEASE the timer in BOTH viewWillMoveToWindow:nil AND dealloc
-//     (whichever fires first), guarded against double-invalidate.
+// Cadence (T-gh8-02): FPS-CAPPED ~30 via NSTimer in NSRunLoopCommonModes on the
+// MAIN run loop, so all state + drawRect: is main-thread-safe. Drawing is FLAT
+// (one drawAtPoint per lit cell, no NSShadow/blur) — cheap enough for all
+// displays at 30 FPS.
 //
-// Look (hardcoded, no config knobs — v1 scope is style switching only): neon
-// green "digital rain" over a pure black (#000000) base. Columns are VARIED for
-// depth — each picks one of several glyph sizes (kMatrixSizes), its own opacity
-// (per-column alpha) AND one of several MATRIX-GREEN shades (kMatrixPalette —
-// green only). Every glyph is a NEON TUBE: a wide green bloom (blurred NSShadow)
-// under a bright green-white core, with occasional brighter "data flare"
-// flickers. Two shadowed passes per glyph — the glow is the expensive part; if
-// it ever costs too much it can be restricted to leading glyphs.
+// Lifecycle — leak-free contract (CRITICAL must_have): start the timer in
+// viewDidMoveToWindow (window != nil); stop+release it in viewWillMoveToWindow:nil
+// AND dealloc (guarded against double-invalidate).
+//
+// Look (hardcoded, no config knobs — v1): green only. Columns are VARIED for
+// depth — per-column glyph SIZE (kMatrixSizes), per-column OPACITY and per-column
+// SHADE (kMatrixPalette). Leading glyph is green-white; the trail fades the
+// column's green down to black over a per-column trail length.
 
-// --- Hardcoded constants (v1, no config knobs) ---
 static const NSTimeInterval kMatrixFrameInterval = 1.0 / 30.0; // ~30 FPS cap
-static const NSInteger kMatrixTrailLen = 16;     // glyphs drawn per column trail
 
-// Per-column glyph sizes (points) — bigger than a flat single size and varied,
-// so different columns read as visibly different sizes / depths.
+// Per-column glyph sizes (points) — varied so columns read as different depths.
 static const CGFloat kMatrixSizes[] = { 24.0, 34.0, 46.0 };
 static const NSInteger kMatrixSizeCount = (NSInteger)(sizeof(kMatrixSizes) / sizeof(kMatrixSizes[0]));
 
@@ -41,9 +47,7 @@ static const NSInteger kMatrixSizeCount = (NSInteger)(sizeof(kMatrixSizes) / siz
 static const CGFloat kMatrixCellHFactor = 1.18;
 static const CGFloat kMatrixCellWFactor = 0.92;
 
-// All-green Matrix palette — different SHADES of green only (no other hues).
-// Each column is assigned one shade uniformly, so the field has green variety
-// (classic / lime / emerald / soft) without leaving the Matrix green family.
+// All-green palette — different SHADES of green only (no other hues).
 typedef struct { CGFloat r, g, b; } MatrixRGB;
 static const MatrixRGB kMatrixPalette[] = {
     { 0.00, 1.00, 0.25 },  // classic matrix green (#00FF41-ish)
@@ -58,31 +62,32 @@ static const unichar kKatakanaFirst = 0xFF66;
 static const unichar kKatakanaLast  = 0xFF9D;
 
 @implementation MatrixView {
-    NSTimer           *_timer;      // ~30 FPS driver; nil when stopped
-    NSInteger          _columns;    // active column count (variable-width pack)
-    CGFloat           *_x;          // per-column x position (points)
-    CGFloat           *_headPx;     // per-column head Y position (points, flipped)
-    CGFloat           *_speedPx;    // per-column fall speed (points/tick)
-    CGFloat           *_alpha;      // per-column opacity multiplier (0.35..1.0)
-    NSInteger         *_bucket;     // per-column size bucket index into kMatrixSizes
-    NSInteger         *_hue;        // per-column neon hue index into kMatrixPalette
-    NSArray<NSFont *> *_fonts;      // one cached monospaced font per size bucket
+    NSTimer           *_timer;     // ~30 FPS driver; nil when stopped
+    NSInteger          _columns;   // active column count (variable-width pack)
+    NSInteger          _maxRows;   // row capacity (smallest cell) — _glyphs stride
+    CGFloat           *_x;         // per-column x position (points)
+    NSInteger         *_bucket;    // per-column size bucket -> kMatrixSizes / _fonts
+    NSInteger         *_hue;       // per-column shade -> kMatrixPalette
+    CGFloat           *_alpha;     // per-column opacity multiplier
+    CGFloat           *_head;      // per-column head position (cells, fractional)
+    CGFloat           *_speed;     // per-column fall speed (cells/frame)
+    CGFloat           *_trail;     // per-column trail length (cells)
+    NSInteger         *_rows;      // per-column cell count (fits the height)
+    unichar           *_glyphs;    // stable cell glyphs, indexed [c*_maxRows + r]
+    NSArray<NSFont *> *_fonts;     // one cached monospaced font per size bucket
 }
 
 - (instancetype)initWithFrame:(NSRect)frameRect {
     self = [super initWithFrame:frameRect];
     if (self) {
-        // Layer-backed, opaque base so the view fully covers (no transparency).
         self.wantsLayer = YES;
         self.layer.backgroundColor = [[NSColor blackColor] CGColor];
-
-        [self buildFonts];     // one font per size bucket (built once)
-        [self rebuildColumns]; // per-column geometry (rebuilt on resize)
+        [self buildFonts];
+        [self rebuildColumns];
     }
     return self;
 }
 
-// Build one cached monospaced font per size bucket (built once, not per resize).
 - (void)buildFonts {
     NSMutableArray<NSFont *> *fs = [NSMutableArray arrayWithCapacity:(NSUInteger)kMatrixSizeCount];
     for (NSInteger i = 0; i < kMatrixSizeCount; i++) {
@@ -96,33 +101,57 @@ static const unichar kKatakanaLast  = 0xFF9D;
     _fonts = [fs copy];
 }
 
-// This view draws its own opaque content every frame; declaring it opaque lets
-// AppKit skip compositing whatever is behind it (it is the full-screen base).
-- (BOOL)isOpaque { return YES; }
+- (BOOL)isOpaque  { return YES; }
+- (BOOL)isFlipped { return YES; } // y grows downward -> rain falls with +head
 
-// Flipped so y grows downward — matches the "rain falls down" model.
-- (BOOL)isFlipped { return YES; }
+// One random glyph codepoint (~25% digits, ~75% katakana).
+- (unichar)randomUnichar {
+    if (arc4random_uniform(4) == 0) {
+        return (unichar)('0' + arc4random_uniform(10));
+    }
+    unichar span = (unichar)(kKatakanaLast - kKatakanaFirst + 1);
+    return (unichar)(kKatakanaFirst + arc4random_uniform(span));
+}
+
+// (Re)seed one column's motion + fill all its cells with fresh stable glyphs.
+- (void)respawnColumn:(NSInteger)c rows:(NSInteger)rows {
+    _trail[c] = 8.0 + (CGFloat)arc4random_uniform(13);          // 8..20 cells
+    _speed[c] = 0.12 + (CGFloat)arc4random_uniform(29) / 100.0; // 0.12..0.40 cells/frame
+    // Start above the top by a random gap so columns enter staggered, not in sync.
+    _head[c]  = -(CGFloat)arc4random_uniform((uint32_t)(rows + (NSInteger)_trail[c] + 1));
+    for (NSInteger r = 0; r < rows; r++) {
+        _glyphs[(size_t)c * (size_t)_maxRows + (size_t)r] = [self randomUnichar];
+    }
+}
 
 // --- Column model: variable-width pack, (re)allocated on init + size change ---
 
 - (void)rebuildColumns {
     NSRect b = [self bounds];
 
-    free(_x); free(_headPx); free(_speedPx); free(_alpha); free(_bucket); free(_hue);
-    _x = _headPx = _speedPx = _alpha = NULL;
-    _bucket = _hue = NULL;
+    free(_x); free(_bucket); free(_hue); free(_alpha);
+    free(_head); free(_speed); free(_trail); free(_rows); free(_glyphs);
+    _x = _alpha = _head = _speed = _trail = NULL;
+    _bucket = _hue = _rows = NULL;
+    _glyphs = NULL;
     _columns = 0;
 
+    CGFloat minCellH = kMatrixSizes[0] * kMatrixCellHFactor;
     CGFloat minCellW = kMatrixSizes[0] * kMatrixCellWFactor;
+    _maxRows = (NSInteger)floor(b.size.height / minCellH) + 2;
+    if (_maxRows < 1) _maxRows = 1;
     NSInteger cap = (NSInteger)floor(b.size.width / minCellW) + 2;
     if (cap < 1) cap = 1;
 
-    _x       = (CGFloat *)calloc((size_t)cap, sizeof(CGFloat));
-    _headPx  = (CGFloat *)calloc((size_t)cap, sizeof(CGFloat));
-    _speedPx = (CGFloat *)calloc((size_t)cap, sizeof(CGFloat));
-    _alpha   = (CGFloat *)calloc((size_t)cap, sizeof(CGFloat));
-    _bucket  = (NSInteger *)calloc((size_t)cap, sizeof(NSInteger));
-    _hue     = (NSInteger *)calloc((size_t)cap, sizeof(NSInteger));
+    _x      = (CGFloat *)calloc((size_t)cap, sizeof(CGFloat));
+    _bucket = (NSInteger *)calloc((size_t)cap, sizeof(NSInteger));
+    _hue    = (NSInteger *)calloc((size_t)cap, sizeof(NSInteger));
+    _alpha  = (CGFloat *)calloc((size_t)cap, sizeof(CGFloat));
+    _head   = (CGFloat *)calloc((size_t)cap, sizeof(CGFloat));
+    _speed  = (CGFloat *)calloc((size_t)cap, sizeof(CGFloat));
+    _trail  = (CGFloat *)calloc((size_t)cap, sizeof(CGFloat));
+    _rows   = (NSInteger *)calloc((size_t)cap, sizeof(NSInteger));
+    _glyphs = (unichar *)calloc((size_t)cap * (size_t)_maxRows, sizeof(unichar));
 
     NSInteger c = 0;
     CGFloat x = 0.0;
@@ -131,16 +160,15 @@ static const unichar kKatakanaLast  = 0xFF9D;
         CGFloat size  = kMatrixSizes[bk];
         CGFloat cellW = size * kMatrixCellWFactor;
         CGFloat cellH = size * kMatrixCellHFactor;
+        NSInteger rows = (NSInteger)floor(b.size.height / cellH) + 1;
+        if (rows > _maxRows) rows = _maxRows;
 
-        // All-green field: pick one of the green shades uniformly.
-        NSInteger hue = (NSInteger)arc4random_uniform((uint32_t)kMatrixPaletteCount);
-
-        _bucket[c]  = bk;
-        _hue[c]     = hue;
-        _x[c]       = x;
-        _alpha[c]   = 0.35 + (CGFloat)arc4random_uniform(66) / 100.0; // 0.35..1.0
-        _headPx[c]  = -(CGFloat)arc4random_uniform((uint32_t)(b.size.height + 1.0));
-        _speedPx[c] = cellH * (0.25 + (CGFloat)arc4random_uniform(46) / 100.0);
+        _bucket[c] = bk;
+        _hue[c]    = (NSInteger)arc4random_uniform((uint32_t)kMatrixPaletteCount);
+        _x[c]      = x;
+        _alpha[c]  = 0.45 + (CGFloat)arc4random_uniform(56) / 100.0; // 0.45..1.0
+        _rows[c]   = rows;
+        [self respawnColumn:c rows:rows];
 
         x += cellW;
         c++;
@@ -158,111 +186,73 @@ static const unichar kKatakanaLast  = 0xFF9D;
     [self rebuildColumns];
 }
 
-// --- Random glyph from the katakana+digits alphabet ---
-
-- (NSString *)randomGlyph {
-    // ~25% digits, ~75% katakana — classic mix.
-    if (arc4random_uniform(4) == 0) {
-        unichar d = (unichar)('0' + arc4random_uniform(10));
-        return [NSString stringWithCharacters:&d length:1];
-    }
-    unichar span = (unichar)(kKatakanaLast - kKatakanaFirst + 1);
-    unichar g = (unichar)(kKatakanaFirst + arc4random_uniform(span));
-    return [NSString stringWithCharacters:&g length:1];
-}
-
-// --- Per-frame state advance, marshalled by the main-thread timer ---
+// --- Per-frame advance: slide each head; the head "types" fresh glyphs as it ---
+// --- crosses into new cells; columns wrap when their trail clears the bottom. --
 
 - (void)step:(NSTimer *)t {
     (void)t;
-    NSRect b = [self bounds];
     for (NSInteger c = 0; c < _columns; c++) {
-        CGFloat cellH = kMatrixSizes[_bucket[c]] * kMatrixCellHFactor;
-        _headPx[c] += _speedPx[c];
-        if (_headPx[c] - (CGFloat)kMatrixTrailLen * cellH > b.size.height) {
-            _headPx[c]  = -(CGFloat)arc4random_uniform((uint32_t)(b.size.height / 2.0 + 1.0));
-            _speedPx[c] = cellH * (0.25 + (CGFloat)arc4random_uniform(46) / 100.0);
+        NSInteger prev = (NSInteger)floor(_head[c]);
+        _head[c] += _speed[c];
+
+        if (_head[c] - _trail[c] > (CGFloat)_rows[c]) {
+            [self respawnColumn:c rows:_rows[c]]; // whole streak passed the bottom
+            continue;
+        }
+        // Write a fresh stable glyph into every cell the head just entered.
+        NSInteger cur = (NSInteger)floor(_head[c]);
+        for (NSInteger r = prev + 1; r <= cur; r++) {
+            if (r >= 0 && r < _rows[c]) {
+                _glyphs[(size_t)c * (size_t)_maxRows + (size_t)r] = [self randomUnichar];
+            }
         }
     }
     [self setNeedsDisplay:YES];
 }
 
-// --- Helper: draw one glyph as a glowing layer (blurred shadow + fill) ---
-
-- (void)drawGlyph:(NSString *)glyph
-              at:(NSPoint)p
-            font:(NSFont *)font
-            fill:(NSColor *)fill
-       glowColor:(NSColor *)glowColor
-        glowBlur:(CGFloat)glowBlur {
-    NSShadow *glow = [[NSShadow alloc] init];
-    glow.shadowOffset     = NSZeroSize;
-    glow.shadowBlurRadius = glowBlur;
-    glow.shadowColor      = glowColor;
-    [glyph drawAtPoint:p withAttributes:@{
-        NSFontAttributeName: font,
-        NSForegroundColorAttributeName: fill,
-        NSShadowAttributeName: glow,
-    }];
-}
-
-// --- Drawing: pure black base + per-column green neon-tube rain ---
+// --- Drawing: black base + per-column streak as a smooth brightness gradient ---
 
 - (void)drawRect:(NSRect)dirtyRect {
     (void)dirtyRect;
     NSRect b = [self bounds];
 
-    // Pure black base (#000000), fully opaque — no desktop bleed-through.
-    [[NSColor blackColor] setFill];
+    [[NSColor blackColor] setFill]; // pure #000000, fully opaque
     NSRectFill(b);
 
     for (NSInteger c = 0; c < _columns; c++) {
         NSFont   *font  = _fonts[(NSUInteger)_bucket[c]];
-        CGFloat   size  = kMatrixSizes[_bucket[c]];
-        CGFloat   cellH = size * kMatrixCellHFactor;
+        CGFloat   cellH = kMatrixSizes[_bucket[c]] * kMatrixCellHFactor;
         CGFloat   colA  = _alpha[c];
         CGFloat   x     = _x[c];
-        CGFloat   headPx = _headPx[c];
+        CGFloat   head  = _head[c];
+        CGFloat   trail = _trail[c];
+        NSInteger rows  = _rows[c];
         MatrixRGB hue   = kMatrixPalette[_hue[c]];
 
-        for (NSInteger k = 0; k < kMatrixTrailLen; k++) {
-            CGFloat y = headPx - (CGFloat)k * cellH;
-            if (y < -cellH || y > b.size.height) {
-                continue; // off-screen segment of the trail
+        // Only the lit window [head-trail .. head] needs drawing.
+        NSInteger lo = (NSInteger)floor(head - trail);
+        NSInteger hi = (NSInteger)floor(head);
+        if (lo < 0) lo = 0;
+        if (hi >= rows) hi = rows - 1;
+
+        for (NSInteger r = lo; r <= hi; r++) {
+            CGFloat d = head - (CGFloat)r;   // 0 at head .. grows up the trail
+            if (d < 0.0 || d >= trail) {
+                continue;
             }
+            CGFloat bright = (1.0 - d / trail) * colA;        // smooth fade head->tail
+            CGFloat w = (d < 1.5) ? (1.5 - d) / 1.5 * 0.85 : 0.0; // whiten near the head
 
-            CGFloat fade = (k == 0) ? 1.0 : 1.0 - ((CGFloat)k / (CGFloat)kMatrixTrailLen);
-            CGFloat a    = colA * fade;
-            NSPoint p    = NSMakePoint(x, y);
-            NSString *glyph = [self randomGlyph];
+            CGFloat rr = fmin(1.0, hue.r + w)       * bright;
+            CGFloat gg = fmin(1.0, hue.g + w * 0.3) * bright;
+            CGFloat bb = fmin(1.0, hue.b + w)       * bright;
 
-            // Rare white "data flare" — cyberpunk glitch flicker.
-            BOOL flare = (arc4random_uniform(100) < 2);
-
-            // Pass 1 — wide saturated neon bloom (skip the faintest tail: invisible + costly).
-            if (fade > 0.12) {
-                NSColor *bloom = [NSColor colorWithSRGBRed:hue.r green:hue.g blue:hue.b
-                                                     alpha:a * 0.9];
-                CGFloat bloomBlur = size * (k == 0 ? 1.20 : 0.45 + 0.45 * fade);
-                [self drawGlyph:glyph at:p font:font fill:bloom
-                      glowColor:bloom glowBlur:bloomBlur];
-            }
-
-            // Pass 2 — white-hot core (lead/flare = white; trail = hue pushed toward white).
-            NSColor *core;
-            if (k == 0 || flare) {
-                // Bright green-white head (stays in the green family, not pure white).
-                core = [NSColor colorWithSRGBRed:0.80 green:1.00 blue:0.80
-                                          alpha:fmin(1.0, a + 0.25)];
-            } else {
-                core = [NSColor colorWithSRGBRed:fmin(1.0, hue.r + 0.45)
-                                          green:fmin(1.0, hue.g + 0.20)
-                                           blue:fmin(1.0, hue.b + 0.45)
-                                          alpha:a];
-            }
-            NSColor *coreGlow = [NSColor colorWithSRGBRed:hue.r green:hue.g blue:hue.b alpha:a];
-            [self drawGlyph:glyph at:p font:font fill:core
-                  glowColor:coreGlow glowBlur:size * 0.22];
+            unichar u = _glyphs[(size_t)c * (size_t)_maxRows + (size_t)r];
+            NSString *glyph = [NSString stringWithCharacters:&u length:1];
+            [glyph drawAtPoint:NSMakePoint(x, (CGFloat)r * cellH) withAttributes:@{
+                NSFontAttributeName: font,
+                NSForegroundColorAttributeName: [NSColor colorWithSRGBRed:rr green:gg blue:bb alpha:1.0],
+            }];
         }
     }
 }
@@ -270,7 +260,7 @@ static const unichar kKatakanaLast  = 0xFF9D;
 // --- Lifecycle: start/stop the FPS-capped timer with window attachment ---
 
 - (void)startTimer {
-    if (_timer != nil) return; // already running (guard against double-start)
+    if (_timer != nil) return;
     _timer = [NSTimer timerWithTimeInterval:kMatrixFrameInterval
                                      target:self
                                    selector:@selector(step:)
@@ -281,8 +271,8 @@ static const unichar kKatakanaLast  = 0xFF9D;
 
 - (void)stopTimer {
     if (_timer != nil) {
-        [_timer invalidate]; // removes from the run loop + drops the retain
-        _timer = nil;        // guard against double-invalidate
+        [_timer invalidate];
+        _timer = nil;
     }
 }
 
@@ -305,13 +295,17 @@ static const unichar kKatakanaLast  = 0xFF9D;
 - (void)dealloc {
     [self stopTimer];
     free(_x);
-    free(_headPx);
-    free(_speedPx);
-    free(_alpha);
     free(_bucket);
     free(_hue);
-    _x = _headPx = _speedPx = _alpha = NULL;
-    _bucket = _hue = NULL;
+    free(_alpha);
+    free(_head);
+    free(_speed);
+    free(_trail);
+    free(_rows);
+    free(_glyphs);
+    _x = _alpha = _head = _speed = _trail = NULL;
+    _bucket = _hue = _rows = NULL;
+    _glyphs = NULL;
     // ARC handles _fonts / _timer object refs.
 }
 
