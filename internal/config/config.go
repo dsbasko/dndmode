@@ -29,6 +29,12 @@ const (
 	// OverlayStyleMatrix renders animated green digital rain over the opaque
 	// black shield (cosmetic only; every window guarantee is unchanged).
 	OverlayStyleMatrix = "matrix"
+	// OverlayStyleGlass makes the shield TRANSPARENT and frosts it: an
+	// NSVisualEffectView blurs whatever is behind the window (frosted glass).
+	// Unlike black/matrix it is intentionally non-opaque — the desktop shows
+	// through, blurred — so it trades the no-bleed-through guarantee for the
+	// look. Input is still fully blocked (CGEventTap); only the visuals differ.
+	OverlayStyleGlass = "glass"
 
 	// configDirPerm is 0o700 — owner read/write/execute only (
 	// mitigation: world cannot read user config).
@@ -43,9 +49,9 @@ type Config struct {
 	Hotkey string `yaml:"hotkey"`
 	// OverlayStyle selects the overlay look. Absent/empty => "black" (v1
 	// default, via NormalizeOverlayStyle); the only valid non-empty values are
-	// "black" and "matrix". The VALUE is validated by the caller (main.go via
-	// ValidateOverlayStyle), NOT by yaml.Strict() — Strict only guards unknown
-	// KEYS, so a known key with a junk value parses fine (QUICK-gh8).
+	// "black", "matrix" and "glass". The VALUE is validated by the caller
+	// (main.go via ValidateOverlayStyle), NOT by yaml.Strict() — Strict only
+	// guards unknown KEYS, so a known key with a junk value parses fine (QUICK-gh8).
 	OverlayStyle string `yaml:"overlay_style"`
 }
 
@@ -60,17 +66,17 @@ func NormalizeOverlayStyle(s string) string {
 	return s
 }
 
-// ValidateOverlayStyle accepts "" (treated as black), "black", and "matrix";
-// anything else returns a non-nil error whose message is suitable for
+// ValidateOverlayStyle accepts "" (treated as black), "black", "matrix" and
+// "glass"; anything else returns a non-nil error whose message is suitable for
 // embedding in main.go's stderr template. yaml.Strict() cannot catch a bad
 // VALUE (only unknown keys), so this is the real gate before any window is
 // created (T-gh8-01).
 func ValidateOverlayStyle(s string) error {
 	switch s {
-	case "", OverlayStyleBlack, OverlayStyleMatrix:
+	case "", OverlayStyleBlack, OverlayStyleMatrix, OverlayStyleGlass:
 		return nil
 	default:
-		return fmt.Errorf("unknown overlay_style %q (valid: black, matrix)", s)
+		return fmt.Errorf("unknown overlay_style %q (valid: black, matrix, glass)", s)
 	}
 }
 

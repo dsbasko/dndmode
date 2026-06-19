@@ -207,7 +207,7 @@ func run() int {
 	// window is created. overlayStyle (normalized: ""=>"black") is declared in
 	// this scope so it is still visible at Step 15 (passed into NewController).
 	if err := config.ValidateOverlayStyle(cfg.OverlayStyle); err != nil {
-		fmt.Fprintf(os.Stderr, "dndmode: invalid overlay_style %q: %v. Fix overlay_style in ~/.config/dndmode/config.yml (valid: black, matrix).\n", cfg.OverlayStyle, err)
+		fmt.Fprintf(os.Stderr, "dndmode: invalid overlay_style %q: %v. Fix overlay_style in ~/.config/dndmode/config.yml (valid: black, matrix, glass).\n", cfg.OverlayStyle, err)
 		return exitConfigErr
 	}
 	overlayStyle := config.NormalizeOverlayStyle(cfg.OverlayStyle)
