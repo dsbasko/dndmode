@@ -6,6 +6,15 @@
 #import <string.h>
 #import "matrixview_darwin.h"  // @interface MatrixView (cgo compiles each .m as a separate TU, so a bare @class forward decl is not enough)
 
+// kGlassBlurOpacity tunes the "glass" frost strength. NSVisualEffectView's
+// behind-window blur has a SYSTEM-FIXED radius (no public API to soften it), so
+// we lighten it by lowering the effect view's opacity over a non-opaque window:
+// the sharp desktop bleeds partially back through, so the result is
+// kGlassBlurOpacity*blurred + (1-kGlassBlurOpacity)*sharp — text stays
+// hard-to-read rather than fully erased. 0.0 = no frost (invisible), 1.0 = the
+// full strong blur; ~0.5 = light frosted glass.
+static const CGFloat kGlassBlurOpacity = 0.5;
+
 // cocoa_create_overlay_window allocates and fully configures one black
 // full-screen NSWindow for the NSScreen identified by displayID.
 //
@@ -22,11 +31,13 @@
 // visual-only (ignoresMouseEvents YES); Phase 4 adds CGEventTap for input
 // blocking.
 //
-// `style` selects the overlay content (QUICK-gh8): when it equals "matrix" a
-// MatrixView contentView is installed for the green digital-rain look; for
-// "black", NULL, or anything else the current plain-black path is untouched.
-// The window stays setOpaque:YES + black backgroundColor for BOTH styles — the
-// matrix layer is an opaque base on top, never transparent (T-gh8-03).
+// `style` selects the overlay content: "matrix" (QUICK-gh8) installs an animated
+// MatrixView over an opaque black base; "glass" (QUICK-glass) makes the window
+// transparent and installs an NSVisualEffectView that blurs whatever is behind
+// it (frosted glass — the ONLY non-opaque style, the desktop shows through
+// blurred); for "black", NULL, or anything else the plain opaque-black path is
+// untouched. black + matrix keep setOpaque:YES (T-gh8-03 no bleed-through);
+// glass deliberately relaxes that for the look while input stays blocked.
 //
 // Critical pitfall (the design notes): default releasedWhenClosed=YES
 // combined with ARC + __bridge_retained ownership causes double-free on
@@ -73,22 +84,45 @@ void* cocoa_create_overlay_window(uint32_t displayID, const char* style, char** 
       | NSWindowCollectionBehaviorFullScreenAuxiliary    // 1<<8
       | NSWindowCollectionBehaviorIgnoresCycle];         // 1<<6
 
-    [w setOpaque:YES];                                     // 
-    [w setBackgroundColor:[NSColor blackColor]];           // 
     [w setHasShadow:NO];                                   // 
     [w setCanHide:NO];                                     // 
     [w setHidesOnDeactivate:NO];                           // 
     [w setIgnoresMouseEvents:YES];                         // 
 
-    // QUICK-gh8: matrix style swaps in an animated digital-rain contentView.
-    // The black backgroundColor above stays set (opaque base under the layer);
-    // every other window guarantee is already configured. For "black"/NULL/any
-    // other value we leave the default contentView untouched (byte-identical
-    // black path). MatrixView's @interface comes from matrixview_darwin.h.
-    if (style != NULL && strcmp(style, "matrix") == 0) {
-        MatrixView *mv = [[MatrixView alloc] initWithFrame:[[w contentView] bounds]];
-        [mv setAutoresizingMask:(NSViewWidthSizable | NSViewHeightSizable)];
-        [w setContentView:mv];
+    // QUICK-glass: "glass" is the ONE style that is intentionally NOT opaque — a
+    // transparent frosted panel that blurs whatever is behind it. Input stays
+    // fully blocked (ignoresMouseEvents above + the Phase 4 CGEventTap); only the
+    // VISUAL coverage relaxes (the desktop shows through, blurred), so it
+    // deliberately trades the T-gh8-03 no-bleed-through guarantee for the look.
+    // NSVisualEffectView with BehindWindow blending samples + blurs the content
+    // behind the shield window; state=Active forces the blur to render even
+    // though the overlay window is never key/active.
+    if (style != NULL && strcmp(style, "glass") == 0) {
+        [w setOpaque:NO];
+        [w setBackgroundColor:[NSColor clearColor]];
+        NSVisualEffectView *ve =
+            [[NSVisualEffectView alloc] initWithFrame:[[w contentView] bounds]];
+        [ve setAutoresizingMask:(NSViewWidthSizable | NSViewHeightSizable)];
+        [ve setBlendingMode:NSVisualEffectBlendingModeBehindWindow];
+        [ve setMaterial:NSVisualEffectMaterialFullScreenUI];
+        [ve setState:NSVisualEffectStateActive];
+        // Soften the system-fixed blur: drop opacity so the sharp desktop bleeds
+        // partly back through (kGlassBlurOpacity is the knob; see its comment).
+        [ve setAlphaValue:kGlassBlurOpacity];
+        [w setContentView:ve];
+    } else {
+        [w setOpaque:YES];                                 // 
+        [w setBackgroundColor:[NSColor blackColor]];       // 
+        // QUICK-gh8: matrix swaps in an animated digital-rain contentView over
+        // the opaque black base (an opaque layer on top, never transparent). For
+        // "black"/NULL/anything else the default black contentView is left
+        // untouched (byte-identical black path). MatrixView's @interface comes
+        // from matrixview_darwin.h.
+        if (style != NULL && strcmp(style, "matrix") == 0) {
+            MatrixView *mv = [[MatrixView alloc] initWithFrame:[[w contentView] bounds]];
+            [mv setAutoresizingMask:(NSViewWidthSizable | NSViewHeightSizable)];
+            [w setContentView:mv];
+        }
     }
 
     [w orderFrontRegardless];                              // 
