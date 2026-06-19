@@ -64,9 +64,17 @@ type Assertion struct {
 	mu sync.Mutex
 }
 
-// Acquire creates an IOPMAssertion of type
-// kIOPMAssertPreventUserIdleSystemSleep with the given name.
-// Implements.
+// Acquire creates an IOPMAssertion with the given name, selecting its type
+// at runtime from allowDisplaySleep (inverted polarity). Implements
+//.
+//
+//   - allowDisplaySleep == false (default / config key absent): the
+//     assertion is kIOPMAssertPreventUserIdleDisplaySleep — the display is
+//     kept awake (and the system stays awake as a side effect), so the
+//     external monitor does NOT idle-off while the operator is away.
+//   - allowDisplaySleep == true: the assertion is the legacy
+//     kIOPMAssertPreventUserIdleSystemSleep — only system idle-sleep is
+//     blocked, the display may idle-off.
 //
 // MUST be called AFTER orphan cleanup (Step 10 before Step 12) and
 // BEFORE cocoa.Init / window creation (assertion is the cheapest
@@ -79,11 +87,11 @@ type Assertion struct {
 //
 // Logger fallback: nil → slog.Default() (mirrors state.NewRestoreState
 // and cocoa.NewController convention).
-func Acquire(name string, log *slog.Logger) (*Assertion, error) {
+func Acquire(name string, allowDisplaySleep bool, log *slog.Logger) (*Assertion, error) {
 	if log == nil {
 		log = slog.Default()
 	}
-	id, err := acquireRaw(name)
+	id, err := acquireRaw(name, allowDisplaySleep)
 	if err != nil {
 		return nil, err
 	}

@@ -4,11 +4,13 @@
 // awake-lock lifecycle. +.. are implemented here.
 //
 // The package exposes a single long-lived resource — an
-// IOPMAssertionCreateWithName assertion of type
-// kIOPMAssertPreventUserIdleSystemSleep — and an orphan-cleanup primitive
-// for releasing assertions whose creator process has died (typical case:
-// previous dndmode instance was killed with SIGKILL before its LIFO
-// Cleanup chain could fire).
+// IOPMAssertionCreateWithName assertion whose type is selected at runtime
+// (inverted polarity): kIOPMAssertPreventUserIdleDisplaySleep by default
+// (display kept awake), or the legacy kIOPMAssertPreventUserIdleSystemSleep
+// when allow_display_sleep:true (display may idle-off) — and an
+// orphan-cleanup primitive for releasing assertions whose creator process
+// has died (typical case: previous dndmode instance was killed with SIGKILL
+// before its LIFO Cleanup chain could fire).
 //
 // The package layout mirrors the Phase 2 cocoa pattern (one package per
 // Apple framework family). powerassert holds the IOKit + CoreFoundation

@@ -16,23 +16,39 @@
 #include <stdint.h>
 #include <stdlib.h>
 
-// powerassert_acquire creates an IOPMAssertion of type
-// kIOPMAssertPreventUserIdleSystemSleep (POW-01 + POW-02: NOT
-// PreventUserIdleDisplaySleep — display is allowed to sleep, only
-// the system idle-sleep is blocked).
+// powerassert_acquire creates an IOPMAssertion whose type is selected at
+// runtime from allow_display_sleep (POW-01 + POW-02, inverted polarity):
+//
+//   - allow_display_sleep == 0 (default): kIOPMAssertPreventUserIdleDisplaySleep
+//     — the display is kept awake (and the system stays awake as a
+//     consequence, since a forced-on display also blocks system idle-sleep).
+//     This is the new default so the external monitor does NOT turn off.
+//   - allow_display_sleep != 0: kIOPMAssertPreventUserIdleSystemSleep —
+//     legacy behavior; only system idle-sleep is blocked, the display is
+//     allowed to idle-off.
+//
+// Both kIOPMAssert* identifiers are CFStringRef constants exported by
+// IOPMLib.h — they are NOT owned by us, so no CFRelease is performed on
+// assert_type.
 //
 // On success: returns kIOReturnSuccess (0) and writes the new
 // assertion ID through *out_id.
 // On failure: returns the IOReturn error from
 // IOPMAssertionCreateWithName (e.g. kIOReturnNoMemory if the CFString
 // allocation fails).
-IOReturn powerassert_acquire(const char *name, IOPMAssertionID *out_id) {
+IOReturn powerassert_acquire(const char *name, int allow_display_sleep, IOPMAssertionID *out_id) {
     CFStringRef cf_name = CFStringCreateWithCString(NULL, name, kCFStringEncodingUTF8);
     if (cf_name == NULL) {
         return kIOReturnNoMemory;
     }
+    // POW-01 + POW-02: default (allow_display_sleep == 0) keeps the display
+    // awake via PreventUserIdleDisplaySleep; allow_display_sleep != 0 selects
+    // the legacy PreventUserIdleSystemSleep (display may idle-sleep).
+    CFStringRef assert_type = allow_display_sleep
+        ? kIOPMAssertPreventUserIdleSystemSleep
+        : kIOPMAssertPreventUserIdleDisplaySleep;
     IOReturn rc = IOPMAssertionCreateWithName(
-        kIOPMAssertPreventUserIdleSystemSleep,  // POW-01 + POW-02
+        assert_type,
         kIOPMAssertionLevelOn,
         cf_name,
         out_id);
@@ -48,10 +64,19 @@ IOReturn powerassert_release(IOPMAssertionID id) {
 }
 
 // pa_dict_has_match checks whether a single per-assertion CFDictionary
-// matches the requested name+type pair. Helper used by both
+// matches the requested name (+ optionally type). Helper used by both
 // powerassert_count_by_name and powerassert_enumerate_matching to avoid
 // duplicating the kIOPMAssertionNameKey + kIOPMAssertionTypeKey
 // extraction logic.
+//
+// Contract: the name comparison is ALWAYS enforced (name is the unique
+// discriminator). The type comparison is enforced ONLY when cf_want_type
+// is non-NULL AND has length > 0; an empty/NULL want_type means "match any
+// type". This matters because the assertion type is now runtime-selected
+// (PreventUserIdleDisplaySleep by default vs PreventUserIdleSystemSleep for
+// allow_display_sleep:true), so orphan cleanup must match by name alone and
+// accept either type. countOwnByName (smoke) keeps passing a concrete type,
+// so its non-empty path is unchanged.
 static int pa_dict_has_match(
     CFDictionaryRef d,
     CFStringRef cf_want_name,
@@ -61,7 +86,8 @@ static int pa_dict_has_match(
     CFStringRef type = (CFStringRef)CFDictionaryGetValue(d, kIOPMAssertionTypeKey);
     if (name == NULL || type == NULL) return 0;
     if (CFStringCompare(name, cf_want_name, 0) != kCFCompareEqualTo) return 0;
-    if (CFStringCompare(type, cf_want_type, 0) != kCFCompareEqualTo) return 0;
+    int want_type_len = (cf_want_type != NULL) ? (int)CFStringGetLength(cf_want_type) : 0;
+    if (want_type_len > 0 && CFStringCompare(type, cf_want_type, 0) != kCFCompareEqualTo) return 0;
     return 1;
 }
 
