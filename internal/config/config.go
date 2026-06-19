@@ -34,6 +34,12 @@ const (
 // forward-compat trojan keys are rejected by yaml.Strict().
 type Config struct {
 	Hotkey string `yaml:"hotkey"`
+	// AllowDisplaySleep has INVERTED polarity: the Go zero value false
+	// (default / key absent) keeps the display awake via the IOPMAssertion
+	// type kIOPMAssertPreventUserIdleDisplaySleep; true restores the legacy
+	// kIOPMAssertPreventUserIdleSystemSleep behavior (display may idle-off).
+	// Parsed automatically by yaml.Strict() in Load() — no Load() body change.
+	AllowDisplaySleep bool `yaml:"allow_display_sleep"`
 }
 
 // Loader reads a single YAML file at a fixed path. NewLoader does not touch

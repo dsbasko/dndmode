@@ -26,9 +26,12 @@ import (
 const (
 	wantName = "dndmode active"
 	// wantType matches the CFString returned by Apple's
-	// kIOPMAssertPreventUserIdleSystemSleep macro after CFStringRef
-	// unwrapping (verified empirically via pmset -g assertions).
-	wantType = "PreventUserIdleSystemSleep"
+	// kIOPMAssertPreventUserIdleDisplaySleep macro after CFStringRef
+	// unwrapping (verified empirically via pmset -g assertions). The smoke
+	// acquires via the DEFAULT (display-awake) path — Acquire(..., false, ..)
+	// — so the active assertion is of the display-sleep-preventing type, not
+	// the legacy system-sleep one.
+	wantType = "PreventUserIdleDisplaySleep"
 
 	// helperEnvVar selects the helper-process branch in TestMain. A
 	// non-empty value re-routes the test binary into runHelperHoldAssertion
@@ -75,7 +78,9 @@ func TestMain(m *testing.M) {
 // bytes which is plenty for two short lines).
 func runHelperHoldAssertion() {
 	log := slog.New(slog.NewTextHandler(os.Stderr, nil))
-	a, err := Acquire(wantName, log)
+	// allowDisplaySleep=false → default display-awake path
+	// (PreventUserIdleDisplaySleep), which is what wantType describes.
+	a, err := Acquire(wantName, false, log)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "helper: Acquire failed: %v\n", err)
 		os.Exit(2)
@@ -124,7 +129,9 @@ func TestSmoke_Assertion_AcquireReleaseRoundtrip(t *testing.T) {
 	}
 
 	log := slog.New(slog.NewTextHandler(os.Stderr, nil))
-	a, err := Acquire(wantName, log)
+	// allowDisplaySleep=false → default display-awake path; wantType above is
+	// PreventUserIdleDisplaySleep to match.
+	a, err := Acquire(wantName, false, log)
 	if err != nil {
 		t.Fatalf("Acquire: %v", err)
 	}
@@ -149,7 +156,9 @@ func TestSmoke_Assertion_AcquireReleaseRoundtrip(t *testing.T) {
 
 // TestSmoke_Assertion_NameTypeMatch_Constants is a non-cgo sanity test
 // documenting that the wantType constant matches what
-// kIOPMAssertPreventUserIdleSystemSleep unwraps to as a CFString. If
+// kIOPMAssertPreventUserIdleDisplaySleep unwraps to as a CFString. The
+// smoke roundtrip acquires via the DEFAULT (display-awake) path —
+// Acquire(..., false, ..) — so wantType is the DisplaySleep string. If
 // Apple ever changes the underlying string value (extremely unlikely —
 // this constant has been stable since macOS 10.6) this test surfaces it
 // loudly before the roundtrip test silently starts returning count == 0
@@ -158,9 +167,9 @@ func TestSmoke_Assertion_NameTypeMatch_Constants(t *testing.T) {
 	if os.Getenv("HEADLESS") != "" {
 		t.Skip("smoke test gated by HEADLESS=1 for CI consistency")
 	}
-	if wantType != "PreventUserIdleSystemSleep" {
-		t.Errorf("wantType = %q, want PreventUserIdleSystemSleep "+
-			"(kIOPMAssertPreventUserIdleSystemSleep CFString)", wantType)
+	if wantType != "PreventUserIdleDisplaySleep" {
+		t.Errorf("wantType = %q, want PreventUserIdleDisplaySleep "+
+			"(kIOPMAssertPreventUserIdleDisplaySleep CFString)", wantType)
 	}
 	if wantName != "dndmode active" {
 		t.Errorf("wantName = %q, want \"dndmode active\" (stable identifier)", wantName)

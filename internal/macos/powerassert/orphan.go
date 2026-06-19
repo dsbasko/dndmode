@@ -44,10 +44,13 @@ type Orphan struct {
 // observerRegistrar — same shape, different framework.
 type AssertionEnumerator interface {
 	// Enumerate returns the assertions held by *other* processes whose
-	// AssertionName == wantName AND AssertionType == wantType. Excludes
-	// ownPID — pass os.Getpid() to avoid catching our own freshly-created
-	// assertion on re-entry. Returns a wrapped C-IOReturn error on
-	// IOPMCopyAssertionsByProcess failure; nil + empty slice on the
+	// AssertionName == wantName AND (wantType == "" OR AssertionType ==
+	// wantType). An empty wantType means "match any type" — used by
+	// CleanupOrphans because the assertion type is now runtime-selected
+	// (display- vs system-sleep) and an orphan may be of either type.
+	// Excludes ownPID — pass os.Getpid() to avoid catching our own
+	// freshly-created assertion on re-entry. Returns a wrapped C-IOReturn
+	// error on IOPMCopyAssertionsByProcess failure; nil + empty slice on the
 	// happy path "no matching orphans".
 	Enumerate(wantName, wantType string, ownPID int) ([]Orphan, error)
 }
@@ -166,13 +169,16 @@ func NewKernLiveChecker() LiveChecker { return kernLiveChecker{} }
 // truth lives in main.go's call site).
 const (
 	assertionName = "dndmode active"
-	// assertionType is the CFString returned by Apple's
-	// kIOPMAssertPreventUserIdleSystemSleep macro after CFStringRef
-	// unwrapping. Empirically verified in against
-	// `pmset -g assertions` output. If Apple ever renames the macro
-	// expansion, our orphan filter would silently miss matches — caught
-	// by the cgo smoke test in powerassert_smoketest_test.go.
-	assertionType = "PreventUserIdleSystemSleep"
+	// assertionTypeAny is the empty type sentinel passed to Enumerate by
+	// CleanupOrphans so the orphan match is TYPE-AGNOSTIC. The assertion
+	// type is now runtime-selected (kIOPMAssertPreventUserIdleDisplaySleep
+	// by default vs kIOPMAssertPreventUserIdleSystemSleep for
+	// allow_display_sleep:true), so an orphan left by a prior run may be of
+	// EITHER type. Matching keys on the unique name "dndmode active" alone;
+	// the C-side pa_dict_has_match treats an empty want_type as "match any
+	// type". (Previously this was a concrete "PreventUserIdleSystemSleep"
+	// literal, valid only while the type was hard-coded.)
+	assertionTypeAny = ""
 )
 
 // CleanupOrphans implements + Phase 3 decisions (triple
@@ -185,6 +191,13 @@ const (
 // so the exclusion is conservative — covers the warm-restart corner
 // case where a previous run from the same process somehow left an
 // assertion record).
+//
+// Type-agnostic match: the assertion type is now runtime-selected
+// (kIOPMAssertPreventUserIdleDisplaySleep by default vs
+// kIOPMAssertPreventUserIdleSystemSleep for allow_display_sleep:true), so
+// an orphan from a prior run may carry either type. Enumerate is called
+// with the empty assertionTypeAny — matching keys on the unique name
+// "dndmode active" and accepts any type.
 //
 // Flow (per orphan, in enumeration order):
 //
@@ -222,7 +235,10 @@ func CleanupOrphans(
 		log = slog.Default()
 	}
 	own := os.Getpid()
-	orphans, err := enum.Enumerate(assertionName, assertionType, own)
+	// Type-agnostic match: pass the empty assertionTypeAny so an orphan of
+	// EITHER runtime-selected type (display- vs system-sleep) is caught by
+	// its unique name. The C-side pa_dict_has_match treats "" as match-any.
+	orphans, err := enum.Enumerate(assertionName, assertionTypeAny, own)
 	if err != nil {
 		return fmt.Errorf("enumerate assertions: %w", err)
 	}
