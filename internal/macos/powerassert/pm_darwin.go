@@ -9,7 +9,7 @@ package powerassert
 #include <IOKit/pwr_mgt/IOPMLib.h>
 #include <stdint.h>
 
-extern IOReturn powerassert_acquire(const char *name, IOPMAssertionID *out_id);
+extern IOReturn powerassert_acquire(const char *name, int allow_display_sleep, IOPMAssertionID *out_id);
 extern IOReturn powerassert_release(IOPMAssertionID id);
 extern int      powerassert_count_by_name(const char *want_name, const char *want_type, int own_pid);
 extern int      powerassert_enumerate_matching(const char *want_name, const char *want_type, int own_pid, int *out_pids, uint32_t *out_ids, int cap);
@@ -25,15 +25,26 @@ import (
 // assertion ID and an IOReturn-coded error. Caller wraps the ID in an
 // Assertion struct.
 //
+// allowDisplaySleep selects the assertion type at the C layer (inverted
+// polarity): false (default) → kIOPMAssertPreventUserIdleDisplaySleep
+// (display kept awake); true → kIOPMAssertPreventUserIdleSystemSleep
+// (legacy, display may idle-off). The bool is marshalled to a C.int
+// (1 if true, 0 if false).
+//
 // rc semantics: kIOReturnSuccess == 0; any non-zero value is an error
 // formatted as `IOPMAssertionCreateWithName: rc=0x%x` so the IOReturn
 // code is grep-able in production logs.
-func acquireRaw(name string) (uint32, error) {
+func acquireRaw(name string, allowDisplaySleep bool) (uint32, error) {
 	cname := C.CString(name)
 	defer C.free(unsafe.Pointer(cname))
 
+	var cAllow C.int
+	if allowDisplaySleep {
+		cAllow = 1
+	}
+
 	var id C.IOPMAssertionID
-	rc := C.powerassert_acquire(cname, &id)
+	rc := C.powerassert_acquire(cname, cAllow, &id)
 	if rc != 0 {
 		return 0, fmt.Errorf("IOPMAssertionCreateWithName: rc=0x%x", int32(rc))
 	}

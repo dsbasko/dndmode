@@ -53,6 +53,12 @@ type Config struct {
 	// (main.go via ValidateOverlayStyle), NOT by yaml.Strict() — Strict only
 	// guards unknown KEYS, so a known key with a junk value parses fine (QUICK-gh8).
 	OverlayStyle string `yaml:"overlay_style"`
+	// AllowDisplaySleep has INVERTED polarity: the Go zero value false
+	// (default / key absent) keeps the display awake via the IOPMAssertion
+	// type kIOPMAssertPreventUserIdleDisplaySleep; true restores the legacy
+	// kIOPMAssertPreventUserIdleSystemSleep behavior (display may idle-off).
+	// Parsed automatically by yaml.Strict() in Load() — no Load() body change.
+	AllowDisplaySleep bool `yaml:"allow_display_sleep"`
 }
 
 // NormalizeOverlayStyle is the single source of the empty=>black rule: it

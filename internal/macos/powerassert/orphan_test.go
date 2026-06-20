@@ -56,7 +56,7 @@ func TestCleanupOrphans_EmptyEnumeration_ReturnsNilNoReleases(t *testing.T) {
 	td := newTestDeps(t)
 
 	td.mockEnum.EXPECT().
-		Enumerate("dndmode active", "PreventUserIdleSystemSleep", os.Getpid()).
+		Enumerate("dndmode active", "", os.Getpid()).
 		Return(nil, nil)
 	// rel + live deliberately NOT EXPECT — gomock controller will fail the
 	// test if either is invoked on the empty-orphan path.
@@ -79,7 +79,7 @@ func TestCleanupOrphans_SingleDeadOrphan_ReleasedAndLogged(t *testing.T) {
 	orphans := []powerassert.Orphan{{PID: 12345, ID: 0xabcd}}
 
 	td.mockEnum.EXPECT().
-		Enumerate("dndmode active", "PreventUserIdleSystemSleep", os.Getpid()).
+		Enumerate("dndmode active", "", os.Getpid()).
 		Return(orphans, nil)
 	td.mockLive.EXPECT().IsAlive(12345).Return(false)
 	td.mockRel.EXPECT().Release(uint32(0xabcd)).Return(nil)
@@ -106,7 +106,7 @@ func TestCleanupOrphans_LiveOrphan_BailsWithConcurrentInstance(t *testing.T) {
 	orphans := []powerassert.Orphan{{PID: 99999, ID: 0x1234}}
 
 	td.mockEnum.EXPECT().
-		Enumerate("dndmode active", "PreventUserIdleSystemSleep", os.Getpid()).
+		Enumerate("dndmode active", "", os.Getpid()).
 		Return(orphans, nil)
 	td.mockLive.EXPECT().IsAlive(99999).Return(true)
 	// rel deliberately NOT EXPECT — live-PID bail must NOT release.
@@ -285,13 +285,15 @@ func TestCleanupOrphans_AllDead_AllReleased(t *testing.T) {
 // on subsequent CleanupOrphans calls within the same process lifetime.
 //
 // This is enforced by the gomock matcher os.Getpid() in earlier tests
-// (Enumerate("dndmode active", "PreventUserIdleSystemSleep", os.Getpid())),
-// but isolating the contract here makes the regression test explicit.
+// (Enumerate("dndmode active", "", os.Getpid())) — the type arg is now ""
+// (any type), since the assertion type is runtime-selected and orphan
+// matching keys on the unique name alone — but isolating the contract
+// here makes the regression test explicit.
 func TestCleanupOrphans_EnumerateOwnPIDExcluded(t *testing.T) {
 	td := newTestDeps(t)
 
 	td.mockEnum.EXPECT().
-		Enumerate("dndmode active", "PreventUserIdleSystemSleep", os.Getpid()).
+		Enumerate("dndmode active", "", os.Getpid()).
 		Return(nil, nil)
 
 	if err := powerassert.CleanupOrphans(td.mockEnum, td.mockRel, td.mockLive, td.log); err != nil {

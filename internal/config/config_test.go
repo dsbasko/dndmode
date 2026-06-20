@@ -96,6 +96,56 @@ func TestLoader_Load_ReadsExistingFile(t *testing.T) {
 	}
 }
 
+// (allow_display_sleep) — Loader.Load() parses the inverted-polarity
+// allow_display_sleep toggle. Absence of the key yields the Go zero value
+// false, meaning the display STAYS AWAKE (default). Setting it true restores
+// the legacy display-may-idle-off behavior. yaml.Strict() must ACCEPT the key
+// now that it is a declared struct field (it is no longer "unknown").
+func TestLoader_Load_ParsesAllowDisplaySleep(t *testing.T) {
+	tests := []struct {
+		name      string
+		yamlBody  string
+		wantAllow bool
+	}{
+		{
+			name:      "allow_display_sleep: true → AllowDisplaySleep == true",
+			yamlBody:  "hotkey: Ctrl+X\nallow_display_sleep: true\n",
+			wantAllow: true,
+		},
+		{
+			name:      "key absent → AllowDisplaySleep == false (display stays awake)",
+			yamlBody:  "hotkey: Ctrl+X\n",
+			wantAllow: false,
+		},
+		{
+			name:      "allow_display_sleep: false → AllowDisplaySleep == false",
+			yamlBody:  "hotkey: Ctrl+X\nallow_display_sleep: false\n",
+			wantAllow: false,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			td := newTestDeps(t)
+			if err := os.MkdirAll(filepath.Dir(td.path), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(td.path, []byte(tt.yamlBody), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			cfg, created, err := td.loader.Load()
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if created {
+				t.Errorf("created = true, want false (file pre-existed)")
+			}
+			if cfg.AllowDisplaySleep != tt.wantAllow {
+				t.Errorf("cfg.AllowDisplaySleep = %v, want %v", cfg.AllowDisplaySleep, tt.wantAllow)
+			}
+		})
+	}
+}
+
 // Loader.Load() with a missing file creates the parent directory
 // (0o700), writes the default config (0o600) and returns (cfg, true, nil).
 func TestLoader_Load_WritesDefaultWhenMissing(t *testing.T) {
