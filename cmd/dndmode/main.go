@@ -34,6 +34,7 @@ import (
 
 	"github.com/dsbasko/dndmode/internal/config"
 	"github.com/dsbasko/dndmode/internal/config/hotkey"
+	"github.com/dsbasko/dndmode/internal/macos/caffeinate"
 	"github.com/dsbasko/dndmode/internal/macos/cocoa"
 	"github.com/dsbasko/dndmode/internal/macos/eventtap"
 	"github.com/dsbasko/dndmode/internal/macos/focus"
@@ -88,7 +89,7 @@ func main() {
 //
 // Step ordering (Phase 3 —..,; verbatim per the design notes):
 //
-// 1. Parse --debug flag (P1).
+// 1. Parse --debug flag (P1) + --style overlay-style override flag.
 // 2. slog logger to stderr (P1 /).
 // 3. signal.NotifyContext(ctx, SIGINT, SIGTERM, SIGHUP) (replaces the
 //     plain-context cancel pattern used in Phase 2; SIGINT/SIGTERM/SIGHUP now
@@ -159,6 +160,12 @@ func run() int {
 
 	// --- Step 1: Parse flags (stdlib flag) ---
 	debugFlag := flag.Bool("debug", false, "enable debug-level logging on stderr")
+	// --style overrides overlay_style from the YAML config (QUICK-gh8 follow-up):
+	// when non-empty it WINS over cfg.OverlayStyle so an operator can pick a look
+	// for a single run without editing ~/.config/dndmode/config.yml. Empty (the
+	// default) means "use whatever the config says". Validated at Step 5b.1 with
+	// the same ValidateOverlayStyle gate as the config value.
+	styleFlag := flag.String("style", "", "override overlay_style for this run (black|matrix|glass|none); empty = use config")
 	flag.Parse()
 
 	// --- Step 2: slog logger to stderr ---
@@ -201,22 +208,37 @@ func run() int {
 		return exitConfigErr
 	}
 
-	// --- Step 5b.1: Validate overlay_style (QUICK-gh8, T-gh8-01) ---
-	// yaml.Strict() rejects unknown KEYS but not unknown VALUES, so a junk
-	// overlay_style value parses fine — value-validate it HERE, before any
-	// window is created. overlayStyle (normalized: ""=>"black") is declared in
-	// this scope so it is still visible at Step 15 (passed into NewController).
-	if err := config.ValidateOverlayStyle(cfg.OverlayStyle); err != nil {
-		fmt.Fprintf(os.Stderr, "dndmode: invalid overlay_style %q: %v. Fix overlay_style in ~/.config/dndmode/config.yml (valid: black, matrix, glass).\n", cfg.OverlayStyle, err)
+	// --- Step 5b.1: Resolve + validate overlay style (QUICK-gh8, T-gh8-01) ---
+	// Precedence: the --style flag (Step 1), when non-empty, OVERRIDES
+	// cfg.OverlayStyle — a per-run look selection that ignores the YAML config
+	// entirely. Empty flag falls back to the config value. Either source is
+	// value-validated HERE, before any window is created: yaml.Strict() rejects
+	// unknown KEYS but not unknown VALUES, so a junk style would otherwise parse
+	// fine. The error template names the offending SOURCE (flag vs config file)
+	// so the operator knows where to fix it. overlayStyle (normalized:
+	// ""=>"black") is declared in this scope so it is still visible at Step 15
+	// (passed into NewController). styleSource feeds the Step 6 banner.
+	overlayStyle := cfg.OverlayStyle
+	styleSource := "config"
+	if *styleFlag != "" {
+		overlayStyle = *styleFlag
+		styleSource = "flag"
+	}
+	if err := config.ValidateOverlayStyle(overlayStyle); err != nil {
+		if styleSource == "flag" {
+			fmt.Fprintf(os.Stderr, "dndmode: invalid --style %q: %v.\n", overlayStyle, err)
+		} else {
+			fmt.Fprintf(os.Stderr, "dndmode: invalid overlay_style %q: %v. Fix overlay_style in ~/.config/dndmode/config.yml (valid: black, matrix, glass, none).\n", overlayStyle, err)
+		}
 		return exitConfigErr
 	}
-	overlayStyle := config.NormalizeOverlayStyle(cfg.OverlayStyle)
+	overlayStyle = config.NormalizeOverlayStyle(overlayStyle)
 
 	// --- Step 6: Print banner (stdout-only) ---
 	if created {
 		fmt.Fprintf(os.Stdout, "dndmode: created default config at %s\n", cfgPath)
 	}
-	fmt.Fprintf(os.Stdout, "dndmode: config=%s hotkey=%s\n", cfgPath, cfg.Hotkey)
+	fmt.Fprintf(os.Stdout, "dndmode: config=%s hotkey=%s overlay_style=%s (%s)\n", cfgPath, cfg.Hotkey, overlayStyle, styleSource)
 
 	// --- Step 3 (Phase 3): signal-driven ctx ---
 	// signal.NotifyContext converts SIGINT/SIGTERM/SIGHUP into ctx cancellation.
@@ -246,6 +268,19 @@ func run() int {
 			fmt.Fprintf(os.Stderr, "dndmode: platform check failed: %v. Re-run on macOS 14+ Apple Silicon.\n", err)
 		}
 		return exitPlatformErr
+	}
+
+	// --- Step 8a (overlay_style=none): caffeinate-only fast path ---
+	// "none" is not a look — it short-circuits the entire locking pipeline. We
+	// branch here, AFTER the platform check (so a wrong-arch / pre-Sonoma host
+	// still surfaces exit 2) but BEFORE every permission / Shortcuts / IOKit
+	// step: none mode needs NO Accessibility grant, NO dndmode-on/off Shortcuts,
+	// NO IOPMAssertion, NO overlay window, NO event tap. It only holds
+	// caffeinate. The deferred rs.Cleanup + top-level recover (registered at the
+	// top of run) still apply, so the caffeinate child is torn down and the
+	// stdout cleanup banner still prints on exit.
+	if overlayStyle == config.OverlayStyleNone {
+		return runCaffeinateOnly(ctx, cfg.AllowDisplaySleep, rs, log)
 	}
 
 	// --- Step 5c (Phase 6): single-instance enforcement ---
@@ -572,4 +607,60 @@ func run() int {
 	// LIFO release order (Phase 5 finalizes):
 	// mock-tap → windows → "dndmode active" → focus → runtime-file.
 	return exitOK
+}
+
+// runCaffeinateOnly is the overlay_style=none execution path: dndmode degrades
+// to a thin /usr/bin/caffeinate(8) wrapper that holds a system-awake assertion
+// for as long as it runs, and nothing else — no Focus/DND, no keyboard/trackpad
+// block (hence no Accessibility prompt and no Shortcuts requirement), no overlay
+// window, no event tap. Exit is via SIGINT/SIGTERM/SIGHUP only (there is no
+// hotkey without an event tap to observe one).
+//
+// caffeinate is pushed onto the SAME RestoreState as the full mode, so teardown
+// rides the existing LIFO Cleanup ("released releaser=caffeinate") and the
+// stdout cleanup banner printed by run's deferred cleanup. The select also
+// watches the child: if caffeinate dies unexpectedly (external kill, or its
+// `-w` watch firing) we stop waiting and let Cleanup run rather than block
+// forever holding nothing.
+func runCaffeinateOnly(ctx context.Context, allowDisplaySleep bool, rs *state.RestoreState, log *slog.Logger) int {
+	proc, err := caffeinate.Start(ctx, os.Getpid(), allowDisplaySleep, log)
+	if err != nil {
+		// A signal can cancel ctx in the small window before caffeinate.Start
+		// forks the child; exec.CommandContext then returns context.Canceled
+		// WITHOUT launching anything. That is a normal user-initiated shutdown,
+		// not a missing-binary failure — exit 0 (mirrors how WaitForGrants /
+		// RecoverFromCrash special-case context.Canceled in the full path).
+		if errors.Is(err, context.Canceled) {
+			return exitOK
+		}
+		fmt.Fprintf(os.Stderr,
+			"dndmode: start caffeinate failed: %v. Ensure /usr/bin/caffeinate exists and re-run.\n", err)
+		return exitPlatformErr
+	}
+	rs.Push(proc) // released on Cleanup (LIFO); Name() == "caffeinate"
+
+	fmt.Fprintln(os.Stdout, "dndmode: active (caffeinate-only, no overlay). press Ctrl-C.")
+
+	select {
+	case <-ctx.Done():
+		// Normal shutdown (SIGINT/SIGTERM/SIGHUP → signal.NotifyContext cancel).
+		return exitOK
+	case <-proc.Done():
+		// caffeinate exited. Two sources are indistinguishable from the channel
+		// alone: (a) our OWN ctx-cancel killed it (exec.CommandContext tears the
+		// child down on cancel, closing Done at the same instant ctx.Done fires —
+		// Go picks a ready select case at random), or (b) a GENUINE unexpected
+		// death (external kill, or the -w watch firing) while we still hold the
+		// awake-lock. ctx.Err() disambiguates: a live ctx means case (b).
+		if ctx.Err() != nil {
+			return exitOK // case (a): clean shutdown that won the select race
+		}
+		// case (b): the SOLE function of none mode (keeping the Mac awake) is
+		// gone. Surface it in the log AND via a non-zero exit so a backgrounded
+		// none-mode run does not masquerade as healthy — mirrors the full path's
+		// watchdog-trip exit-code discipline. exitPlatformErr is reused as
+		// the "abnormal awake-subsystem stop" code.
+		log.Warn("caffeinate exited unexpectedly", slog.Any("err", proc.Err()))
+		return exitPlatformErr
+	}
 }

@@ -36,6 +36,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"strconv"
 	"strings"
 	"sync"
 	"syscall"
@@ -340,6 +341,261 @@ func TestAcceptance_ModifierOnlyHotkey_ExitOne(t *testing.T) {
 	if !strings.Contains(stderrStr, "invalid hotkey") {
 		t.Errorf("stderr missing 'invalid hotkey' marker: %s", stderrStr)
 	}
+}
+
+// TestAcceptance_InvalidStyleFlag_ExitOne verifies the --style flag is
+// value-validated through the same ValidateOverlayStyle gate as overlay_style
+// (Step 5b.1): a junk value exits 1 BEFORE any PreFlight permission check, and
+// stderr names the FLAG (not the config file) as the source so the operator
+// knows where to fix it. Mirrors TestAcceptance_ModifierOnlyHotkey_ExitOne.
+func TestAcceptance_InvalidStyleFlag_ExitOne(t *testing.T) {
+	tmpHome := t.TempDir()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	cmd, _, stderr := dndmodeCmd(t, ctx, tmpHome)
+	cmd.Args = append(cmd.Args, "--style=neon")
+	if err := cmd.Run(); err == nil {
+		t.Fatal("expected non-zero exit for invalid --style, got nil")
+	}
+
+	if exitCode := cmd.ProcessState.ExitCode(); exitCode != 1 {
+		t.Errorf("exit code = %d, want 1 (invalid --style value)", exitCode)
+	}
+
+	stderrStr := stderr.String()
+	if !strings.Contains(stderrStr, "invalid --style") {
+		t.Errorf("stderr missing 'invalid --style' marker: %s", stderrStr)
+	}
+}
+
+// TestAcceptance_StyleFlag_OverridesConfig verifies the --style flag WINS over
+// overlay_style in config.yml (Step 5b.1 precedence): config asks for black,
+// the flag asks for glass, and the startup banner — emitted at Step 6, BEFORE
+// the Step 8+ platform/permission/display gates — reports
+// `overlay_style=glass (flag)`. Because the banner precedes WaitForGrants, no
+// PreFlight skip branches are needed: the assertion is observable regardless of
+// host TCC / display state.
+func TestAcceptance_StyleFlag_OverridesConfig(t *testing.T) {
+	tmpHome := t.TempDir()
+	cfgDir := filepath.Join(tmpHome, ".config", "dndmode")
+	if err := os.MkdirAll(cfgDir, 0o700); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	cfgPath := filepath.Join(cfgDir, "config.yml")
+	if err := os.WriteFile(cfgPath, []byte("hotkey: Ctrl+Option+Cmd+X\noverlay_style: black\n"), 0o600); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	cmd, stdout, stderr := dndmodeCmd(t, ctx, tmpHome)
+	cmd.Args = append(cmd.Args, "--style=glass")
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	defer func() {
+		_ = cmd.Process.Kill()
+		_ = cmd.Wait()
+	}()
+
+	if !waitForStdout(stdout, "overlay_style=glass (flag)", 10*time.Second) {
+		t.Fatalf("banner missing 'overlay_style=glass (flag)' (flag must override config overlay_style=black):\nstdout:\n%s\nstderr:\n%s",
+			stdout.String(), stderr.String())
+	}
+}
+
+// TestAcceptance_StyleNone_CaffeinateOnly is the overlay_style=none happy path:
+// dndmode degrades to a thin caffeinate(8) wrapper. Crucially it reaches the
+// active banner WITHOUT Accessibility / Input Monitoring grants, WITHOUT the
+// dndmode-on/off Shortcuts, and WITHOUT any display — none mode skips every one
+// of those PreFlight gates (main.go Step 8a branches before them). So unlike the
+// other acceptance tests this one needs NO skip branches: on any arm64 macOS 14+
+// host it must reach active. It also asserts a real caffeinate child is spawned
+// and that SIGINT tears it down (released releaser=caffeinate) with a clean
+// exit 0 + cleanup banner.
+func TestAcceptance_StyleNone_CaffeinateOnly(t *testing.T) {
+	tmpHome := t.TempDir()
+	cfgDir := filepath.Join(tmpHome, ".config", "dndmode")
+	if err := os.MkdirAll(cfgDir, 0o700); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	cfgPath := filepath.Join(cfgDir, "config.yml")
+	if err := os.WriteFile(cfgPath, []byte("hotkey: Ctrl+Option+Cmd+X\noverlay_style: none\n"), 0o600); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	cmd, stdout, stderr := dndmodeCmd(t, ctx, tmpHome)
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+
+	if !waitForStdout(stdout, "active (caffeinate-only", 10*time.Second) {
+		_ = cmd.Process.Kill()
+		_ = cmd.Wait()
+		t.Fatalf("did not see caffeinate-only active banner (none mode must skip all PreFlight gates):\nstdout:\n%s\nstderr:\n%s",
+			stdout.String(), stderr.String())
+	}
+
+	// A real caffeinate child of the dndmode process must be holding the
+	// awake-lock while none mode is active — and (default config) with -d so the
+	// display stays awake too.
+	if args := caffeinateChildArgs(t, cmd.Process.Pid); args == "" {
+		t.Errorf("no caffeinate child found for dndmode pid %d (none mode must spawn caffeinate)", cmd.Process.Pid)
+	} else if !strings.Contains(args, " -d") {
+		t.Errorf("caffeinate child argv %q missing -d (default must keep display awake)", args)
+	}
+
+	// SIGINT → clean exit 0 (asserted inside signalAndWait).
+	signalAndWait(t, cmd, syscall.SIGINT, 10*time.Second)
+
+	if out := stdout.String(); !strings.Contains(out, "cleaning up… done.") {
+		t.Errorf("stdout missing cleanup banner: %s", out)
+	}
+	if errOut := stderr.String(); !strings.Contains(errOut, "released releaser=caffeinate") {
+		t.Errorf("stderr missing 'released releaser=caffeinate' (caffeinate teardown): %s", errOut)
+	}
+}
+
+// TestAcceptance_StyleNone_AllowDisplaySleep_DropsDFlag verifies the
+// allow_display_sleep config toggle actually threads through
+// runCaffeinateOnly → caffeinate.Start into the live child's argv: with
+// allow_display_sleep:true the -d flag must be dropped (display may idle off)
+// while -i/-s remain (system stays awake). This catches a cfg→Start propagation
+// regression that the pure buildArgs unit test cannot.
+func TestAcceptance_StyleNone_AllowDisplaySleep_DropsDFlag(t *testing.T) {
+	tmpHome := t.TempDir()
+	cfgDir := filepath.Join(tmpHome, ".config", "dndmode")
+	if err := os.MkdirAll(cfgDir, 0o700); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	cfgPath := filepath.Join(cfgDir, "config.yml")
+	if err := os.WriteFile(cfgPath, []byte("hotkey: Ctrl+Option+Cmd+X\noverlay_style: none\nallow_display_sleep: true\n"), 0o600); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	cmd, stdout, stderr := dndmodeCmd(t, ctx, tmpHome)
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	fail := func(format string, a ...any) {
+		_ = cmd.Process.Kill()
+		_ = cmd.Wait()
+		t.Fatalf(format, a...)
+	}
+
+	if !waitForStdout(stdout, "active (caffeinate-only", 10*time.Second) {
+		fail("did not see caffeinate-only banner:\nstdout:\n%s\nstderr:\n%s", stdout.String(), stderr.String())
+	}
+
+	args := caffeinateChildArgs(t, cmd.Process.Pid)
+	if args == "" {
+		fail("no caffeinate child found for dndmode pid %d", cmd.Process.Pid)
+	}
+	if strings.Contains(args, " -d") {
+		t.Errorf("caffeinate child argv %q contains -d, but allow_display_sleep:true must drop it", args)
+	}
+	if !strings.Contains(args, " -i") || !strings.Contains(args, " -s") {
+		t.Errorf("caffeinate child argv %q missing -i/-s (system must stay awake even when display sleep is allowed)", args)
+	}
+
+	// Clean shutdown (also confirms none+allow_display_sleep exits cleanly).
+	signalAndWait(t, cmd, syscall.SIGINT, 10*time.Second)
+}
+
+// TestAcceptance_StyleNone_ChildDeath_ExitsNonZero verifies the unexpected-death
+// contract: if the caffeinate child is killed out from under dndmode (external
+// kill / -w watch firing) while ctx is still live, dndmode must NOT masquerade
+// as healthy — it logs "caffeinate exited unexpectedly" and exits non-zero
+// (exitPlatformErr=2), mirroring the full path's watchdog-trip discipline.
+func TestAcceptance_StyleNone_ChildDeath_ExitsNonZero(t *testing.T) {
+	tmpHome := t.TempDir()
+	cfgDir := filepath.Join(tmpHome, ".config", "dndmode")
+	if err := os.MkdirAll(cfgDir, 0o700); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	cfgPath := filepath.Join(cfgDir, "config.yml")
+	if err := os.WriteFile(cfgPath, []byte("hotkey: Ctrl+Option+Cmd+X\noverlay_style: none\n"), 0o600); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	cmd, stdout, stderr := dndmodeCmd(t, ctx, tmpHome)
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	fail := func(format string, a ...any) {
+		_ = cmd.Process.Kill()
+		_ = cmd.Wait()
+		t.Fatalf(format, a...)
+	}
+
+	if !waitForStdout(stdout, "active (caffeinate-only", 10*time.Second) {
+		fail("did not see caffeinate-only banner:\nstdout:\n%s\nstderr:\n%s", stdout.String(), stderr.String())
+	}
+
+	childPID := caffeinateChildPID(cmd.Process.Pid, 3*time.Second)
+	if childPID == 0 {
+		fail("no caffeinate child found for dndmode pid %d", cmd.Process.Pid)
+	}
+	if err := syscall.Kill(childPID, syscall.SIGKILL); err != nil {
+		fail("kill caffeinate child %d: %v", childPID, err)
+	}
+
+	// dndmode should now observe proc.Done() with a live ctx and exit non-zero.
+	waitWithTimeout(t, cmd, 10*time.Second)
+
+	if code := cmd.ProcessState.ExitCode(); code != 2 {
+		t.Errorf("exit code = %d, want 2 (exitPlatformErr on unexpected caffeinate death)", code)
+	}
+	if errOut := stderr.String(); !strings.Contains(errOut, "caffeinate exited unexpectedly") {
+		t.Errorf("stderr missing 'caffeinate exited unexpectedly': %s", errOut)
+	}
+	if out := stdout.String(); !strings.Contains(out, "cleaning up… done.") {
+		t.Errorf("stdout missing cleanup banner: %s", out)
+	}
+}
+
+// caffeinateChildPID polls pgrep for a caffeinate process parented by ppid and
+// returns its pid (0 if none appears within timeout).
+func caffeinateChildPID(ppid int, timeout time.Duration) int {
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		out, _ := exec.Command("pgrep", "-P", fmt.Sprint(ppid), "caffeinate").Output()
+		if s := strings.TrimSpace(string(out)); s != "" {
+			if pid, err := strconv.Atoi(strings.SplitN(s, "\n", 2)[0]); err == nil {
+				return pid
+			}
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	return 0
+}
+
+// caffeinateChildArgs returns the full argv of the caffeinate child of ppid
+// (empty string if none appears / on error). Used to assert flag wiring end to
+// end (e.g. that allow_display_sleep drops -d).
+func caffeinateChildArgs(t *testing.T, ppid int) string {
+	t.Helper()
+	pid := caffeinateChildPID(ppid, 3*time.Second)
+	if pid == 0 {
+		return ""
+	}
+	out, err := exec.Command("ps", "-o", "args=", "-p", strconv.Itoa(pid)).Output()
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(string(out))
 }
 
 // TestAcceptance_LIFE06_PushOrder verifies (P2 + Phase 3 + Phase 4
