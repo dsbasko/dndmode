@@ -404,7 +404,10 @@ func run() int {
 	// mock placeholder in unwind — released 3rd, between controller
 	// и runtime-mock. After Phase 3 the third releaser logs as
 	// `releaser=dndmode active` (per Assertion.Name() == "dndmode active").
-	assertion, err := powerassert.Acquire("dndmode active", log)
+	// The assertion TYPE is selected from cfg.AllowDisplaySleep (inverted
+	// polarity): default false → PreventUserIdleDisplaySleep (display kept
+	// awake); true → legacy PreventUserIdleSystemSleep (display may idle-off).
+	assertion, err := powerassert.Acquire("dndmode active", cfg.AllowDisplaySleep, log)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "dndmode: acquire awake-lock failed: %v. Check IOKit availability and re-run.\n", err)
 		return exitPlatformErr
