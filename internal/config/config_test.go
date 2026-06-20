@@ -234,11 +234,11 @@ func TestLoader_Load_WritesDefaultWhenMissing(t *testing.T) {
 // error containing a `[line:col]` location prefix.
 func TestLoader_Load_PrettyErrorOnSyntaxError(t *testing.T) {
 	tests := []struct {
-		name         string
-		yamlBody     string
+		name          string
+		yamlBody      string
 		expectLineCol bool
-		setupMocks   func(td *testDeps, body string)
-		validateResp func(t *testing.T, td *testDeps, cfg config.Config, created bool, err error, expectLineCol bool)
+		setupMocks    func(td *testDeps, body string)
+		validateResp  func(t *testing.T, td *testDeps, cfg config.Config, created bool, err error, expectLineCol bool)
 	}{
 		{
 			name:          "invalid indent triggers goccy pretty error",
@@ -446,6 +446,154 @@ func TestLoader_Load_OverlayStyle(t *testing.T) {
 			cfg, created, err := td.loader.Load()
 			tt.validateResp(t, cfg, created, err)
 		})
+	}
+}
+
+// Loader.Load() parses the new mute/focus toggles. `mute` is a *bool so an
+// ABSENT key yields nil (=> NormalizeMute true: mute the session); an explicit
+// `mute: false` yields a non-nil *false. `focus` is a plain bool defaulting to
+// the Go zero value false (Focus/DND is opt-in). yaml.Strict() must ACCEPT both
+// keys now that they are declared struct fields.
+func TestLoader_Load_ParsesMuteFocus(t *testing.T) {
+	tests := []struct {
+		name        string
+		yamlBody    string
+		wantMute    bool // NormalizeMute(cfg.Mute)
+		wantMuteNil bool // cfg.Mute == nil (absent key)
+		wantFocus   bool
+	}{
+		{
+			name:        "both keys absent → mute defaults true, focus false",
+			yamlBody:    "hotkey: Ctrl+X\n",
+			wantMute:    true,
+			wantMuteNil: true,
+			wantFocus:   false,
+		},
+		{
+			name:        "mute: false explicit → NormalizeMute false, non-nil",
+			yamlBody:    "hotkey: Ctrl+X\nmute: false\n",
+			wantMute:    false,
+			wantMuteNil: false,
+			wantFocus:   false,
+		},
+		{
+			name:        "mute: true explicit → NormalizeMute true, non-nil",
+			yamlBody:    "hotkey: Ctrl+X\nmute: true\n",
+			wantMute:    true,
+			wantMuteNil: false,
+			wantFocus:   false,
+		},
+		{
+			name:        "focus: true → Focus true",
+			yamlBody:    "hotkey: Ctrl+X\nfocus: true\n",
+			wantMute:    true,
+			wantMuteNil: true,
+			wantFocus:   true,
+		},
+		{
+			name:        "focus: false explicit → Focus false",
+			yamlBody:    "hotkey: Ctrl+X\nfocus: false\n",
+			wantMute:    true,
+			wantMuteNil: true,
+			wantFocus:   false,
+		},
+		{
+			name:        "both set: mute false, focus true",
+			yamlBody:    "hotkey: Ctrl+X\nmute: false\nfocus: true\n",
+			wantMute:    false,
+			wantMuteNil: false,
+			wantFocus:   true,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			td := newTestDeps(t)
+			if err := os.MkdirAll(filepath.Dir(td.path), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(td.path, []byte(tt.yamlBody), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			cfg, created, err := td.loader.Load()
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if created {
+				t.Errorf("created = true, want false (file pre-existed)")
+			}
+			if (cfg.Mute == nil) != tt.wantMuteNil {
+				t.Errorf("cfg.Mute == nil is %v, want %v", cfg.Mute == nil, tt.wantMuteNil)
+			}
+			if got := config.NormalizeMute(cfg.Mute); got != tt.wantMute {
+				t.Errorf("NormalizeMute(cfg.Mute) = %v, want %v", got, tt.wantMute)
+			}
+			if cfg.Focus != tt.wantFocus {
+				t.Errorf("cfg.Focus = %v, want %v", cfg.Focus, tt.wantFocus)
+			}
+		})
+	}
+}
+
+// NormalizeMute encodes the nil=>true rule directly (unit-level, no IO): nil
+// (absent key) => true, *false => false, *true => true.
+func TestNormalizeMute(t *testing.T) {
+	tr := true
+	fa := false
+	tests := []struct {
+		name string
+		in   *bool
+		want bool
+	}{
+		{name: "nil => true (absent key default)", in: nil, want: true},
+		{name: "*false => false", in: &fa, want: false},
+		{name: "*true => true", in: &tr, want: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := config.NormalizeMute(tt.in); got != tt.want {
+				t.Errorf("NormalizeMute(%v) = %v, want %v", tt.in, got, tt.want)
+			}
+		})
+	}
+}
+
+// A freshly-created default config (hotkey only, no mute/focus keys) must
+// normalize to mute=true / focus=false: the absent keys carry the defaults,
+// and the yaml.Strict() round-trip in Load() still accepts the written file.
+func TestLoader_Load_DefaultConfigNormalizesMuteFocus(t *testing.T) {
+	td := newTestDeps(t)
+	// First Load writes the default (hotkey-only) file.
+	cfg, created, err := td.loader.Load()
+	if err != nil {
+		t.Fatalf("unexpected error on first Load: %v", err)
+	}
+	if !created {
+		t.Fatalf("created = false on fresh path, want true")
+	}
+	// Default-written file omits mute/focus → defaults apply.
+	if cfg.Mute != nil {
+		t.Errorf("cfg.Mute = %v, want nil (key absent in default)", cfg.Mute)
+	}
+	if got := config.NormalizeMute(cfg.Mute); got != true {
+		t.Errorf("NormalizeMute(cfg.Mute) = %v, want true", got)
+	}
+	if cfg.Focus != false {
+		t.Errorf("cfg.Focus = %v, want false", cfg.Focus)
+	}
+	// Second Load re-parses the written file (yaml.Strict round-trip) and must
+	// produce the same normalized defaults.
+	cfg2, created2, err := td.loader.Load()
+	if err != nil {
+		t.Fatalf("unexpected error on second Load: %v", err)
+	}
+	if created2 {
+		t.Errorf("created = true on second Load, want false")
+	}
+	if got := config.NormalizeMute(cfg2.Mute); got != true {
+		t.Errorf("second Load NormalizeMute = %v, want true", got)
+	}
+	if cfg2.Focus != false {
+		t.Errorf("second Load cfg.Focus = %v, want false", cfg2.Focus)
 	}
 }
 

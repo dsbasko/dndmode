@@ -69,6 +69,18 @@ type Config struct {
 	// kIOPMAssertPreventUserIdleSystemSleep behavior (display may idle-off).
 	// Parsed automatically by yaml.Strict() in Load() — no Load() body change.
 	AllowDisplaySleep bool `yaml:"allow_display_sleep"`
+	// Mute is a *bool so an ABSENT key can default to TRUE: the Go zero value
+	// of a plain bool would force default-false (or an inverted key name like
+	// AllowDisplaySleep). nil => true via NormalizeMute, an explicit
+	// `mute: false` => false. Default-true mutes system audio for the session
+	// (saved/restored) so notification sounds stay silent without touching
+	// Focus/DND — see the package-level rationale and NormalizeMute.
+	Mute *bool `yaml:"mute"`
+	// Focus default false matches the Go zero value (plain bool). Focus/DND is
+	// now OPT-IN: enabling it runs the Shortcuts bootstrap + `dndmode-on`/`-off`,
+	// which syncs across the user's Apple devices via iCloud. The audio mute
+	// above replaces Focus's only local contribution (silencing sounds).
+	Focus bool `yaml:"focus"`
 }
 
 // NormalizeOverlayStyle is the single source of the empty=>black rule: it
@@ -80,6 +92,18 @@ func NormalizeOverlayStyle(s string) string {
 		return OverlayStyleBlack
 	}
 	return s
+}
+
+// NormalizeMute is the single source of the nil=>true rule for the mute
+// toggle, mirroring NormalizeOverlayStyle: a freshly-created config omits the
+// `mute` key (Config.Mute == nil), which must default to TRUE (mute system
+// audio for the session). An explicit `mute: false` yields a non-nil *false
+// and disables muting. Callers normalize once and thread the bool downstream.
+func NormalizeMute(m *bool) bool {
+	if m == nil {
+		return true
+	}
+	return *m
 }
 
 // ValidateOverlayStyle accepts "" (treated as black), "black", "matrix",
