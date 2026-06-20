@@ -35,6 +35,15 @@ const (
 	// through, blurred — so it trades the no-bleed-through guarantee for the
 	// look. Input is still fully blocked (CGEventTap); only the visuals differ.
 	OverlayStyleGlass = "glass"
+	// OverlayStyleNone is the odd one out: it is NOT a look at all. It turns
+	// dndmode into a thin /usr/bin/caffeinate(8) wrapper — NO Focus/DND, NO
+	// keyboard/trackpad blocking (so no Accessibility permission is required),
+	// and NO overlay window on any display. The only thing it does is hold a
+	// system-awake assertion for as long as dndmode runs. Useful when the user
+	// just wants to keep the machine awake for a background agent without
+	// locking the screen. Exit is via Ctrl-C / SIGTERM only (there is no hotkey
+	// in this mode because there is no event tap to observe one).
+	OverlayStyleNone = "none"
 
 	// configDirPerm is 0o700 — owner read/write/execute only (
 	// mitigation: world cannot read user config).
@@ -49,7 +58,8 @@ type Config struct {
 	Hotkey string `yaml:"hotkey"`
 	// OverlayStyle selects the overlay look. Absent/empty => "black" (v1
 	// default, via NormalizeOverlayStyle); the only valid non-empty values are
-	// "black", "matrix" and "glass". The VALUE is validated by the caller
+	// "black", "matrix", "glass" and "none" ("none" = caffeinate-only mode,
+	// no overlay/DND/input-block — see OverlayStyleNone). The VALUE is validated by the caller
 	// (main.go via ValidateOverlayStyle), NOT by yaml.Strict() — Strict only
 	// guards unknown KEYS, so a known key with a junk value parses fine (QUICK-gh8).
 	OverlayStyle string `yaml:"overlay_style"`
@@ -72,17 +82,18 @@ func NormalizeOverlayStyle(s string) string {
 	return s
 }
 
-// ValidateOverlayStyle accepts "" (treated as black), "black", "matrix" and
-// "glass"; anything else returns a non-nil error whose message is suitable for
-// embedding in main.go's stderr template. yaml.Strict() cannot catch a bad
-// VALUE (only unknown keys), so this is the real gate before any window is
-// created (T-gh8-01).
+// ValidateOverlayStyle accepts "" (treated as black), "black", "matrix",
+// "glass" and "none"; anything else returns a non-nil error whose message is
+// suitable for embedding in main.go's stderr template. yaml.Strict() cannot
+// catch a bad VALUE (only unknown keys), so this is the real gate before any
+// window is created (T-gh8-01). "none" is accepted here but routes to the
+// caffeinate-only path in main.go — it never reaches the overlay controller.
 func ValidateOverlayStyle(s string) error {
 	switch s {
-	case "", OverlayStyleBlack, OverlayStyleMatrix, OverlayStyleGlass:
+	case "", OverlayStyleBlack, OverlayStyleMatrix, OverlayStyleGlass, OverlayStyleNone:
 		return nil
 	default:
-		return fmt.Errorf("unknown overlay_style %q (valid: black, matrix, glass)", s)
+		return fmt.Errorf("unknown overlay_style %q (valid: black, matrix, glass, none)", s)
 	}
 }
 

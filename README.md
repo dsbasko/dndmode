@@ -92,6 +92,19 @@ v2).
   in the terminal where dndmode runs.
 - **Configuration:** `~/.config/dndmode/config.yml` (created on first run with the
   default hotkey).
+- **Overlay style for a single run:** `dndmode --style <black|matrix|glass|none>`
+  overrides `overlay_style` from the config file for that launch only — the YAML
+  is ignored. Omit the flag to use whatever the config says. The startup banner
+  reports the effective style and its source, e.g. `overlay_style=glass (flag)`.
+- **Awake-only mode (`none`):** `overlay_style: none` (or `dndmode --style none`)
+  turns dndmode into a thin [`caffeinate(8)`](x-man-page://caffeinate) wrapper —
+  it does **not** enable Do Not Disturb, does **not** block the keyboard/trackpad
+  (so **no Accessibility permission is needed**), and draws **no overlay**. It
+  only holds a system-awake assertion for as long as dndmode runs. Exit with
+  `Ctrl-C` (there is no hotkey in this mode — there is no event tap to observe
+  one). Under the hood it runs `caffeinate -d -i -s -w <pid>` (`-d` is dropped
+  when `allow_display_sleep: true`); `-w <pid>` ties the assertion to dndmode's
+  lifetime so it self-releases even if dndmode is `kill -9`'d.
 
 ### Exit codes
 

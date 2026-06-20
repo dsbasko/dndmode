@@ -370,6 +370,21 @@ func TestLoader_Load_OverlayStyle(t *testing.T) {
 			},
 		},
 		{
+			name:     "overlay_style: none present",
+			yamlBody: "hotkey: Ctrl+Shift+Q\noverlay_style: none\n",
+			validateResp: func(t *testing.T, cfg config.Config, created bool, err error) {
+				if err != nil {
+					t.Fatalf("unexpected error: %v", err)
+				}
+				if created {
+					t.Errorf("created = true, want false (file pre-existed)")
+				}
+				if cfg.OverlayStyle != config.OverlayStyleNone {
+					t.Errorf("cfg.OverlayStyle = %q, want %q", cfg.OverlayStyle, config.OverlayStyleNone)
+				}
+			},
+		},
+		{
 			name:     "overlay_style: black present",
 			yamlBody: "hotkey: Ctrl+Shift+Q\noverlay_style: black\n",
 			validateResp: func(t *testing.T, cfg config.Config, created bool, err error) {
@@ -411,7 +426,7 @@ func TestLoader_Load_OverlayStyle(t *testing.T) {
 				if verr := config.ValidateOverlayStyle("neon"); verr == nil {
 					t.Errorf("ValidateOverlayStyle(%q) = nil, want non-nil", "neon")
 				}
-				for _, ok := range []string{"", config.OverlayStyleBlack, config.OverlayStyleMatrix, config.OverlayStyleGlass} {
+				for _, ok := range []string{"", config.OverlayStyleBlack, config.OverlayStyleMatrix, config.OverlayStyleGlass, config.OverlayStyleNone} {
 					if verr := config.ValidateOverlayStyle(ok); verr != nil {
 						t.Errorf("ValidateOverlayStyle(%q) = %v, want nil", ok, verr)
 					}
