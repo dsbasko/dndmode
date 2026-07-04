@@ -25,6 +25,13 @@ import (
 // powerassert.Acquire so recovery can release the
 //     orphaned assertion by EXACT id, rather than the Phase 3
 //     name+type+dead-PID heuristic.
+//   - PriorMuted: *bool. The system-audio mute state captured at start,
+//     before dndmode muted for the session. nil ⇒ audio was never
+//     touched (mute disabled, GetMuted failed, or an old runtime.json
+//     written before this field existed). false ⇒ audio was unmuted at
+//     start, so exit/recovery must unmute. true ⇒ audio was already
+//     muted, so exit/recovery leaves it muted. Nullable from day one ⇒
+//     no migration; old files unmarshal with nil.
 //
 // The JSON tags are stable user-facing contract. Renaming a tag is a
 // breaking schema change requiring migration logic.
@@ -33,21 +40,27 @@ type Snapshot struct {
 	StartedAt   time.Time `json:"started_at"`
 	PriorFocus  *string   `json:"prior_focus"`
 	AssertionID uint32    `json:"assertion_id"`
+	PriorMuted  *bool     `json:"prior_muted"`
 }
 
 // String returns a single-line diagnostic suitable for slog. Format is
 // deterministic so log-grep over stderr produces stable matches.
 // PriorFocus renders as `null` when nil, else as the quoted string
-// content.
+// content. PriorMuted renders as `null` when nil, else as `true`/`false`.
 func (s Snapshot) String() string {
 	pf := "null"
 	if s.PriorFocus != nil {
 		pf = fmt.Sprintf("%q", *s.PriorFocus)
 	}
-	return fmt.Sprintf("Snapshot{pid=%d, started_at=%s, prior_focus=%s, assertion_id=%d}",
+	pm := "null"
+	if s.PriorMuted != nil {
+		pm = fmt.Sprintf("%t", *s.PriorMuted)
+	}
+	return fmt.Sprintf("Snapshot{pid=%d, started_at=%s, prior_focus=%s, assertion_id=%d, prior_muted=%s}",
 		s.PID,
 		s.StartedAt.UTC().Format(time.RFC3339),
 		pf,
 		s.AssertionID,
+		pm,
 	)
 }

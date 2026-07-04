@@ -156,6 +156,7 @@ func TestSnapshot_String_RendersDiagnostic(t *testing.T) {
 				"started_at=2026-05-14T09:42:13Z",
 				"prior_focus=null",
 				"assertion_id=67890",
+				"prior_muted=null",
 			},
 		},
 		{
@@ -173,6 +174,39 @@ func TestSnapshot_String_RendersDiagnostic(t *testing.T) {
 				"pid=42",
 				"prior_focus=\"Work\"",
 				"assertion_id=99",
+				"prior_muted=null",
+			},
+		},
+		{
+			name: "prior muted true",
+			s: func() runtime.Snapshot {
+				pm := true
+				return runtime.Snapshot{
+					PID:         42,
+					StartedAt:   fixedStartedAt,
+					PriorFocus:  nil,
+					AssertionID: 99,
+					PriorMuted:  &pm,
+				}
+			}(),
+			want: []string{
+				"prior_muted=true",
+			},
+		},
+		{
+			name: "prior muted false",
+			s: func() runtime.Snapshot {
+				pm := false
+				return runtime.Snapshot{
+					PID:         42,
+					StartedAt:   fixedStartedAt,
+					PriorFocus:  nil,
+					AssertionID: 99,
+					PriorMuted:  &pm,
+				}
+			}(),
+			want: []string{
+				"prior_muted=false",
 			},
 		},
 	}
@@ -192,18 +226,20 @@ func TestSnapshot_String_RendersDiagnostic(t *testing.T) {
 }
 
 // TestSnapshot_RoundTrip_PreservesAllFields verifies that marshal →
-// unmarshal preserves all four field values. Uses time.Time.Equal to
+// unmarshal preserves all field values. Uses time.Time.Equal to
 // guard against the monotonic-clock side-channel that strips during
 // JSON RFC3339 serialization.
 func TestSnapshot_RoundTrip_PreservesAllFields(t *testing.T) {
 	t.Parallel()
 
 	pf := "Personal"
+	pm := true
 	orig := runtime.Snapshot{
 		PID:         7,
 		StartedAt:   fixedStartedAt,
 		PriorFocus:  &pf,
 		AssertionID: 0xDEADBEEF,
+		PriorMuted:  &pm,
 	}
 	data, err := json.Marshal(orig)
 	if err != nil {
@@ -224,5 +260,116 @@ func TestSnapshot_RoundTrip_PreservesAllFields(t *testing.T) {
 	}
 	if got.AssertionID != orig.AssertionID {
 		t.Errorf("AssertionID: got %d, want %d", got.AssertionID, orig.AssertionID)
+	}
+	if got.PriorMuted == nil || *got.PriorMuted != *orig.PriorMuted {
+		t.Errorf("PriorMuted: got %v, want pointer to %t", got.PriorMuted, *orig.PriorMuted)
+	}
+}
+
+// TestSnapshot_PriorMuted_Marshal verifies that PriorMuted *bool renders
+// as JSON `null` when nil and as `true`/`false` when populated. nil is
+// the v1 default (audio untouched) and must not render as `false`.
+func TestSnapshot_PriorMuted_Marshal(t *testing.T) {
+	t.Parallel()
+
+	mkBool := func(b bool) *bool { return &b }
+
+	cases := []struct {
+		name    string
+		muted   *bool
+		want    string // substring that MUST appear
+		notWant string // substring that MUST NOT appear ("" = skip)
+	}{
+		{name: "nil renders null", muted: nil, want: "\"prior_muted\": null", notWant: "\"prior_muted\": false"},
+		{name: "true renders true", muted: mkBool(true), want: "\"prior_muted\": true"},
+		{name: "false renders false", muted: mkBool(false), want: "\"prior_muted\": false"},
+	}
+	for _, tt := range cases {
+		t.Run(tt.name, func(t *testing.T) {
+			s := runtime.Snapshot{
+				PID:         1,
+				StartedAt:   fixedStartedAt,
+				PriorFocus:  nil,
+				AssertionID: 2,
+				PriorMuted:  tt.muted,
+			}
+			data, err := json.MarshalIndent(s, "", "  ")
+			if err != nil {
+				t.Fatalf("MarshalIndent: %v", err)
+			}
+			got := string(data)
+			if !strings.Contains(got, tt.want) {
+				t.Errorf("output missing %q; got:\n%s", tt.want, got)
+			}
+			if tt.notWant != "" && strings.Contains(got, tt.notWant) {
+				t.Errorf("output unexpectedly contains %q; got:\n%s", tt.notWant, got)
+			}
+		})
+	}
+}
+
+// TestSnapshot_PriorMuted_Unmarshal verifies the inverse parse:
+// `null`/`true`/`false` parse into nil/true/false pointers respectively.
+func TestSnapshot_PriorMuted_Unmarshal(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		name     string
+		raw      string
+		wantNil  bool
+		wantBool bool
+	}{
+		{name: "null is nil", raw: "null", wantNil: true},
+		{name: "true is non-nil true", raw: "true", wantNil: false, wantBool: true},
+		{name: "false is non-nil false", raw: "false", wantNil: false, wantBool: false},
+	}
+	for _, tt := range cases {
+		t.Run(tt.name, func(t *testing.T) {
+			data := []byte(`{
+  "pid": 100,
+  "started_at": "2026-05-14T09:42:13Z",
+  "prior_focus": null,
+  "assertion_id": 200,
+  "prior_muted": ` + tt.raw + `
+}`)
+			var s runtime.Snapshot
+			if err := json.Unmarshal(data, &s); err != nil {
+				t.Fatalf("Unmarshal: %v", err)
+			}
+			if tt.wantNil {
+				if s.PriorMuted != nil {
+					t.Errorf("PriorMuted = %v; want nil", s.PriorMuted)
+				}
+				return
+			}
+			if s.PriorMuted == nil {
+				t.Fatalf("PriorMuted = nil; want pointer to %t", tt.wantBool)
+			}
+			if *s.PriorMuted != tt.wantBool {
+				t.Errorf("*PriorMuted = %t; want %t", *s.PriorMuted, tt.wantBool)
+			}
+		})
+	}
+}
+
+// TestSnapshot_Unmarshal_MissingPriorMuted_NilPointer verifies backward
+// compatibility: an old runtime.json written before the prior_muted key
+// existed parses into a nil pointer (audio untouched) rather than
+// failing.
+func TestSnapshot_Unmarshal_MissingPriorMuted_NilPointer(t *testing.T) {
+	t.Parallel()
+
+	data := []byte(`{
+  "pid": 100,
+  "started_at": "2026-05-14T09:42:13Z",
+  "prior_focus": null,
+  "assertion_id": 200
+}`)
+	var s runtime.Snapshot
+	if err := json.Unmarshal(data, &s); err != nil {
+		t.Fatalf("Unmarshal: %v", err)
+	}
+	if s.PriorMuted != nil {
+		t.Errorf("PriorMuted = %v; want nil (missing key in source)", s.PriorMuted)
 	}
 }
