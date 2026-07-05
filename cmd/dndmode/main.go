@@ -35,6 +35,7 @@ import (
 	"github.com/dsbasko/dndmode/internal/config"
 	"github.com/dsbasko/dndmode/internal/config/hotkey"
 	"github.com/dsbasko/dndmode/internal/macos/caffeinate"
+	"github.com/dsbasko/dndmode/internal/macos/audiomute"
 	"github.com/dsbasko/dndmode/internal/macos/cocoa"
 	"github.com/dsbasko/dndmode/internal/macos/eventtap"
 	"github.com/dsbasko/dndmode/internal/macos/focus"
@@ -380,6 +381,7 @@ func run() int {
 	if err := runtimepkg.RecoverFromCrash(ctx, runtimeMgr,
 		powerassert.NewCgoReleaser(),
 		runner,
+		audiomute.NewExecRunner(),
 		liveChecker,
 		log,
 	); err != nil {

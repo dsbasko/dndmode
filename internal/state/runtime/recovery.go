@@ -11,6 +11,7 @@ import (
 	"os"
 	"time"
 
+	"github.com/dsbasko/dndmode/internal/macos/audiomute"
 	"github.com/dsbasko/dndmode/internal/macos/focus"
 	"github.com/dsbasko/dndmode/internal/macos/powerassert"
 )
@@ -54,6 +55,14 @@ const stalePIDWindow = 24 * time.Hour
 // 1s; 5s gives generous headroom while keeping recovery time-bounded.
 const recoveryFocusTimeout = 5 * time.Second
 
+// recoveryMuteTimeout bounds the best-effort `osascript ... set volume
+// output muted false` subprocess used to restore audio during recovery.
+// Built on a FRESH ctx for the same SIGINT-cancellation reason as
+// recoveryFocusTimeout (see). Mirrors audiomute.Releaser's 5s
+// budget: AppleScript volume control returns near-instantly; 5s is
+// generous headroom while keeping recovery time-bounded.
+const recoveryMuteTimeout = 5 * time.Second
+
 // RecoverFromCrash reads runtime.json and reconciles the state left by
 // a SIGKILL'd previous dndmode. Composes Manager.Read
 // Phase 3 powerassert seams (AssertionReleaser, LiveChecker) + plan
@@ -76,6 +85,10 @@ const recoveryFocusTimeout = 5 * time.Second
 //         remains as a fallback later in PreFlight at Step 12).
 //     (b) runner.Run(ctx, "dndmode-off") — best-effort Focus
 // deactivation. On err: log.Warn, continue per the design notes.
+//     (b2) vol.SetMuted(ctx, false) — best-effort audio restore, ONLY
+//         when snap.PriorMuted != nil && !*snap.PriorMuted (the crashed
+//         session muted audio and owes an unmute). nil / true → no-op.
+//         On err: log.Warn, continue (symmetric to (b)).
 //     (c) mgr.Release() — MUST succeed. Failure → wrapped
 //         ErrFileDeletePersistent (main.go maps via errors.Is to exit
 // code 7); the design notes makes this distinct from the live-PID
@@ -105,6 +118,7 @@ func RecoverFromCrash(
 	mgr *Manager,
 	rel powerassert.AssertionReleaser,
 	runner focus.ShortcutsRunner,
+	vol audiomute.VolumeRunner,
 	live powerassert.LiveChecker,
 	log *slog.Logger,
 ) error {
@@ -217,6 +231,27 @@ func RecoverFromCrash(
 		log.Warn("recovery: focus deactivate failed", slog.Any("err", err))
 	}
 	cancel()
+
+	// Restore system audio muted BY the crashed session. PriorMuted records
+	// the mute state captured at that session's start: nil => audio was never
+	// touched (mute disabled, or an old runtime.json without the key — backward
+	// compat), true => audio was already muted before the session so the
+	// session left it alone, false => the session muted it and owes an unmute.
+	// Only the last case calls SetMuted(false). Same fresh-ctx + warn+continue
+	// best-effort policy as the focus deactivate above (symmetric to D-11);
+	// unlike focus (which is deactivated UNCONDITIONALLY — stated decision,
+	// PriorFocus has no recorded signal to gate on), the audio restore is gated
+	// on the recorded prior state so recovery never unmutes audio the user had
+	// muted themselves.
+	if snap.PriorMuted != nil && !*snap.PriorMuted {
+		muteCtx, muteCancel := context.WithTimeout(context.Background(), recoveryMuteTimeout)
+		if err := vol.SetMuted(muteCtx, false); err != nil {
+			log.Warn("recovery: audio unmute failed", slog.Any("err", err))
+		} else {
+			log.Info("recovery: restored system audio (unmuted)", slog.Int("pid", snap.PID))
+		}
+		muteCancel()
+	}
 
 	if err := mgr.Release(); err != nil {
 		// Strict: file MUST be deletable. Wrap as ErrFileDeletePersistent
