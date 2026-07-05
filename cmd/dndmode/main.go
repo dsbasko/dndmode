@@ -29,6 +29,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"runtime/debug"
+	"strconv"
 	"syscall"
 	"time"
 
@@ -78,6 +79,18 @@ type cancelStopper struct {
 }
 
 func (c *cancelStopper) RequestStop(_ string) { c.cancel() }
+
+// resolveBoolFlag implements the --mute/--focus tri-state precedence: an empty
+// flag value means "use the config default", a non-empty value is parsed with
+// strconv.ParseBool (accepting 1/t/T/TRUE/true/0/f/F/FALSE/false). A junk value
+// returns the ParseBool error so the caller can emit a source-naming stderr
+// line and exit 1 — mirroring the invalid---style handling at Step 5b.1.
+func resolveBoolFlag(flagVal string, configDefault bool) (bool, error) {
+	if flagVal == "" {
+		return configDefault, nil
+	}
+	return strconv.ParseBool(flagVal)
+}
 
 func main() {
 	os.Exit(run())
@@ -167,6 +180,14 @@ func run() int {
 	// default) means "use whatever the config says". Validated at Step 5b.1 with
 	// the same ValidateOverlayStyle gate as the config value.
 	styleFlag := flag.String("style", "", "override overlay_style for this run (black|matrix|glass|none); empty = use config")
+	// --mute / --focus override the config keys for a single run (same
+	// precedence as --style: non-empty WINS over YAML, empty = use config).
+	// Tri-state strings ("" | "true" | "false") rather than flag.Bool because a
+	// plain bool flag cannot express "absent → fall back to config" — a missing
+	// --mute must mean "use cfg.Mute (default true)", not "false". Parsed via
+	// strconv.ParseBool at Step 8b; junk → exitConfigErr (mirrors invalid --style).
+	muteFlag := flag.String("mute", "", "override mute for this run (true|false); empty = use config")
+	focusFlag := flag.String("focus", "", "override focus/DND for this run (true|false); empty = use config")
 	flag.Parse()
 
 	// --- Step 2: slog logger to stderr ---
@@ -284,6 +305,25 @@ func run() int {
 		return runCaffeinateOnly(ctx, cfg.AllowDisplaySleep, rs, log)
 	}
 
+	// --- Step 8b: resolve effective mute / focus (flag overrides config) ---
+	// Resolved AFTER the none-mode branch on purpose: caffeinate-only mode never
+	// touches audio or Focus (the user may still be at the machine), so its flag
+	// values are irrelevant and must not gate the fast path. Both follow the
+	// --style precedence: a non-empty flag WINS over YAML, empty falls back to
+	// config (config.NormalizeMute applies the nil⇒true rule on the YAML side).
+	// Junk flag values exit 1 (exitConfigErr) with a source-naming stderr line,
+	// exactly like an invalid --style.
+	effectiveMute, err := resolveBoolFlag(*muteFlag, config.NormalizeMute(cfg.Mute))
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "dndmode: invalid --mute %q: %v.\n", *muteFlag, err)
+		return exitConfigErr
+	}
+	effectiveFocus, err := resolveBoolFlag(*focusFlag, cfg.Focus)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "dndmode: invalid --focus %q: %v.\n", *focusFlag, err)
+		return exitConfigErr
+	}
+
 	// --- Step 5c (Phase 6): single-instance enforcement ---
 	// Cold-start check: bail fast if another live dndmode instance owns
 	// runtime.json — AFTER platform check (Step 8 surfaces ErrNonArm64 /
@@ -343,22 +383,28 @@ func run() int {
 	// (RecoverFromCrash) and Step 13.7 (Activate). exec.CommandContext
 	// inside the runner binds the subprocess to ctx so SIGINT during
 	// any of these calls auto-kills the shortcuts CLI child.
+	// Focus is now OPT-IN (effectiveFocus): the Shortcuts presence gate (and its
+	// exit-6 branch) runs ONLY when the user enabled focus. With focus disabled
+	// — the new default — dndmode never shells out to /usr/bin/shortcuts, so a
+	// host without the dndmode-on/off Shortcuts no longer blocks startup.
 	runner := focus.NewExecRunner()
-	if err := focus.CheckShortcuts(ctx, runner); err != nil {
-		if errors.Is(err, focus.ErrShortcutsMissing) {
-			fmt.Fprintln(os.Stderr,
-				"dndmode: required Shortcuts not found (need: dndmode-on, dndmode-off).\n\n"+
-					"To create them:\n"+
-					"  1. Open the Shortcuts app (⌘+Space → \"Shortcuts\").\n"+
-					"  2. New Shortcut → search \"Set Focus\" → drag in.\n"+
-					"  3. Set: Turn Do Not Disturb On Until Turned Off.\n"+
-					"  4. Save as: dndmode-on\n"+
-					"  5. Repeat steps 2-4 with \"Turn Do Not Disturb Off\", save as: dndmode-off\n\n"+
-					"Then re-run dndmode.")
-			return exitFocusSetup
+	if effectiveFocus {
+		if err := focus.CheckShortcuts(ctx, runner); err != nil {
+			if errors.Is(err, focus.ErrShortcutsMissing) {
+				fmt.Fprintln(os.Stderr,
+					"dndmode: required Shortcuts not found (need: dndmode-on, dndmode-off).\n\n"+
+						"To create them:\n"+
+						"  1. Open the Shortcuts app (⌘+Space → \"Shortcuts\").\n"+
+						"  2. New Shortcut → search \"Set Focus\" → drag in.\n"+
+						"  3. Set: Turn Do Not Disturb On Until Turned Off.\n"+
+						"  4. Save as: dndmode-on\n"+
+						"  5. Repeat steps 2-4 with \"Turn Do Not Disturb Off\", save as: dndmode-off\n\n"+
+						"Then re-run dndmode.")
+				return exitFocusSetup
+			}
+			fmt.Fprintf(os.Stderr, "dndmode: shortcuts check failed: %v. Inspect /usr/bin/shortcuts availability and re-run.\n", err)
+			return exitPlatformErr
 		}
-		fmt.Fprintf(os.Stderr, "dndmode: shortcuts check failed: %v. Inspect /usr/bin/shortcuts availability and re-run.\n", err)
-		return exitPlatformErr
 	}
 
 	// --- Step 10 (Phase 3): SecureEventInput check (exit 4) ---
@@ -451,31 +497,64 @@ func run() int {
 	}
 	rs.Push(assertion) // released 3rd in LIFO (between controller и runtime-mock)
 
-	// --- Step 13.3 (Phase 5): Write runtime.json with final assertion_id ---
+	// --- Step 13.3 (Phase 5): Resolve prior mute state, then write runtime.json ---
+	// When effectiveMute, query the CURRENT system-audio mute state BEFORE
+	// building the Snapshot literal — the recorded prior_muted must reflect the
+	// state from before we touch audio (Step 13.7). On a GetMuted error: warn +
+	// skip the whole mute step (priorMuted stays nil). NEVER mute without a
+	// recorded prior state, otherwise exit could leave the user's audio muted
+	// forever. priorMuted == nil ⇒ audio is never touched at Step 13.7.
+	muteRunner := audiomute.NewExecRunner()
+	var priorMuted *bool
+	if effectiveMute {
+		if got, gerr := muteRunner.GetMuted(ctx); gerr != nil {
+			log.Warn("query system mute state failed; skipping audio mute", slog.Any("err", gerr))
+		} else {
+			priorMuted = &got
+		}
+	}
+
 	// Atomic temp+rename. Records pid + UTC start time + nil PriorFocus
 	// (v1 never restores prior Focus) + the *real* assertion id
-	// from Step 13 for crash recovery in the next launch.
+	// from Step 13 for crash recovery + prior_muted for audio restore.
 	if err := runtimeMgr.Write(runtimepkg.Snapshot{
 		PID:         os.Getpid(),
 		StartedAt:   time.Now().UTC(),
 		PriorFocus:  nil,
 		AssertionID: assertion.ID(),
+		PriorMuted:  priorMuted,
 	}); err != nil {
 		fmt.Fprintf(os.Stderr, "dndmode: write runtime.json failed: %v. Inspect %s and re-run.\n", err, runtimeMgr.Path())
 		return exitPlatformErr
 	}
 
-	// --- Step 13.7 (Phase 5): Activate Focus + push deactivate Releaser ---
-	// Activate is best-effort: on failure log a warning,
-	// do NOT block startup — the user gets DND-less mode but the rest of
-	// dndmode (overlay, awake-lock) still works.
-	// Push the Releaser regardless: deactivate must still run on Cleanup
-	// even if Activate failed (idempotent via two-layer guard; Run("dndmode-off")
-	// on an already-off Focus is a no-op).
-	if err := focus.Activate(ctx, runner); err != nil {
-		log.Warn("focus activate failed", slog.Any("err", err))
+	// --- Step 13.7 (Phase 5): Focus (opt-in) + audio mute lifecycle ---
+	// Focus is opt-in (effectiveFocus). When enabled, Activate is best-effort
+	//: on failure log a warning, do NOT block startup. Push the
+	// Releaser regardless: deactivate must still run on Cleanup even if Activate
+	// failed (idempotent two-layer guard; Run("dndmode-off") on an already-off
+	// Focus is a no-op).
+	if effectiveFocus {
+		if err := focus.Activate(ctx, runner); err != nil {
+			log.Warn("focus activate failed", slog.Any("err", err))
+		}
+		rs.Push(focus.NewReleaser(runner, log))
 	}
-	rs.Push(focus.NewReleaser(runner, log))
+
+	// Audio mute (best-effort): only when a prior state was recorded above
+	// (priorMuted != nil). SetMuted(true) failure ⇒ warn + do NOT push the
+	// releaser (nothing to restore). On success push the Releaser AFTER the
+	// focus push so the LIFO unwind releases audiomute BEFORE focus — both are
+	// independent best-effort silencing steps; what matters is both unwind
+	// before the assertion (slot #3) and runtime-file (slot #5). The Releaser's
+	// priorMuted gate leaves a pre-existing mute intact on Cleanup.
+	if priorMuted != nil {
+		if err := muteRunner.SetMuted(ctx, true); err != nil {
+			log.Warn("system audio mute failed", slog.Any("err", err))
+		} else {
+			rs.Push(audiomute.NewReleaser(muteRunner, *priorMuted, log))
+		}
+	}
 
 	// --- Step 14 (Phase 3): cocoa.Init — moved DOWN after permission checks ---
 	// Rationale: TCC permission is binary-identity bound, not

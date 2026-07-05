@@ -407,6 +407,200 @@ func TestAcceptance_StyleFlag_OverridesConfig(t *testing.T) {
 	}
 }
 
+// TestAcceptance_InvalidMuteFlag_ExitOne verifies the --mute tri-state flag is
+// parsed through strconv.ParseBool (Step 8b): a junk value exits 1
+// (exitConfigErr) with a source-naming stderr line, mirroring invalid --style.
+// On the arm64 target the parse gate sits after the platform check but before
+// any permission prompt, so the assertion is deterministic without GUI/TCC.
+func TestAcceptance_InvalidMuteFlag_ExitOne(t *testing.T) {
+	tmpHome := t.TempDir()
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	cmd, _, stderr := dndmodeCmd(t, ctx, tmpHome)
+	cmd.Args = append(cmd.Args, "--mute=banana")
+	if err := cmd.Run(); err == nil {
+		t.Fatal("expected non-zero exit for invalid --mute, got nil")
+	}
+	if exitCode := cmd.ProcessState.ExitCode(); exitCode != 1 {
+		t.Errorf("exit code = %d, want 1 (invalid --mute value)", exitCode)
+	}
+	if s := stderr.String(); !strings.Contains(s, "invalid --mute") {
+		t.Errorf("stderr missing 'invalid --mute' marker: %s", s)
+	}
+}
+
+// TestAcceptance_InvalidFocusFlag_ExitOne is the --focus sibling of
+// TestAcceptance_InvalidMuteFlag_ExitOne.
+func TestAcceptance_InvalidFocusFlag_ExitOne(t *testing.T) {
+	tmpHome := t.TempDir()
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	cmd, _, stderr := dndmodeCmd(t, ctx, tmpHome)
+	cmd.Args = append(cmd.Args, "--focus=maybe")
+	if err := cmd.Run(); err == nil {
+		t.Fatal("expected non-zero exit for invalid --focus, got nil")
+	}
+	if exitCode := cmd.ProcessState.ExitCode(); exitCode != 1 {
+		t.Errorf("exit code = %d, want 1 (invalid --focus value)", exitCode)
+	}
+	if s := stderr.String(); !strings.Contains(s, "invalid --focus") {
+		t.Errorf("stderr missing 'invalid --focus' marker: %s", s)
+	}
+}
+
+// TestAcceptance_DefaultConfig_MutesNotFocus is the headline behavior-matrix
+// row (mute=true, focus=false — the new defaults): a default-config run must
+// mute audio for the session (the audiomute.Releaser appears in the LIFO
+// teardown) and must NOT activate Focus (no focus.Releaser, no exit-6 Shortcuts
+// gate). It also reads runtime.json while active to assert prior_muted was
+// recorded (non-null) — proving Step 13.3 captured the pre-session state.
+func TestAcceptance_DefaultConfig_MutesNotFocus(t *testing.T) {
+	tmpHome := t.TempDir()
+	runtimeJSON := filepath.Join(tmpHome, ".config", "dndmode", "runtime.json")
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	cmd, stdout, stderr := dndmodeCmd(t, ctx, tmpHome)
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+
+	if !waitForStdout(stdout, "active. press Ctrl-C.", 10*time.Second) {
+		_ = cmd.Process.Kill()
+		stdoutSnap := stdout.String()
+		stderrSnap := stderr.String()
+		switch {
+		case strings.Contains(stdoutSnap, "dndmode: waiting"):
+			t.Skip("AX or IM not granted on this host; default-mute test requires both granted upfront")
+		case strings.Contains(stderrSnap, "no displays detected"):
+			t.Skip("no displays attached; default-mute test requires GUI session")
+		case strings.Contains(stderrSnap, "Secure Event Input"):
+			t.Skip("SecureEventInput active on host; close it and re-run")
+		case strings.Contains(stderrSnap, "another instance is holding") || strings.Contains(stderrSnap, "another instance is already active"):
+			t.Skip("another dndmode instance is holding the awake-lock; SIGTERM it and re-run")
+		}
+		t.Fatalf("did not see active banner: stdout=%s stderr=%s", stdoutSnap, stderrSnap)
+	}
+
+	// Default config never enables Focus, so the Shortcuts gate must NOT have
+	// fired — startup must succeed even with no dndmode-on/off Shortcuts.
+	if s := stderr.String(); strings.Contains(s, "required Shortcuts not found") {
+		t.Errorf("default config (focus off) hit the Shortcuts gate — exit 6 must be conditional on focus: %s", s)
+	}
+
+	// While active, prior_muted must be recorded (non-null) in runtime.json.
+	if raw, err := os.ReadFile(runtimeJSON); err != nil {
+		t.Errorf("read runtime.json while active: %v", err)
+	} else {
+		var snap runtimepkg.Snapshot
+		if err := json.Unmarshal(raw, &snap); err != nil {
+			t.Errorf("unmarshal runtime.json: %v", err)
+		} else if snap.PriorMuted == nil {
+			t.Errorf("runtime.json prior_muted is null under default config (mute=true) — Step 13.3 did not record it: %s", string(raw))
+		}
+	}
+
+	signalAndWait(t, cmd, syscall.SIGINT, 10*time.Second)
+
+	s := stderr.String()
+	if !strings.Contains(s, `releaser=audiomute`) {
+		t.Errorf("stderr missing 'released releaser=audiomute' (default config must mute audio): %s", s)
+	}
+	if strings.Contains(s, `releaser=focus`) {
+		t.Errorf("stderr contains 'released releaser=focus' (default config must NOT activate Focus): %s", s)
+	}
+}
+
+// TestAcceptance_MuteFlagFalse_OverridesConfig verifies --mute precedence
+// (Step 8b): config asks for `mute: true` explicitly, the flag asks for false,
+// and the flag WINS — so no audio is muted and the audiomute.Releaser is absent
+// from the LIFO teardown. Mirrors the --style override precedence contract.
+func TestAcceptance_MuteFlagFalse_OverridesConfig(t *testing.T) {
+	tmpHome := t.TempDir()
+	cfgDir := filepath.Join(tmpHome, ".config", "dndmode")
+	if err := os.MkdirAll(cfgDir, 0o700); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(cfgDir, "config.yml"),
+		[]byte("hotkey: Ctrl+Option+Cmd+X\nmute: true\n"), 0o600); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	cmd, stdout, stderr := dndmodeCmd(t, ctx, tmpHome)
+	cmd.Args = append(cmd.Args, "--mute=false")
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+
+	if !waitForStdout(stdout, "active. press Ctrl-C.", 10*time.Second) {
+		_ = cmd.Process.Kill()
+		stdoutSnap := stdout.String()
+		stderrSnap := stderr.String()
+		switch {
+		case strings.Contains(stdoutSnap, "dndmode: waiting"):
+			t.Skip("AX or IM not granted on this host; mute-override test requires both granted upfront")
+		case strings.Contains(stderrSnap, "no displays detected"):
+			t.Skip("no displays attached; mute-override test requires GUI session")
+		case strings.Contains(stderrSnap, "Secure Event Input"):
+			t.Skip("SecureEventInput active on host; close it and re-run")
+		case strings.Contains(stderrSnap, "another instance is holding") || strings.Contains(stderrSnap, "another instance is already active"):
+			t.Skip("another dndmode instance is holding the awake-lock; SIGTERM it and re-run")
+		}
+		t.Fatalf("did not see active banner: stdout=%s stderr=%s", stdoutSnap, stderrSnap)
+	}
+
+	signalAndWait(t, cmd, syscall.SIGINT, 10*time.Second)
+
+	if s := stderr.String(); strings.Contains(s, `releaser=audiomute`) {
+		t.Errorf("--mute=false did not override config mute:true (audiomute releaser present): %s", s)
+	}
+}
+
+// TestAcceptance_StyleNone_NoMuteOrFocus locks the structural invariant that
+// caffeinate-only mode (overlay_style=none) never touches audio or Focus: the
+// none fast path returns before Steps 9.5/13.x, so neither the audiomute nor the
+// focus releaser may ever appear in its teardown, even though mute defaults on.
+// Runs on any arm64 host (none mode skips all PreFlight gates).
+func TestAcceptance_StyleNone_NoMuteOrFocus(t *testing.T) {
+	tmpHome := t.TempDir()
+	cfgDir := filepath.Join(tmpHome, ".config", "dndmode")
+	if err := os.MkdirAll(cfgDir, 0o700); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(cfgDir, "config.yml"),
+		[]byte("hotkey: Ctrl+Option+Cmd+X\noverlay_style: none\nfocus: true\n"), 0o600); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	cmd, stdout, stderr := dndmodeCmd(t, ctx, tmpHome)
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	if !waitForStdout(stdout, "active (caffeinate-only", 10*time.Second) {
+		_ = cmd.Process.Kill()
+		_ = cmd.Wait()
+		t.Fatalf("did not see caffeinate-only banner:\nstdout:\n%s\nstderr:\n%s", stdout.String(), stderr.String())
+	}
+
+	signalAndWait(t, cmd, syscall.SIGINT, 10*time.Second)
+
+	s := stderr.String()
+	if strings.Contains(s, `releaser=audiomute`) {
+		t.Errorf("none mode released an audiomute releaser — none must never mute audio: %s", s)
+	}
+	if strings.Contains(s, `releaser=focus`) {
+		t.Errorf("none mode released a focus releaser — none must never touch Focus (even with focus:true): %s", s)
+	}
+}
+
 // TestAcceptance_StyleNone_CaffeinateOnly is the overlay_style=none happy path:
 // dndmode degrades to a thin caffeinate(8) wrapper. Crucially it reaches the
 // active banner WITHOUT Accessibility / Input Monitoring grants, WITHOUT the
@@ -628,6 +822,20 @@ func caffeinateChildArgs(t *testing.T, ppid int) string {
 // We only need a brief active session and a SIGINT — no GUI verification.
 func TestAcceptance_LIFE06_PushOrder(t *testing.T) {
 	tmpHome := t.TempDir()
+	// Both silencing releasers must be present to verify their relative LIFO
+	// slots: audio mute is on by default, but Focus is now OPT-IN, so the test
+	// writes `focus: true` to force the focus.Releaser into the push stack
+	// alongside the audiomute.Releaser. (A host missing the dndmode-on/off
+	// Shortcuts will exit 6 → skipped via the "required Shortcuts not found"
+	// branch below.)
+	cfgDir := filepath.Join(tmpHome, ".config", "dndmode")
+	if err := os.MkdirAll(cfgDir, 0o700); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(cfgDir, "config.yml"),
+		[]byte("hotkey: Ctrl+Option+Cmd+X\nfocus: true\n"), 0o600); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
@@ -700,23 +908,28 @@ func TestAcceptance_LIFE06_PushOrder(t *testing.T) {
 	// are unquoted.
 	posTap := strings.Index(s, `releaser=eventtap`)
 	posWin := strings.Index(s, `releaser=windows`)
+	posAudiomute := strings.Index(s, `releaser=audiomute`)
 	posFocus := strings.Index(s, `releaser=focus`)
 	posAssert := strings.Index(s, `releaser="dndmode active"`)
 	posRuntime := strings.Index(s, `releaser=runtime-file`)
 
-	if posTap < 0 || posWin < 0 || posFocus < 0 || posAssert < 0 || posRuntime < 0 {
-		t.Fatalf("missing release log entries (need all 5 'released' info logs):\n"+
-			"  posTap(eventtap)=%d posWin=%d posFocus=%d posAssert(dndmode active)=%d posRuntime=%d\n"+
+	if posTap < 0 || posWin < 0 || posAudiomute < 0 || posFocus < 0 || posAssert < 0 || posRuntime < 0 {
+		t.Fatalf("missing release log entries (need all 6 'released' info logs):\n"+
+			"  posTap(eventtap)=%d posWin=%d posAudiomute=%d posFocus=%d posAssert(dndmode active)=%d posRuntime=%d\n"+
 			"stderr:\n%s",
-			posTap, posWin, posFocus, posAssert, posRuntime, s)
+			posTap, posWin, posAudiomute, posFocus, posAssert, posRuntime, s)
 	}
 
-	if !(posTap < posWin && posWin < posFocus && posFocus < posAssert && posAssert < posRuntime) {
+	// LIFO unwind with the new audiomute slot (plan 20260611): the audiomute
+	// releaser is pushed AFTER focus (Step 13.7), so it releases BEFORE focus.
+	// Full order: eventtap → windows → audiomute → focus → dndmode-active →
+	// runtime-file.
+	if !(posTap < posWin && posWin < posAudiomute && posAudiomute < posFocus && posFocus < posAssert && posAssert < posRuntime) {
 		t.Errorf("cleanup order violated:\n"+
-			"  eventtap@%d  windows@%d  focus@%d  dndmode-active@%d  runtime-file@%d\n"+
-			"  expected: eventtap < windows < focus < dndmode-active < runtime-file (LIFO unwind, Phase 4)\n"+
+			"  eventtap@%d  windows@%d  audiomute@%d  focus@%d  dndmode-active@%d  runtime-file@%d\n"+
+			"  expected: eventtap < windows < audiomute < focus < dndmode-active < runtime-file (LIFO unwind)\n"+
 			"stderr:\n%s",
-			posTap, posWin, posFocus, posAssert, posRuntime, s)
+			posTap, posWin, posAudiomute, posFocus, posAssert, posRuntime, s)
 	}
 }
 
@@ -938,10 +1151,21 @@ func TestAcceptance_CrashScenario(t *testing.T) {
 		t.Fatalf("A did not activate: stdout=%s stderr=%s", stdoutSnap, stderrSnap)
 	}
 
-	// Pre-SIGKILL: runtime.json must exist (Step 13.3 fired).
-	if _, err := os.Stat(runtimeJSON); err != nil {
+	// Pre-SIGKILL: runtime.json must exist (Step 13.3 fired) and, under the
+	// default mute-on config, must carry a recorded prior_muted so the recovery
+	// path (subprocess B) can decide whether to unmute.
+	rawA, statErr := os.ReadFile(runtimeJSON)
+	if statErr != nil {
 		_ = cmdA.Process.Kill()
-		t.Fatalf("runtime.json missing before SIGKILL: %v (Step 13.3 did not run?)", err)
+		t.Fatalf("runtime.json missing before SIGKILL: %v (Step 13.3 did not run?)", statErr)
+	}
+	var snapA runtimepkg.Snapshot
+	if err := json.Unmarshal(rawA, &snapA); err != nil {
+		_ = cmdA.Process.Kill()
+		t.Fatalf("unmarshal A runtime.json: %v", err)
+	}
+	if snapA.PriorMuted == nil {
+		t.Errorf("A runtime.json prior_muted is null under default config (mute=true) — recovery cannot restore audio: %s", string(rawA))
 	}
 
 	// SIGKILL — bypasses defer Cleanup; runtime.json + orphan IOPM + Focus remain.
