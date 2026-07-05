@@ -16,6 +16,7 @@ import (
 
 	"go.uber.org/mock/gomock"
 
+	audiomutemocks "github.com/dsbasko/dndmode/internal/macos/audiomute/mocks"
 	focusmocks "github.com/dsbasko/dndmode/internal/macos/focus/mocks"
 	passertmocks "github.com/dsbasko/dndmode/internal/macos/powerassert/mocks"
 	"github.com/dsbasko/dndmode/internal/state/runtime"
@@ -34,6 +35,7 @@ type recoveryDeps struct {
 	ctrl       *gomock.Controller
 	mockRel    *passertmocks.MockAssertionReleaser
 	mockRunner *focusmocks.MockShortcutsRunner
+	mockVol    *audiomutemocks.MockVolumeRunner
 	mockLive   *passertmocks.MockLiveChecker
 	mgr        *runtime.Manager
 	tmpPath    string
@@ -52,6 +54,7 @@ func newRecoveryDeps(t *testing.T) *recoveryDeps {
 		ctrl:       ctrl,
 		mockRel:    passertmocks.NewMockAssertionReleaser(ctrl),
 		mockRunner: focusmocks.NewMockShortcutsRunner(ctrl),
+		mockVol:    audiomutemocks.NewMockVolumeRunner(ctrl),
 		mockLive:   passertmocks.NewMockLiveChecker(ctrl),
 		mgr:        runtime.NewManager(path, logger),
 		tmpPath:    path,
@@ -76,7 +79,7 @@ func TestRecoverFromCrash_NoFile_Nil(t *testing.T) {
 	rd := newRecoveryDeps(t)
 	ctx := context.Background()
 
-	err := runtime.RecoverFromCrash(ctx, rd.mgr, rd.mockRel, rd.mockRunner, rd.mockLive, rd.log)
+	err := runtime.RecoverFromCrash(ctx, rd.mgr, rd.mockRel, rd.mockRunner, rd.mockVol, rd.mockLive, rd.log)
 	if err != nil {
 		t.Fatalf("RecoverFromCrash on missing file returned %v; want nil", err)
 	}
@@ -95,7 +98,7 @@ func TestRecoverFromCrash_MalformedJSON_WarnRemove_Nil(t *testing.T) {
 	}
 
 	ctx := context.Background()
-	err := runtime.RecoverFromCrash(ctx, rd.mgr, rd.mockRel, rd.mockRunner, rd.mockLive, rd.log)
+	err := runtime.RecoverFromCrash(ctx, rd.mgr, rd.mockRel, rd.mockRunner, rd.mockVol, rd.mockLive, rd.log)
 	if err != nil {
 		t.Fatalf("RecoverFromCrash on malformed JSON returned %v; want nil (warn + continue)", err)
 	}
@@ -128,7 +131,7 @@ func TestRecoverFromCrash_LivePID_ErrConcurrentInstance(t *testing.T) {
 	rd.mockLive.EXPECT().IsAlive(livePID).Return(true)
 
 	ctx := context.Background()
-	err := runtime.RecoverFromCrash(ctx, rd.mgr, rd.mockRel, rd.mockRunner, rd.mockLive, rd.log)
+	err := runtime.RecoverFromCrash(ctx, rd.mgr, rd.mockRel, rd.mockRunner, rd.mockVol, rd.mockLive, rd.log)
 	if err == nil {
 		t.Fatal("RecoverFromCrash returned nil; want ErrConcurrentInstance-wrapped error")
 	}
@@ -171,7 +174,7 @@ func TestRecoverFromCrash_LivePID_StaleFile_TreatsAsDead(t *testing.T) {
 	)
 
 	ctx := context.Background()
-	err := runtime.RecoverFromCrash(ctx, rd.mgr, rd.mockRel, rd.mockRunner, rd.mockLive, rd.log)
+	err := runtime.RecoverFromCrash(ctx, rd.mgr, rd.mockRel, rd.mockRunner, rd.mockVol, rd.mockLive, rd.log)
 	if err != nil {
 		t.Fatalf("RecoverFromCrash on stale+live-PID returned %v; want nil (treat as PID recycling)", err)
 	}
@@ -204,7 +207,7 @@ func TestRecoverFromCrash_LivePID_ZeroStartedAt_TreatsAsDead(t *testing.T) {
 	)
 
 	ctx := context.Background()
-	if err := runtime.RecoverFromCrash(ctx, rd.mgr, rd.mockRel, rd.mockRunner, rd.mockLive, rd.log); err != nil {
+	if err := runtime.RecoverFromCrash(ctx, rd.mgr, rd.mockRel, rd.mockRunner, rd.mockVol, rd.mockLive, rd.log); err != nil {
 		t.Fatalf("RecoverFromCrash on zero-StartedAt+live-PID returned %v; want nil", err)
 	}
 	if !strings.Contains(rd.logBuf.String(), "stale snapshot") {
@@ -229,7 +232,7 @@ func TestRecoverFromCrash_DeadPID_ReleasesAssertion(t *testing.T) {
 	)
 
 	ctx := context.Background()
-	err := runtime.RecoverFromCrash(ctx, rd.mgr, rd.mockRel, rd.mockRunner, rd.mockLive, rd.log)
+	err := runtime.RecoverFromCrash(ctx, rd.mgr, rd.mockRel, rd.mockRunner, rd.mockVol, rd.mockLive, rd.log)
 	if err != nil {
 		t.Fatalf("RecoverFromCrash returned %v; want nil", err)
 	}
@@ -259,7 +262,7 @@ func TestRecoverFromCrash_DeadPID_DeactivatesFocus(t *testing.T) {
 	)
 
 	ctx := context.Background()
-	if err := runtime.RecoverFromCrash(ctx, rd.mgr, rd.mockRel, rd.mockRunner, rd.mockLive, rd.log); err != nil {
+	if err := runtime.RecoverFromCrash(ctx, rd.mgr, rd.mockRel, rd.mockRunner, rd.mockVol, rd.mockLive, rd.log); err != nil {
 		t.Fatalf("RecoverFromCrash returned %v; want nil", err)
 	}
 }
@@ -277,7 +280,7 @@ func TestRecoverFromCrash_DeadPID_DeletesFile(t *testing.T) {
 	rd.mockRunner.EXPECT().Run(gomock.Any(), "dndmode-off").Return(nil)
 
 	ctx := context.Background()
-	if err := runtime.RecoverFromCrash(ctx, rd.mgr, rd.mockRel, rd.mockRunner, rd.mockLive, rd.log); err != nil {
+	if err := runtime.RecoverFromCrash(ctx, rd.mgr, rd.mockRel, rd.mockRunner, rd.mockVol, rd.mockLive, rd.log); err != nil {
 		t.Fatalf("RecoverFromCrash returned %v; want nil", err)
 	}
 	if _, err := os.Stat(rd.tmpPath); !errors.Is(err, fs.ErrNotExist) {
@@ -310,7 +313,7 @@ func TestRecoverFromCrash_DeadPID_ZeroAssertionID_SkipsRelease(t *testing.T) {
 	)
 
 	ctx := context.Background()
-	if err := runtime.RecoverFromCrash(ctx, rd.mgr, rd.mockRel, rd.mockRunner, rd.mockLive, rd.log); err != nil {
+	if err := runtime.RecoverFromCrash(ctx, rd.mgr, rd.mockRel, rd.mockRunner, rd.mockVol, rd.mockLive, rd.log); err != nil {
 		t.Fatalf("RecoverFromCrash returned %v; want nil", err)
 	}
 	if !strings.Contains(rd.logBuf.String(), "no assertion id stored") {
@@ -340,7 +343,7 @@ func TestRecoverFromCrash_DeadPID_AssertionReleaseFail_WarnContinue(t *testing.T
 	)
 
 	ctx := context.Background()
-	if err := runtime.RecoverFromCrash(ctx, rd.mgr, rd.mockRel, rd.mockRunner, rd.mockLive, rd.log); err != nil {
+	if err := runtime.RecoverFromCrash(ctx, rd.mgr, rd.mockRel, rd.mockRunner, rd.mockVol, rd.mockLive, rd.log); err != nil {
 		t.Fatalf("RecoverFromCrash returned %v; want nil (best-effort)", err)
 	}
 	if !strings.Contains(rd.logBuf.String(), "recovery: release stored assertion failed") {
@@ -367,11 +370,137 @@ func TestRecoverFromCrash_DeadPID_ShortcutsFail_WarnContinue(t *testing.T) {
 	)
 
 	ctx := context.Background()
-	if err := runtime.RecoverFromCrash(ctx, rd.mgr, rd.mockRel, rd.mockRunner, rd.mockLive, rd.log); err != nil {
+	if err := runtime.RecoverFromCrash(ctx, rd.mgr, rd.mockRel, rd.mockRunner, rd.mockVol, rd.mockLive, rd.log); err != nil {
 		t.Fatalf("RecoverFromCrash returned %v; want nil (best-effort)", err)
 	}
 	if !strings.Contains(rd.logBuf.String(), "recovery: focus deactivate failed") {
 		t.Errorf("log buffer missing 'recovery: focus deactivate failed'; got:\n%s", rd.logBuf.String())
+	}
+}
+
+// boolPtr is a local helper for building the *bool PriorMuted fixtures
+// the audio-restore recovery cases need.
+func boolPtr(b bool) *bool { return &b }
+
+// TestRecoverFromCrash_DeadPID_PriorMutedFalse_Unmutes — the crashed
+// session muted system audio (PriorMuted == false means "audio was
+// unmuted at session start, so the session muted it and owes an
+// unmute"). Recovery must call vol.SetMuted(false) to restore sound,
+// then complete normally. Log carries the restore line; file removed.
+func TestRecoverFromCrash_DeadPID_PriorMutedFalse_Unmutes(t *testing.T) {
+	rd := newRecoveryDeps(t)
+	const deadPID = 99999
+	const assertionID uint32 = 0xabcd
+	writeSnapshot(t, rd.mgr, runtime.Snapshot{
+		PID:         deadPID,
+		AssertionID: assertionID,
+		PriorMuted:  boolPtr(false),
+	})
+
+	gomock.InOrder(
+		rd.mockLive.EXPECT().IsAlive(deadPID).Return(false),
+		rd.mockRel.EXPECT().Release(assertionID).Return(nil),
+		rd.mockRunner.EXPECT().Run(gomock.Any(), "dndmode-off").Return(nil),
+		rd.mockVol.EXPECT().SetMuted(gomock.Any(), false).Return(nil),
+	)
+
+	ctx := context.Background()
+	if err := runtime.RecoverFromCrash(ctx, rd.mgr, rd.mockRel, rd.mockRunner, rd.mockVol, rd.mockLive, rd.log); err != nil {
+		t.Fatalf("RecoverFromCrash returned %v; want nil", err)
+	}
+	if !strings.Contains(rd.logBuf.String(), "recovery: restored system audio") {
+		t.Errorf("log buffer missing 'recovery: restored system audio'; got:\n%s", rd.logBuf.String())
+	}
+	if _, err := os.Stat(rd.tmpPath); !errors.Is(err, fs.ErrNotExist) {
+		t.Errorf("file not removed after audio-restore recovery: stat err = %v", err)
+	}
+}
+
+// TestRecoverFromCrash_DeadPID_PriorMutedTrue_NoUnmute — audio was
+// ALREADY muted before the crashed session (PriorMuted == true), so the
+// session left it alone and recovery must NOT unmute it (the user owns
+// that mute). vol.SetMuted MUST NOT be invoked (gomock fails on
+// unexpected calls — implicit assertion). Recovery still completes.
+func TestRecoverFromCrash_DeadPID_PriorMutedTrue_NoUnmute(t *testing.T) {
+	rd := newRecoveryDeps(t)
+	const deadPID = 99999
+	const assertionID uint32 = 0xabcd
+	writeSnapshot(t, rd.mgr, runtime.Snapshot{
+		PID:         deadPID,
+		AssertionID: assertionID,
+		PriorMuted:  boolPtr(true),
+	})
+
+	gomock.InOrder(
+		rd.mockLive.EXPECT().IsAlive(deadPID).Return(false),
+		rd.mockRel.EXPECT().Release(assertionID).Return(nil),
+		rd.mockRunner.EXPECT().Run(gomock.Any(), "dndmode-off").Return(nil),
+		// rd.mockVol.EXPECT().SetMuted intentionally NOT registered.
+	)
+
+	ctx := context.Background()
+	if err := runtime.RecoverFromCrash(ctx, rd.mgr, rd.mockRel, rd.mockRunner, rd.mockVol, rd.mockLive, rd.log); err != nil {
+		t.Fatalf("RecoverFromCrash returned %v; want nil", err)
+	}
+	if _, err := os.Stat(rd.tmpPath); !errors.Is(err, fs.ErrNotExist) {
+		t.Errorf("file not removed: stat err = %v", err)
+	}
+}
+
+// TestRecoverFromCrash_DeadPID_PriorMutedNil_NoUnmute — PriorMuted == nil
+// means audio was never touched (mute disabled this session, or an old
+// runtime.json predating the prior_muted key — backward compat). Recovery
+// must NOT unmute. vol.SetMuted MUST NOT be invoked.
+func TestRecoverFromCrash_DeadPID_PriorMutedNil_NoUnmute(t *testing.T) {
+	rd := newRecoveryDeps(t)
+	const deadPID = 99999
+	const assertionID uint32 = 0xabcd
+	// PriorMuted defaults to nil — the backward-compat / mute-disabled case.
+	writeSnapshot(t, rd.mgr, runtime.Snapshot{PID: deadPID, AssertionID: assertionID})
+
+	gomock.InOrder(
+		rd.mockLive.EXPECT().IsAlive(deadPID).Return(false),
+		rd.mockRel.EXPECT().Release(assertionID).Return(nil),
+		rd.mockRunner.EXPECT().Run(gomock.Any(), "dndmode-off").Return(nil),
+		// rd.mockVol.EXPECT().SetMuted intentionally NOT registered.
+	)
+
+	ctx := context.Background()
+	if err := runtime.RecoverFromCrash(ctx, rd.mgr, rd.mockRel, rd.mockRunner, rd.mockVol, rd.mockLive, rd.log); err != nil {
+		t.Fatalf("RecoverFromCrash returned %v; want nil", err)
+	}
+}
+
+// TestRecoverFromCrash_DeadPID_UnmuteFail_WarnContinue — vol.SetMuted
+// returns an error: log a warn and CONTINUE (best-effort, symmetric to
+// the focus-deactivate policy). Recovery returns nil overall and
+// the file is still removed.
+func TestRecoverFromCrash_DeadPID_UnmuteFail_WarnContinue(t *testing.T) {
+	rd := newRecoveryDeps(t)
+	const deadPID = 99999
+	const assertionID uint32 = 0xabcd
+	writeSnapshot(t, rd.mgr, runtime.Snapshot{
+		PID:         deadPID,
+		AssertionID: assertionID,
+		PriorMuted:  boolPtr(false),
+	})
+
+	gomock.InOrder(
+		rd.mockLive.EXPECT().IsAlive(deadPID).Return(false),
+		rd.mockRel.EXPECT().Release(assertionID).Return(nil),
+		rd.mockRunner.EXPECT().Run(gomock.Any(), "dndmode-off").Return(nil),
+		rd.mockVol.EXPECT().SetMuted(gomock.Any(), false).Return(errors.New("simulated osascript set volume failure")),
+	)
+
+	ctx := context.Background()
+	if err := runtime.RecoverFromCrash(ctx, rd.mgr, rd.mockRel, rd.mockRunner, rd.mockVol, rd.mockLive, rd.log); err != nil {
+		t.Fatalf("RecoverFromCrash returned %v; want nil (best-effort)", err)
+	}
+	if !strings.Contains(rd.logBuf.String(), "recovery: audio unmute failed") {
+		t.Errorf("log buffer missing 'recovery: audio unmute failed'; got:\n%s", rd.logBuf.String())
+	}
+	if _, err := os.Stat(rd.tmpPath); !errors.Is(err, fs.ErrNotExist) {
+		t.Errorf("file should still be removed despite unmute failure: stat err = %v", err)
 	}
 }
 
@@ -389,7 +518,7 @@ func TestRecoverFromCrash_SuspectPID_ZeroPID_TreatsAsDead(t *testing.T) {
 	// No EXPECT calls: live.IsAlive, rel.Release, runner.Run must all be skipped.
 
 	ctx := context.Background()
-	err := runtime.RecoverFromCrash(ctx, rd.mgr, rd.mockRel, rd.mockRunner, rd.mockLive, rd.log)
+	err := runtime.RecoverFromCrash(ctx, rd.mgr, rd.mockRel, rd.mockRunner, rd.mockVol, rd.mockLive, rd.log)
 	if err != nil {
 		t.Fatalf("RecoverFromCrash on PID=0 returned %v; want nil (treat as dead, continue PreFlight)", err)
 	}
@@ -410,7 +539,7 @@ func TestRecoverFromCrash_SuspectPID_OwnPID_TreatsAsDead(t *testing.T) {
 	writeSnapshot(t, rd.mgr, runtime.Snapshot{PID: os.Getpid(), AssertionID: 0xabcd})
 
 	ctx := context.Background()
-	err := runtime.RecoverFromCrash(ctx, rd.mgr, rd.mockRel, rd.mockRunner, rd.mockLive, rd.log)
+	err := runtime.RecoverFromCrash(ctx, rd.mgr, rd.mockRel, rd.mockRunner, rd.mockVol, rd.mockLive, rd.log)
 	if err != nil {
 		t.Fatalf("RecoverFromCrash on PID==own returned %v; want nil", err)
 	}
@@ -430,7 +559,7 @@ func TestRecoverFromCrash_SuspectPID_NegativePID_TreatsAsDead(t *testing.T) {
 	writeSnapshot(t, rd.mgr, runtime.Snapshot{PID: -1, AssertionID: 0xabcd})
 
 	ctx := context.Background()
-	err := runtime.RecoverFromCrash(ctx, rd.mgr, rd.mockRel, rd.mockRunner, rd.mockLive, rd.log)
+	err := runtime.RecoverFromCrash(ctx, rd.mgr, rd.mockRel, rd.mockRunner, rd.mockVol, rd.mockLive, rd.log)
 	if err != nil {
 		t.Fatalf("RecoverFromCrash on PID=-1 returned %v; want nil", err)
 	}
@@ -485,7 +614,7 @@ func TestRecoverFromCrash_DeadPID_FileDeleteFail_ErrFileDeletePersistent(t *test
 	})
 
 	ctx := context.Background()
-	err := runtime.RecoverFromCrash(ctx, rd.mgr, rd.mockRel, rd.mockRunner, rd.mockLive, rd.log)
+	err := runtime.RecoverFromCrash(ctx, rd.mgr, rd.mockRel, rd.mockRunner, rd.mockVol, rd.mockLive, rd.log)
 	if err == nil {
 		t.Fatal("RecoverFromCrash returned nil on os.Remove failure; want ErrFileDeletePersistent-wrapped")
 	}
