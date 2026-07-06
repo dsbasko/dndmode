@@ -19,8 +19,16 @@ killing the long-running task and without leaving the machine wide open to a pas
   (NOTE: placeholder mock in v1.0 — see [Known limitations](#known-limitations-v10)).
 - `IOPMAssertion` (`kIOPMAssertPreventUserIdleSystemSleep`) keeps the system awake
   for the entire session.
-- Two macOS Shortcuts named `dndmode-on` and `dndmode-off` toggle Do Not Disturb
-  Focus around the locked window so notifications do not leak.
+- System audio is muted for the session (default `mute: true`) and restored on
+  exit, so notification *sounds* and system beeps stay silent while you are away.
+  Notification *banners* never leak visually because the overlay sits above
+  NotificationCenter at `CGShieldingWindowLevel()`.
+- Do Not Disturb Focus is **off by default** (`focus: false`) and opt-in. When
+  enabled, two macOS Shortcuts named `dndmode-on` and `dndmode-off` toggle DND
+  around the locked window. Focus is disabled by default because macOS syncs it
+  across your Apple devices over iCloud ("Share Across Devices"), so turning DND
+  on at the Mac would silently turn it on your iPhone too — there is no API to
+  enable Focus "on this device only".
 - A configurable hotkey (default `Ctrl+Option+Cmd+X`) ends the locked state from
   the keyboard; `Ctrl-C` in the originating terminal also unwinds cleanly.
 
@@ -30,8 +38,9 @@ killing the long-running task and without leaving the machine wide open to a pas
 - Apple Silicon (`arm64`) — no Intel support.
 - Accessibility + Input Monitoring TCC permissions (granted on first run via
   System Settings).
-- Two macOS Shortcuts named exactly `dndmode-on` and `dndmode-off` (setup
-  instructions in [First-run setup](#first-run-setup)).
+- Two macOS Shortcuts named exactly `dndmode-on` and `dndmode-off` — **only when
+  `focus: true`** (setup instructions in [First-run setup](#first-run-setup)).
+  The default configuration (`focus: false`) does not require any Shortcuts.
 - Go 1.26+ if building from source.
 
 ## Install
@@ -78,9 +87,11 @@ v2).
    **Privacy & Security → Accessibility**.
 3. The polling loop will then ask for Input Monitoring. Same flow: enable
    `dndmode` in **Privacy & Security → Input Monitoring**.
-4. Open the **Shortcuts** app. Create a new shortcut: add the **Set Focus**
+4. **Only if you want Focus/DND** (`focus: true` in the config, or `--focus=true`):
+   open the **Shortcuts** app. Create a new shortcut: add the **Set Focus**
    action → choose **Do Not Disturb** → **Turn On Until Turned Off** → save as
-   `dndmode-on`. Repeat with **Turn Off** and save as `dndmode-off`.
+   `dndmode-on`. Repeat with **Turn Off** and save as `dndmode-off`. With the
+   default `focus: false` you can skip this step entirely.
 5. Run `dndmode` again. You should see `dndmode: active. press Ctrl-C.` on stdout.
    The default hotkey `Ctrl+Option+Cmd+X` exits the locked state. Customize via
    `~/.config/dndmode/config.yml`.
@@ -92,14 +103,33 @@ v2).
   in the terminal where dndmode runs.
 - **Configuration:** `~/.config/dndmode/config.yml` (created on first run with the
   default hotkey).
+- **Mute / Focus:** `mute: true` (default) silences system audio for the session
+  and restores it on exit; `focus: false` (default) leaves Do Not Disturb
+  untouched. Override per run with `dndmode --mute=true|false` /
+  `dndmode --focus=true|false` (flag overrides config; empty/omitted = use config).
+  Invalid values report on stderr and exit with the config-error code, same as an
+  invalid `--style`. Behavior matrix:
+
+  | `mute`     | `focus`    | Behavior                                                                 |
+  | ---------- | ---------- | ------------------------------------------------------------------------ |
+  | **true**   | **false**  | Mute system audio for the session, never touch Focus. iPhone unaffected; no Shortcuts needed. |
+  | true       | true       | Both: mute + Focus (max silence on Mac, DND still syncs to iPhone via iCloud). |
+  | false      | true       | Focus/DND only (legacy v1 behavior).                                     |
+  | false      | false      | Neither — overlay + awake-lock only.                                     |
+
+  If audio is **already muted** when dndmode starts, it is left muted on exit
+  (the session never unmutes what it did not mute). Audio mute is recorded in
+  `runtime.json` (`prior_muted`) so crash recovery can restore sound after a
+  `kill -9`.
 - **Overlay style for a single run:** `dndmode --style <black|matrix|glass|none>`
   overrides `overlay_style` from the config file for that launch only — the YAML
   is ignored. Omit the flag to use whatever the config says. The startup banner
   reports the effective style and its source, e.g. `overlay_style=glass (flag)`.
 - **Awake-only mode (`none`):** `overlay_style: none` (or `dndmode --style none`)
   turns dndmode into a thin [`caffeinate(8)`](x-man-page://caffeinate) wrapper —
-  it does **not** enable Do Not Disturb, does **not** block the keyboard/trackpad
-  (so **no Accessibility permission is needed**), and draws **no overlay**. It
+  it does **not** mute audio, does **not** enable Do Not Disturb, does **not**
+  block the keyboard/trackpad (so **no Accessibility permission is needed**), and
+  draws **no overlay** — regardless of `mute`/`focus` config or flags. It
   only holds a system-awake assertion for as long as dndmode runs. Exit with
   `Ctrl-C` (there is no hotkey in this mode — there is no event tap to observe
   one). Under the hood it runs `caffeinate -d -i -s -w <pid>` (`-d` is dropped
@@ -116,7 +146,7 @@ v2).
 | 3    | `exitPermissionDenied`    | SIGINT received while waiting for Accessibility / Input Monitoring grants.   |
 | 4    | `exitSecureInputConflict` | Another app holds Secure Event Input (Terminal sudo, password fields, 1Password). |
 | 5    | `exitConcurrentInstance`  | Another live `dndmode` instance detected (LIFE-12 / orphan IOPMAssertion).   |
-| 6    | `exitFocusSetup`          | Required Shortcuts `dndmode-on` or `dndmode-off` not found.                  |
+| 6    | `exitFocusSetup`          | Required Shortcuts `dndmode-on` or `dndmode-off` not found — **only checked when `focus: true`**. |
 | 7    | `exitRuntimeJSON`         | Cannot delete stale `~/.config/dndmode/runtime.json` (permission / IO).      |
 
 ## Threat model
@@ -126,7 +156,8 @@ v2).
 - Casual passerby trying to interact with unlocked MacBook
 - Family member / colleague clicking around while AI agent runs
 - Display power button / Mission Control / Cmd+Tab probing
-- macOS Focus notifications leaking info during DND
+- Notification banners (hidden under the shield overlay) and notification sounds
+  (system audio muted for the session); Focus/DND optionally on top (`focus: true`)
 
 ### What dndmode does NOT protect against
 
@@ -145,7 +176,8 @@ v2).
 | Overlay (Phase 2)     | Visual access to desktop                 | Bypassable via Cmd+Tab in v1 (Phase 4 closes this).          |
 | HID tap (Phase 4)     | Keyboard + mouse + scroll + media        | NOT IMPLEMENTED in v1 — placeholder mock.                    |
 | IOPM Assertion (Phase 3) | System idle sleep                     | Display can still sleep (intentional).                       |
-| Focus (Phase 5)       | Notification banners                     | DND only — does not silence audio.                           |
+| Audio mute            | Notification sounds + system beeps       | On by default; restored on exit. Skipped in `none` mode.     |
+| Focus (Phase 5)       | Notification banners                     | Opt-in (`focus: true`); DND syncs to iPhone via iCloud.      |
 
 **Disclaimer:** dndmode is a soft-lock for cooperative environments, not red-team-grade
 hardware protection. Use at your own risk.
@@ -238,13 +270,12 @@ tccutil reset ListenEvent com.dsbasko.dndmode
   still function. The visual overlay is in place, but a determined local user can
   switch apps. Phase 4 (CGEventTap-based input blocking) is the planned scope of
   v1.1.
-- No prior-Focus snapshot/restore — after exit, Focus is always set to "no focus"
-  (deliberate v1 limitation, FOC-04). v2-FOC-snapshot will add restore.
+- No prior-Focus snapshot/restore — when `focus: true`, after exit Focus is always
+  set to "no focus" (deliberate v1 limitation, FOC-04). v2-FOC-snapshot will add
+  restore. (Audio mute, by contrast, *is* saved/restored: a session that finds
+  audio already muted leaves it muted on exit.)
 - No daemon mode — foreground process only. The terminal where dndmode launched
   must stay open. v2 may add launchd integration.
-- No audio mute — Focus DND suppresses notification *banners* but not sounds.
-  Background music or system beeps still play (intentional: AI agents may need to
-  vocalize).
 - macOS Sequoia 15.x signing requirement — unsigned binaries refuse to launch.
   `make build` applies ad-hoc codesign automatically; `go install` relies on Go's
   linker-signed signature (sufficient to launch, but not for TCC stability — see
