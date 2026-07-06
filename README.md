@@ -108,7 +108,8 @@ v2).
   untouched. Override per run with `dndmode --mute=true|false` /
   `dndmode --focus=true|false` (flag overrides config; empty/omitted = use config).
   Invalid values report on stderr and exit with the config-error code, same as an
-  invalid `--style`. Behavior matrix:
+  invalid `--style` (except in `none` mode, which skips mute/focus entirely — see
+  below). Behavior matrix:
 
   | `mute`     | `focus`    | Behavior                                                                 |
   | ---------- | ---------- | ------------------------------------------------------------------------ |
