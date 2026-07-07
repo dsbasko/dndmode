@@ -80,21 +80,24 @@ const recoveryMuteTimeout = 5 * time.Second
 //     bail policy).
 //  4. Dead PID branch — three best-effort + one strict step:
 //     (a) rel.Release(snap.AssertionID) — IOPMAssertion explicit-id
-//         release. On err: log.Warn, continue (kernel auto-reaps on
-//         process exit anyway; Phase 3 CleanupOrphans heuristic
-//         remains as a fallback later in PreFlight at Step 12).
+//     release. On err: log.Warn, continue (kernel auto-reaps on
+//     process exit anyway; Phase 3 CleanupOrphans heuristic
+//     remains as a fallback later in PreFlight at Step 12).
 //     (b) runner.Run(ctx, "dndmode-off") — best-effort Focus
-// deactivation. On err: log.Warn, continue per the design notes.
+//     deactivation, ONLY when snap.FocusEnabled is nil (old file,
+//     legacy unconditional behavior) or true (session enabled Focus).
+//     false → skip, so a default mute-only session never touches the
+// user's current Focus. On err: log.Warn, continue per the design notes.
 //     (b2) vol.SetMuted(ctx, false) — best-effort audio restore, ONLY
-//         when snap.PriorMuted != nil && !*snap.PriorMuted (the crashed
-//         session muted audio and owes an unmute). nil / true → no-op.
-//         On err: log.Warn, continue (symmetric to (b)).
+//     when snap.PriorMuted != nil && !*snap.PriorMuted (the crashed
+//     session muted audio and owes an unmute). nil / true → no-op.
+//     On err: log.Warn, continue (symmetric to (b)).
 //     (c) mgr.Release() — MUST succeed. Failure → wrapped
-//         ErrFileDeletePersistent (main.go maps via errors.Is to exit
+//     ErrFileDeletePersistent (main.go maps via errors.Is to exit
 // code 7); the design notes makes this distinct from the live-PID
-//         exit so the user-facing stderr template can explain why
-//         dndmode can't auto-recover (read-only filesystem, ACL deny,
-//         disk full preventing journal commit — manual `rm` required).
+//     exit so the user-facing stderr template can explain why
+//     dndmode can't auto-recover (read-only filesystem, ACL deny,
+//     disk full preventing journal commit — manual `rm` required).
 //
 // the design notes invariant: RecoverFromCrash runs BEFORE
 // powerassert.CleanupOrphans in main.go PreFlight. Explicit-id release
@@ -220,17 +223,30 @@ func RecoverFromCrash(
 			slog.Int("pid", snap.PID))
 	}
 
-	// build a FRESH ctx for runner.Run — the caller's ctx may
-	// already be cancelled if SIGINT arrived during PreFlight, and a
-	// cancelled ctx SIGKILLs the shortcuts subprocess before it can call
-	// into the Focus framework, leaving stale Focus On state. Mirrors
-	// focus.Releaser.Release (releaser.go:112) which addresses the
-	// symmetric Cleanup-time scenario for the same reason.
-	focusCtx, cancel := context.WithTimeout(context.Background(), recoveryFocusTimeout)
-	if err := runner.Run(focusCtx, "dndmode-off"); err != nil {
-		log.Warn("recovery: focus deactivate failed", slog.Any("err", err))
+	// Deactivate Focus ONLY when the crashed session actually enabled it.
+	// FocusEnabled gates this so a default mute-only session (focus:false)
+	// that crashed never runs `dndmode-off` and thereby turns OFF the
+	// user's CURRENT Focus — which iCloud would sync off to their iPhone,
+	// violating the "never touch Focus / iPhone unaffected" contract. nil
+	// (an old runtime.json predating focus_enabled) falls back to the
+	// legacy UNCONDITIONAL deactivation for backward compatibility; false
+	// skips it; true deactivates.
+	if snap.FocusEnabled == nil || *snap.FocusEnabled {
+		// build a FRESH ctx for runner.Run — the caller's ctx may
+		// already be cancelled if SIGINT arrived during PreFlight, and a
+		// cancelled ctx SIGKILLs the shortcuts subprocess before it can call
+		// into the Focus framework, leaving stale Focus On state. Mirrors
+		// focus.Releaser.Release (releaser.go:112) which addresses the
+		// symmetric Cleanup-time scenario for the same reason.
+		focusCtx, cancel := context.WithTimeout(context.Background(), recoveryFocusTimeout)
+		if err := runner.Run(focusCtx, "dndmode-off"); err != nil {
+			log.Warn("recovery: focus deactivate failed", slog.Any("err", err))
+		}
+		cancel()
+	} else {
+		log.Info("recovery: crashed session did not enable Focus, skipping dndmode-off",
+			slog.Int("pid", snap.PID))
 	}
-	cancel()
 
 	// Restore system audio muted BY the crashed session. PriorMuted records
 	// the mute state captured at that session's start: nil => audio was never
@@ -238,11 +254,10 @@ func RecoverFromCrash(
 	// compat), true => audio was already muted before the session so the
 	// session left it alone, false => the session muted it and owes an unmute.
 	// Only the last case calls SetMuted(false). Same fresh-ctx + warn+continue
-	// best-effort policy as the focus deactivate above (symmetric to D-11);
-	// unlike focus (which is deactivated UNCONDITIONALLY — stated decision,
-	// PriorFocus has no recorded signal to gate on), the audio restore is gated
-	// on the recorded prior state so recovery never unmutes audio the user had
-	// muted themselves.
+	// best-effort policy as the focus deactivate above (symmetric to).
+	// Like the focus deactivate (now gated on FocusEnabled), the audio restore
+	// is gated on the recorded prior state so recovery never unmutes audio the
+	// user had muted themselves.
 	if snap.PriorMuted != nil && !*snap.PriorMuted {
 		muteCtx, muteCancel := context.WithTimeout(context.Background(), recoveryMuteTimeout)
 		if err := vol.SetMuted(muteCtx, false); err != nil {

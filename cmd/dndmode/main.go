@@ -134,10 +134,10 @@ func main() {
 // 15. cocoa.NewController CreateWindowsForAllScreens — P2; rs.Push(controller).
 //  16. supervisor.New(log, stopper) + supervisor.Start(ctx) — swapped BEFORE
 // eventtap (Phase 4) because InstallAll needs sup.ExitTrigger() as
-//      its sink channel.
+//     its sink channel.
 // 17. eventtap.InstallAll(spec, sup.ExitTrigger(), log) — Phase 4;
-//      composes tap + watchdog + wake observer into a single Releaser;
-//      rs.Push(tapRel). Replaces the Phase 3 mock-tap placeholder.
+//     composes tap + watchdog + wake observer into a single Releaser;
+//     rs.Push(tapRel). Replaces the Phase 3 mock-tap placeholder.
 //  18. stdout "dndmode: active. press Ctrl-C.".
 // 19. cocoa.RunApp(ctx) → sup.Wait() → return exitOK; defer Cleanup LIFO;
 // top-level recover defer (registered FIRST inside run, Phase 4
@@ -518,11 +518,12 @@ func run() int {
 	// (v1 never restores prior Focus) + the *real* assertion id
 	// from Step 13 for crash recovery + prior_muted for audio restore.
 	if err := runtimeMgr.Write(runtimepkg.Snapshot{
-		PID:         os.Getpid(),
-		StartedAt:   time.Now().UTC(),
-		PriorFocus:  nil,
-		AssertionID: assertion.ID(),
-		PriorMuted:  priorMuted,
+		PID:          os.Getpid(),
+		StartedAt:    time.Now().UTC(),
+		PriorFocus:   nil,
+		AssertionID:  assertion.ID(),
+		PriorMuted:   priorMuted,
+		FocusEnabled: &effectiveFocus,
 	}); err != nil {
 		fmt.Fprintf(os.Stderr, "dndmode: write runtime.json failed: %v. Inspect %s and re-run.\n", err, runtimeMgr.Path())
 		return exitPlatformErr
@@ -542,18 +543,24 @@ func run() int {
 	}
 
 	// Audio mute (best-effort): only when a prior state was recorded above
-	// (priorMuted != nil). SetMuted(true) failure ⇒ warn + do NOT push the
-	// releaser (nothing to restore). On success push the Releaser AFTER the
-	// focus push so the LIFO unwind releases audiomute BEFORE focus — both are
-	// independent best-effort silencing steps; what matters is both unwind
-	// before the assertion (slot #3) and runtime-file (slot #5). The Releaser's
-	// priorMuted gate leaves a pre-existing mute intact on Cleanup.
+	// (priorMuted != nil). Push the Releaser REGARDLESS of SetMuted's outcome,
+	// mirroring the focus releaser above (which is pushed even when Activate
+	// fails): SetMuted can apply the mute and STILL return an error — ctx
+	// cancelled right after osascript changed the volume, or a non-zero exit
+	// after a partial effect. If we skipped the push on error, that leaked mute
+	// would survive forever (normal Cleanup deletes runtime.json, so crash
+	// recovery never sees it either). The Releaser is idempotent and its
+	// priorMuted gate makes SetMuted(false) a no-op when audio was genuinely
+	// left unmuted, so pushing after a real failure costs at most one harmless
+	// unmute on Cleanup. Pushed AFTER the focus push so the LIFO unwind releases
+	// audiomute BEFORE focus — both are independent best-effort silencing steps;
+	// what matters is both unwind before the assertion (slot #3) and
+	// runtime-file (slot #5).
 	if priorMuted != nil {
 		if err := muteRunner.SetMuted(ctx, true); err != nil {
 			log.Warn("system audio mute failed", slog.Any("err", err))
-		} else {
-			rs.Push(audiomute.NewReleaser(muteRunner, *priorMuted, log))
 		}
+		rs.Push(audiomute.NewReleaser(muteRunner, *priorMuted, log))
 	}
 
 	// --- Step 14 (Phase 3): cocoa.Init — moved DOWN after permission checks ---

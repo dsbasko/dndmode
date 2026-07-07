@@ -382,6 +382,67 @@ func TestRecoverFromCrash_DeadPID_ShortcutsFail_WarnContinue(t *testing.T) {
 // the audio-restore recovery cases need.
 func boolPtr(b bool) *bool { return &b }
 
+// TestRecoverFromCrash_DeadPID_FocusDisabled_SkipsDeactivate — the crashed
+// session was the default mute-only run (FocusEnabled == false): it never
+// touched Focus. Recovery MUST NOT run `dndmode-off`, otherwise it would turn
+// off the user's CURRENT Focus and iCloud would sync that off to their iPhone,
+// violating the "never touch Focus" contract. runner.Run is therefore NOT
+// registered (gomock fails on any unexpected call). Assertion release still
+// runs; file removed.
+func TestRecoverFromCrash_DeadPID_FocusDisabled_SkipsDeactivate(t *testing.T) {
+	rd := newRecoveryDeps(t)
+	const deadPID = 99999
+	const assertionID uint32 = 0xabcd
+	writeSnapshot(t, rd.mgr, runtime.Snapshot{
+		PID:          deadPID,
+		AssertionID:  assertionID,
+		FocusEnabled: boolPtr(false),
+	})
+
+	gomock.InOrder(
+		rd.mockLive.EXPECT().IsAlive(deadPID).Return(false),
+		rd.mockRel.EXPECT().Release(assertionID).Return(nil),
+		// rd.mockRunner.EXPECT().Run intentionally NOT registered — focus
+		// deactivate must be skipped for a focus-disabled session.
+	)
+
+	ctx := context.Background()
+	if err := runtime.RecoverFromCrash(ctx, rd.mgr, rd.mockRel, rd.mockRunner, rd.mockVol, rd.mockLive, rd.log); err != nil {
+		t.Fatalf("RecoverFromCrash returned %v; want nil", err)
+	}
+	if !strings.Contains(rd.logBuf.String(), "did not enable Focus") {
+		t.Errorf("log buffer missing focus-skip line; got:\n%s", rd.logBuf.String())
+	}
+	if _, err := os.Stat(rd.tmpPath); !errors.Is(err, fs.ErrNotExist) {
+		t.Errorf("file not removed after focus-disabled recovery: stat err = %v", err)
+	}
+}
+
+// TestRecoverFromCrash_DeadPID_FocusEnabled_Deactivates — the crashed session
+// had Focus opted in (FocusEnabled == true). Recovery MUST run `dndmode-off`
+// to undo the session's `dndmode-on`.
+func TestRecoverFromCrash_DeadPID_FocusEnabled_Deactivates(t *testing.T) {
+	rd := newRecoveryDeps(t)
+	const deadPID = 99999
+	const assertionID uint32 = 0xabcd
+	writeSnapshot(t, rd.mgr, runtime.Snapshot{
+		PID:          deadPID,
+		AssertionID:  assertionID,
+		FocusEnabled: boolPtr(true),
+	})
+
+	gomock.InOrder(
+		rd.mockLive.EXPECT().IsAlive(deadPID).Return(false),
+		rd.mockRel.EXPECT().Release(assertionID).Return(nil),
+		rd.mockRunner.EXPECT().Run(gomock.Any(), "dndmode-off").Return(nil),
+	)
+
+	ctx := context.Background()
+	if err := runtime.RecoverFromCrash(ctx, rd.mgr, rd.mockRel, rd.mockRunner, rd.mockVol, rd.mockLive, rd.log); err != nil {
+		t.Fatalf("RecoverFromCrash returned %v; want nil", err)
+	}
+}
+
 // TestRecoverFromCrash_DeadPID_PriorMutedFalse_Unmutes — the crashed
 // session muted system audio (PriorMuted == false means "audio was
 // unmuted at session start, so the session muted it and owes an
