@@ -32,21 +32,33 @@ import (
 //     start, so exit/recovery must unmute. true ⇒ audio was already
 //     muted, so exit/recovery leaves it muted. Nullable from day one ⇒
 //     no migration; old files unmarshal with nil.
+//   - FocusEnabled: *bool. Whether the session enabled Focus/DND
+//     (effectiveFocus at Write time). RecoverFromCrash gates the
+//     best-effort `dndmode-off` on this so a crashed mute-only session
+//     (the default — focus:false) never deactivates the user's CURRENT
+//     Focus and syncs that off to their iPhone via iCloud, honouring the
+//     "never touch Focus" contract. nil ⇒ unknown (an old runtime.json
+//     written before this field existed) ⇒ recovery falls back to the
+//     legacy UNCONDITIONAL deactivation. false ⇒ session never touched
+//     Focus ⇒ recovery skips it. true ⇒ session enabled Focus ⇒ recovery
+//     deactivates. Nullable from day one ⇒ no migration.
 //
 // The JSON tags are stable user-facing contract. Renaming a tag is a
 // breaking schema change requiring migration logic.
 type Snapshot struct {
-	PID         int       `json:"pid"`
-	StartedAt   time.Time `json:"started_at"`
-	PriorFocus  *string   `json:"prior_focus"`
-	AssertionID uint32    `json:"assertion_id"`
-	PriorMuted  *bool     `json:"prior_muted"`
+	PID          int       `json:"pid"`
+	StartedAt    time.Time `json:"started_at"`
+	PriorFocus   *string   `json:"prior_focus"`
+	AssertionID  uint32    `json:"assertion_id"`
+	PriorMuted   *bool     `json:"prior_muted"`
+	FocusEnabled *bool     `json:"focus_enabled"`
 }
 
 // String returns a single-line diagnostic suitable for slog. Format is
 // deterministic so log-grep over stderr produces stable matches.
 // PriorFocus renders as `null` when nil, else as the quoted string
-// content. PriorMuted renders as `null` when nil, else as `true`/`false`.
+// content. PriorMuted and FocusEnabled render as `null` when nil, else
+// as `true`/`false`.
 func (s Snapshot) String() string {
 	pf := "null"
 	if s.PriorFocus != nil {
@@ -56,11 +68,16 @@ func (s Snapshot) String() string {
 	if s.PriorMuted != nil {
 		pm = fmt.Sprintf("%t", *s.PriorMuted)
 	}
-	return fmt.Sprintf("Snapshot{pid=%d, started_at=%s, prior_focus=%s, assertion_id=%d, prior_muted=%s}",
+	fe := "null"
+	if s.FocusEnabled != nil {
+		fe = fmt.Sprintf("%t", *s.FocusEnabled)
+	}
+	return fmt.Sprintf("Snapshot{pid=%d, started_at=%s, prior_focus=%s, assertion_id=%d, prior_muted=%s, focus_enabled=%s}",
 		s.PID,
 		s.StartedAt.UTC().Format(time.RFC3339),
 		pf,
 		s.AssertionID,
 		pm,
+		fe,
 	)
 }
