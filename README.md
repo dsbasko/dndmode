@@ -107,9 +107,10 @@ v2).
   and restores it on exit; `focus: false` (default) leaves Do Not Disturb
   untouched. Override per run with `dndmode --mute=true|false` /
   `dndmode --focus=true|false` (flag overrides config; empty/omitted = use config).
-  Invalid values report on stderr and exit with the config-error code, same as an
-  invalid `--style` (except in `none` mode, which skips mute/focus entirely — see
-  below). Behavior matrix:
+  Invalid values exit with the config-error code (and report on stderr **only**
+  under `--debug` / `debug: true` — see [Quiet by default](#quiet-by-default)),
+  same as an invalid `--style` (except in `none` mode, which skips mute/focus
+  entirely — see below). Behavior matrix:
 
   | `mute`     | `focus`    | Behavior                                                                 |
   | ---------- | ---------- | ------------------------------------------------------------------------ |
@@ -124,8 +125,9 @@ v2).
   `kill -9`.
 - **Overlay style for a single run:** `dndmode --style <black|matrix|glass|none>`
   overrides `overlay_style` from the config file for that launch only — the YAML
-  is ignored. Omit the flag to use whatever the config says. The startup banner
-  reports the effective style and its source, e.g. `overlay_style=glass (flag)`.
+  is ignored. Omit the flag to use whatever the config says. Under `--debug` /
+  `debug: true` the startup banner reports the effective style and its source,
+  e.g. `overlay_style=glass (flag)` (silent otherwise — see below).
 - **Awake-only mode (`none`):** `overlay_style: none` (or `dndmode --style none`)
   turns dndmode into a thin [`caffeinate(8)`](x-man-page://caffeinate) wrapper —
   it does **not** mute audio, does **not** enable Do Not Disturb, does **not**
@@ -136,6 +138,16 @@ v2).
   one). Under the hood it runs `caffeinate -d -i -s -w <pid>` (`-d` is dropped
   when `allow_display_sleep: true`); `-w <pid>` ties the assertion to dndmode's
   lifetime so it self-releases even if dndmode is `kill -9`'d.
+- <a id="quiet-by-default"></a>**Quiet by default:** dndmode prints **nothing** to
+  stdout or stderr — no startup banner, no diagnostics, no logs — and reports
+  outcome only through its [exit code](#exit-codes). This is a security default:
+  with `overlay_style: none` or `glass` the terminal stays visible while dndmode
+  is active, so a printed banner would leak the unlock hotkey to anyone watching
+  the screen. Pass `--debug` (or set `debug: true` in `config.yml`) to un-silence
+  everything — the `config=… hotkey=…` banner, the `active` / cleanup banners, and
+  debug-level logging — e.g. when a run exits non-zero and you need to see why.
+  The `--debug` flag and `debug: true` are equivalent; either enables output, and
+  neither is needed for normal operation.
 
 ### Exit codes
 
