@@ -35,6 +35,14 @@ clean:
 	rm -rf internal/*/mocks internal/*/*/mocks
 
 install: build
+	# Remove the old binary BEFORE copying so the destination gets a FRESH inode.
+	# An in-place `cp` overwrite reuses the existing /usr/local/bin/$(BIN) inode,
+	# whose ad-hoc code signature the kernel cached on a prior exec. The new bytes
+	# then fail cs validation ("Taskgated Invalid Signature") and the process is
+	# SIGKILLed at launch on Apple Silicon (CODESIGNING corpse, "Code Signature
+	# Invalid"), even though `codesign --verify` passes on disk. rm + cp forces a
+	# new inode with no stale cache.
+	sudo rm -f /usr/local/bin/$(BIN)
 	sudo cp ./$(BIN) /usr/local/bin/
 	@echo "Verifying codesign on /usr/local/bin/$(BIN)..."
 	@codesign -dvv /usr/local/bin/$(BIN) 2>&1 | grep "Identifier=com.dsbasko.dndmode" && echo "PASS: codesign identifier matches" || (echo "FAIL: codesign verification" && exit 1)
