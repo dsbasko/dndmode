@@ -87,7 +87,14 @@ func TestMain(m *testing.M) {
 func dndmodeCmd(t *testing.T, ctx context.Context, tmpHome string) (*exec.Cmd, *syncBuffer, *syncBuffer) {
 	t.Helper()
 
-	cmd := exec.CommandContext(ctx, dndmodeBinary)
+	// --debug un-silences dndmode's console output. It is passed by DEFAULT here
+	// because every acceptance assertion below observes a banner, a diagnostic,
+	// or a `released releaser=...` log line — all of which are suppressed in the
+	// production-default silent mode (see gatedWriter / config.Config.Debug). The
+	// silent default itself is verified separately by TestAcceptance_SilentByDefault
+	// (raw binary, no --debug) and TestAcceptance_DebugConfigKey_EnablesOutput
+	// (config `debug: true`, no flag).
+	cmd := exec.CommandContext(ctx, dndmodeBinary, "--debug")
 	// Replace HOME only — config.NewLoader uses os.UserHomeDir which honors
 	// $HOME on Darwin. We DO NOT replace the rest of the environment so that
 	// the Go toolchain caches stay where they are (the binary is already
@@ -120,6 +127,121 @@ func (s *syncBuffer) String() string {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.buf.String()
+}
+
+// TestAcceptance_SilentByDefault is the headline security-property test for the
+// debug output gate: WITHOUT --debug (and without `debug: true` in config),
+// dndmode must emit NOTHING to stdout or stderr — most importantly it must never
+// print the startup banner (`dndmode: config=... hotkey=...`), which would leak
+// the unlock hotkey to a bystander when overlay_style is `none` or `glass` (the
+// terminal stays visible while active). It uses overlay_style=none so the run
+// reaches its active state on ANY arm64 host without GUI/TCC/Shortcuts gates,
+// proven by the caffeinate child appearing; then SIGINT for a clean, silent exit.
+//
+// Unlike every other acceptance test this one launches the RAW binary (NOT via
+// dndmodeCmd, which injects --debug) precisely to exercise the production
+// default.
+func TestAcceptance_SilentByDefault(t *testing.T) {
+	tmpHome := t.TempDir()
+	cfgDir := filepath.Join(tmpHome, ".config", "dndmode")
+	if err := os.MkdirAll(cfgDir, 0o700); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(cfgDir, "config.yml"),
+		[]byte("hotkey: Ctrl+Option+Cmd+X\noverlay_style: none\n"), 0o600); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	// RAW binary — no --debug. This is the whole point of the test.
+	cmd := exec.CommandContext(ctx, dndmodeBinary)
+	cmd.Env = append(os.Environ(), "HOME="+tmpHome)
+	stdout := &syncBuffer{}
+	stderr := &syncBuffer{}
+	cmd.Stdout = stdout
+	cmd.Stderr = stderr
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+
+	// There is no banner to wait for by design, so prove the process reached its
+	// active state a different way: none mode spawns a caffeinate child once past
+	// the Step 8a branch.
+	if pid := caffeinateChildPID(cmd.Process.Pid, 10*time.Second); pid == 0 {
+		_ = cmd.Process.Kill()
+		_ = cmd.Wait()
+		t.Fatalf("none mode never spawned caffeinate (did it reach active?):\nstdout=%q\nstderr=%q",
+			stdout.String(), stderr.String())
+	}
+
+	// Core assertion: zero console output while active.
+	if s := stdout.String(); s != "" {
+		t.Errorf("stdout NOT empty without --debug (leak risk — banner must be gated): %q", s)
+	}
+	if s := stderr.String(); s != "" {
+		t.Errorf("stderr NOT empty without --debug (must be silent): %q", s)
+	}
+
+	// Clean shutdown — the cleanup banner must stay silent too.
+	if err := cmd.Process.Signal(syscall.SIGINT); err != nil {
+		t.Fatalf("SIGINT: %v", err)
+	}
+	waitWithTimeout(t, cmd, 10*time.Second)
+	if code := cmd.ProcessState.ExitCode(); code != 0 {
+		t.Errorf("exit code = %d, want 0", code)
+	}
+	if s := stdout.String(); s != "" {
+		t.Errorf("stdout NOT empty after clean exit without --debug (cleanup banner must be gated): %q", s)
+	}
+	if s := stderr.String(); s != "" {
+		t.Errorf("stderr NOT empty after clean exit without --debug: %q", s)
+	}
+}
+
+// TestAcceptance_DebugConfigKey_EnablesOutput verifies the YAML `debug: true`
+// knob re-enables console output WITHOUT the --debug flag: the config banner and
+// the caffeinate-only active banner appear on stdout. This covers the "yaml"
+// half of the "yaml или флаг" requirement (the flag half is exercised by every
+// other test through dndmodeCmd's injected --debug). Uses overlay_style=none so
+// it runs on any arm64 host without PreFlight gates.
+func TestAcceptance_DebugConfigKey_EnablesOutput(t *testing.T) {
+	tmpHome := t.TempDir()
+	cfgDir := filepath.Join(tmpHome, ".config", "dndmode")
+	if err := os.MkdirAll(cfgDir, 0o700); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(cfgDir, "config.yml"),
+		[]byte("hotkey: Ctrl+Option+Cmd+X\noverlay_style: none\ndebug: true\n"), 0o600); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	// RAW binary, NO --debug flag — only the config key may enable output.
+	cmd := exec.CommandContext(ctx, dndmodeBinary)
+	cmd.Env = append(os.Environ(), "HOME="+tmpHome)
+	stdout := &syncBuffer{}
+	stderr := &syncBuffer{}
+	cmd.Stdout = stdout
+	cmd.Stderr = stderr
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	defer func() {
+		_ = cmd.Process.Kill()
+		_ = cmd.Wait()
+	}()
+
+	if !waitForStdout(stdout, "active (caffeinate-only", 10*time.Second) {
+		t.Fatalf("debug:true config did not re-enable the active banner:\nstdout:\n%s\nstderr:\n%s",
+			stdout.String(), stderr.String())
+	}
+	if out := stdout.String(); !strings.Contains(out, "dndmode: config=") {
+		t.Errorf("stdout missing config banner despite debug:true: %s", out)
+	}
 }
 
 func TestAcceptance_DefaultConfigCreatedOnMissing(t *testing.T) {

@@ -81,6 +81,17 @@ type Config struct {
 	// which syncs across the user's Apple devices via iCloud. The audio mute
 	// above replaces Focus's only local contribution (silencing sounds).
 	Focus bool `yaml:"focus"`
+	// Debug default false makes dndmode SILENT: it emits NOTHING to stdout or
+	// stderr (no banners, no diagnostics, no slog logging) and communicates
+	// outcome only through the process exit code. `debug: true` un-silences the
+	// full console output. Rationale: with overlay_style `none` or `glass` the
+	// terminal stays visible while dndmode is active, so the startup banner would
+	// otherwise leak the unlock hotkey to a bystander — the security stance
+	// is "reveal nothing" unless the operator explicitly opts into
+	// debugging. The --debug CLI flag is the per-run equivalent; either source
+	// enables output. Absent key => false via the Go zero value; yaml.Strict()
+	// accepts it now that it is a declared field.
+	Debug bool `yaml:"debug"`
 }
 
 // NormalizeOverlayStyle is the single source of the empty=>black rule: it
