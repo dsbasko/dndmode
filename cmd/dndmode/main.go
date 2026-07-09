@@ -115,6 +115,54 @@ func resolveBoolFlag(flagVal string, configDefault bool) (bool, error) {
 	return strconv.ParseBool(flagVal)
 }
 
+// parseTimer resolves the --timer flag's raw string into an auto-disable
+// duration. An empty string (the common case — the operator did not pass
+// --timer) returns 0 with no error, meaning "no deadline: run until hotkey or
+// signal". A non-empty value is parsed with time.ParseDuration, so it takes the
+// same grammar as any Go duration ("30m", "1h30m", "90s"); a parse failure or a
+// non-positive result (0 or negative — nonsensical for a countdown) returns an
+// error whose message main() embeds in a --timer-naming stderr line before
+// exiting 1, mirroring how resolveBoolFlag / config.ValidateOverlayStyle surface
+// bad flag values. Kept pure (no side effects) so it is unit-tested directly
+// (Test_parseTimer) like resolveBoolFlag.
+func parseTimer(flagVal string) (time.Duration, error) {
+	if flagVal == "" {
+		return 0, nil
+	}
+	d, err := time.ParseDuration(flagVal)
+	if err != nil {
+		return 0, err
+	}
+	if d <= 0 {
+		return 0, fmt.Errorf("must be positive (e.g. 30m, 1h30m, 90s)")
+	}
+	return d, nil
+}
+
+// armTimer starts a one-shot timer that auto-disables dndmode after d by calling
+// stop — the signal.NotifyContext cancel — so expiry drives the EXACT clean
+// shutdown path as the unlock hotkey or a signal: ctx cancels → cocoa.RunApp's
+// watcher posts the synthetic stop event and [NSApp run] returns nil (full mode)
+// / the caffeinate select wakes on ctx.Done() (none mode) → LIFO Cleanup → exit
+// 0. A non-positive d disarms the timer (returns a no-op func) so callers can
+// pass an unresolved --timer unconditionally. The returned func stops the timer
+// and MUST be deferred by the caller: an early exit (hotkey/signal before expiry)
+// would otherwise leave a stray AfterFunc goroutine armed to fire stop after
+// run() has already returned. stop is idempotent (supervisor sync.Once +
+// ctx.cancel), so a benign race between a near-simultaneous signal and the timer
+// is harmless. time.AfterFunc runs its callback on its own goroutine; stop is
+// documented thread-safe.
+func armTimer(d time.Duration, stop func(), log *slog.Logger) func() {
+	if d <= 0 {
+		return func() {}
+	}
+	t := time.AfterFunc(d, func() {
+		log.Info("auto-disable timer elapsed; shutting down", slog.Duration("after", d))
+		stop()
+	})
+	return func() { t.Stop() }
+}
+
 func main() {
 	os.Exit(run())
 }
@@ -228,6 +276,17 @@ func run() int {
 	// strconv.ParseBool at Step 8b; junk → exitConfigErr (mirrors invalid --style).
 	muteFlag := flag.String("mute", "", "override mute for this run (true|false); empty = use config")
 	focusFlag := flag.String("focus", "", "override focus/DND for this run (true|false); empty = use config")
+	// --timer sets a per-run auto-disable deadline: after the given Go duration
+	// (time.ParseDuration grammar — "30m", "1h30m", "90s") elapses while dndmode is
+	// ACTIVE, dndmode tears down and exits 0 exactly as if the unlock hotkey were
+	// pressed. Empty (the default) means no deadline — run until the hotkey or a
+	// signal (SIGINT/SIGTERM/SIGHUP). Per-run ONLY: there is intentionally no config
+	// key (a persistent auto-off default would surprise; typing --timer is the
+	// deliberate opt-in). Works for EVERY overlay_style, including none/caffeinate,
+	// because the timer merely triggers the same ctx-cancel shutdown both modes
+	// already await (see armTimer). Parsed at Step 5b.2 via parseTimer; junk /
+	// non-positive → exitConfigErr (mirrors invalid --style), naming --timer.
+	timerFlag := flag.String("timer", "", "auto-disable after this long, then exit 0 (Go duration, e.g. 30m, 1h30m, 90s); empty = run until hotkey/signal")
 	flag.Parse()
 	// Raise the output gate for the whole run when --debug is set. `debug: true`
 	// in config can also raise it after Load (Step 5); either source enables
@@ -308,11 +367,29 @@ func run() int {
 	}
 	overlayStyle = config.NormalizeOverlayStyle(overlayStyle)
 
+	// --- Step 5b.2: Resolve + validate the auto-disable timer (flag-only) ---
+	// The timer is a per-run flag with no config key, so there is nothing to fall
+	// back to: an empty flag means "no deadline". A non-empty value is validated
+	// HERE — before the signal ctx, platform check, none-mode branch, and every
+	// permission prompt — so a typo (e.g. --timer 5x) fails fast with exit 1 instead
+	// of after the user has already granted Accessibility. timerDur == 0 disarms the
+	// timer; armTimer (full path Step 18 / runCaffeinateOnly) no-ops on it. The
+	// stderr template names --timer as the source, mirroring the invalid --style
+	// branch above.
+	timerDur, err := parseTimer(*timerFlag)
+	if err != nil {
+		fmt.Fprintf(errW, "dndmode: invalid --timer %q: %v.\n", *timerFlag, err)
+		return exitConfigErr
+	}
+
 	// --- Step 6: Print banner (stdout-only) ---
 	if created {
 		fmt.Fprintf(outW, "dndmode: created default config at %s\n", cfgPath)
 	}
 	fmt.Fprintf(outW, "dndmode: config=%s hotkey=%s overlay_style=%s (%s)\n", cfgPath, cfg.Hotkey, overlayStyle, styleSource)
+	if timerDur > 0 {
+		fmt.Fprintf(outW, "dndmode: timer=%s — auto-disable after this long\n", timerDur)
+	}
 
 	// --- Step 3 (Phase 3): signal-driven ctx ---
 	// signal.NotifyContext converts SIGINT/SIGTERM/SIGHUP into ctx cancellation.
@@ -354,7 +431,7 @@ func run() int {
 	// top of run) still apply, so the caffeinate child is torn down and the
 	// stdout cleanup banner still prints on exit.
 	if overlayStyle == config.OverlayStyleNone {
-		return runCaffeinateOnly(ctx, cfg.AllowDisplaySleep, rs, log, outW, errW)
+		return runCaffeinateOnly(ctx, stop, cfg.AllowDisplaySleep, timerDur, rs, log, outW, errW)
 	}
 
 	// --- Step 8b: resolve effective mute / focus (flag overrides config) ---
@@ -717,6 +794,17 @@ func run() int {
 		panic("test panic (DNDMODE_TEST_PANIC=1)")
 	}
 
+	// --- Step 17.9: Arm the per-run auto-disable timer (any overlay_style) ---
+	// When --timer was given (timerDur > 0), start the countdown NOW — the moment
+	// dndmode is fully active — not at launch, so the time the operator spent
+	// granting permissions never eats into the deadline. On expiry armTimer cancels
+	// ctx (via stop, the signal.NotifyContext cancel), driving the SAME clean
+	// shutdown as the unlock hotkey or SIGINT (Step 19's cocoa.RunApp returns nil →
+	// sup.Wait → deferred LIFO Cleanup → exit 0). defer disarms it so an EARLY exit
+	// (hotkey/signal before expiry) leaves no stray AfterFunc goroutine armed.
+	stopTimer := armTimer(timerDur, stop, log)
+	defer stopTimer()
+
 	// --- Step 18 (Phase 3): Active state banner (P2: AFTER controller create) ---
 	fmt.Fprintln(outW, "dndmode: active. press Ctrl-C.")
 
@@ -773,7 +861,11 @@ func run() int {
 // outW/errW are the caller's debug-gated stdout/stderr writers (silent unless
 // --debug or `debug: true`); the caffeinate-only path prints its active banner
 // and any start error through them so none mode honors the same gate.
-func runCaffeinateOnly(ctx context.Context, allowDisplaySleep bool, rs *state.RestoreState, log *slog.Logger, outW, errW io.Writer) int {
+//
+// stop is the signal.NotifyContext cancel; timerDur (from --timer) arms the same
+// auto-disable countdown as the full path — on expiry armTimer cancels ctx and
+// the select below wakes on ctx.Done() for a clean exit 0. timerDur == 0 disarms.
+func runCaffeinateOnly(ctx context.Context, stop func(), allowDisplaySleep bool, timerDur time.Duration, rs *state.RestoreState, log *slog.Logger, outW, errW io.Writer) int {
 	proc, err := caffeinate.Start(ctx, os.Getpid(), allowDisplaySleep, log)
 	if err != nil {
 		// A signal can cancel ctx in the small window before caffeinate.Start
@@ -789,6 +881,13 @@ func runCaffeinateOnly(ctx context.Context, allowDisplaySleep bool, rs *state.Re
 		return exitPlatformErr
 	}
 	rs.Push(proc) // released on Cleanup (LIFO); Name() == "caffeinate"
+
+	// Arm the per-run auto-disable timer for none mode too (--timer works for any
+	// overlay_style). Same mechanism as the full path: on expiry stop() cancels
+	// ctx, the select below wakes on ctx.Done(), Cleanup tears down caffeinate →
+	// exit 0. Disarmed on return so an early SIGINT leaves no armed timer.
+	stopTimer := armTimer(timerDur, stop, log)
+	defer stopTimer()
 
 	fmt.Fprintln(outW, "dndmode: active (caffeinate-only, no overlay). press Ctrl-C.")
 

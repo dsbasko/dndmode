@@ -100,7 +100,8 @@ v2).
 
 - **Start:** `dndmode` (foreground; the terminal blocks until the session ends).
 - **Exit:** press the configured hotkey (default `Ctrl+Option+Cmd+X`), or `Ctrl-C`
-  in the terminal where dndmode runs.
+  in the terminal where dndmode runs, or set an automatic deadline with `--timer`
+  (see below).
 - **Configuration:** `~/.config/dndmode/config.yml` (created on first run with the
   default hotkey).
 - **Mute / Focus:** `mute: true` (default) silences system audio for the session
@@ -128,6 +129,16 @@ v2).
   is ignored. Omit the flag to use whatever the config says. Under `--debug` /
   `debug: true` the startup banner reports the effective style and its source,
   e.g. `overlay_style=glass (flag)` (silent otherwise — see below).
+- **Auto-disable timer:** `dndmode --timer <duration>` ends the session
+  automatically after the given [Go duration](https://pkg.go.dev/time#ParseDuration)
+  (`30m`, `1h30m`, `90s`) — a clean shutdown identical to pressing the unlock
+  hotkey (exit `0`). The countdown starts once dndmode is **active**, so time spent
+  granting permissions never eats into it. Works with **every** `overlay_style`,
+  including `none`. Per-run **only** — there is intentionally no config key (typing
+  `--timer` is the deliberate opt-in); omit it to run until the hotkey or `Ctrl-C`.
+  An invalid or non-positive value (`--timer 5x`, `--timer 0`) exits with the
+  config-error code, same as an invalid `--style`. Under `--debug` / `debug: true`
+  the startup banner reports the armed deadline, e.g. `timer=30m`.
 - **Awake-only mode (`none`):** `overlay_style: none` (or `dndmode --style none`)
   turns dndmode into a thin [`caffeinate(8)`](x-man-page://caffeinate) wrapper —
   it does **not** mute audio, does **not** enable Do Not Disturb, does **not**
