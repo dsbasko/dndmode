@@ -882,6 +882,71 @@ func TestAcceptance_StyleNone_ChildDeath_ExitsNonZero(t *testing.T) {
 	}
 }
 
+// TestAcceptance_TimerFlag_AutoDisables is the headline --timer happy path: with
+// `--timer 2s` and NO signal, dndmode must tear itself down and exit 0 once the
+// deadline elapses — a clean shutdown identical to the unlock hotkey. It runs in
+// none mode (`--style=none`) so it reaches active on ANY arm64 host without
+// TCC/display/Shortcuts gates; the auto-disable mechanism (ctx-cancel via the
+// AfterFunc) is shared with the full overlay path. Asserts the `timer=2s` banner,
+// the process self-exits within a bounded window, exit 0, and the cleanup banner.
+func TestAcceptance_TimerFlag_AutoDisables(t *testing.T) {
+	tmpHome := t.TempDir()
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	cmd, stdout, stderr := dndmodeCmd(t, ctx, tmpHome)
+	cmd.Args = append(cmd.Args, "--style=none", "--timer=2s")
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+
+	if !waitForStdout(stdout, "active (caffeinate-only", 10*time.Second) {
+		_ = cmd.Process.Kill()
+		_ = cmd.Wait()
+		t.Fatalf("did not see caffeinate-only banner:\nstdout:\n%s\nstderr:\n%s", stdout.String(), stderr.String())
+	}
+
+	// The banner must have surfaced the armed timer (proves --timer was parsed and
+	// armed, not silently dropped).
+	if out := stdout.String(); !strings.Contains(out, "timer=2s") {
+		t.Errorf("stdout missing 'timer=2s' banner (armed timer must be reported under --debug): %s", out)
+	}
+
+	// No signal is sent — the --timer 2s deadline ALONE must end the process. Bound
+	// the wait well above 2s but below the ctx timeout so a hung run fails loudly
+	// rather than being killed by the outer context.
+	waitWithTimeout(t, cmd, 15*time.Second)
+
+	if code := cmd.ProcessState.ExitCode(); code != 0 {
+		t.Errorf("exit code = %d, want 0 (timer auto-disable is a clean shutdown)", code)
+	}
+	if out := stdout.String(); !strings.Contains(out, "cleaning up… done.") {
+		t.Errorf("stdout missing cleanup banner after timer fired: %s", out)
+	}
+}
+
+// TestAcceptance_InvalidTimerFlag_ExitOne verifies --timer is value-validated
+// through parseTimer (Step 5b.2): a junk value exits 1 (exitConfigErr) with a
+// source-naming stderr line, BEFORE any platform/permission gate — mirroring
+// TestAcceptance_InvalidStyleFlag_ExitOne / TestAcceptance_InvalidMuteFlag_ExitOne.
+func TestAcceptance_InvalidTimerFlag_ExitOne(t *testing.T) {
+	tmpHome := t.TempDir()
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	cmd, _, stderr := dndmodeCmd(t, ctx, tmpHome)
+	cmd.Args = append(cmd.Args, "--timer=5x")
+	if err := cmd.Run(); err == nil {
+		t.Fatal("expected non-zero exit for invalid --timer, got nil")
+	}
+	if exitCode := cmd.ProcessState.ExitCode(); exitCode != 1 {
+		t.Errorf("exit code = %d, want 1 (invalid --timer value)", exitCode)
+	}
+	if s := stderr.String(); !strings.Contains(s, "invalid --timer") {
+		t.Errorf("stderr missing 'invalid --timer' marker: %s", s)
+	}
+}
+
 // caffeinateChildPID polls pgrep for a caffeinate process parented by ppid and
 // returns its pid (0 if none appears within timeout).
 func caffeinateChildPID(ppid int, timeout time.Duration) int {
