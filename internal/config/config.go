@@ -180,6 +180,94 @@ func (l *Loader) Load() (Config, bool, error) {
 	return cfg, false, nil
 }
 
+// defaultConfigTemplate is the fully-commented config.yml written on first
+// run. It documents EVERY config field with its purpose, default,
+// and accepted values so the user can self-serve without opening the README.
+//
+// Only `hotkey` is an ACTIVE key; every other field is shown commented-out at
+// its default value. This is load-bearing, not cosmetic: an absent key is
+// what carries the documented default (mute nil => true via NormalizeMute,
+// focus false, overlay_style "" => black, allow_display_sleep/debug false), so
+// uncommenting a line only ever *overrides* a default rather than re-stating
+// it. It also keeps the yaml.Strict() round-trip in Load() parsing the written
+// file as hotkey-only (comments are ignored by the parser). The single %s is
+// the hotkey value (DefaultHotkey unless a caller overrides it).
+//
+// NOTE: no literal '%' may appear below except the one %s — the template is
+// fed through fmt.Sprintf. `timer` is intentionally absent: it is a per-run
+// --timer flag only, never a config key.
+const defaultConfigTemplate = `# dndmode configuration
+# Location: ~/.config/dndmode/config.yml  (auto-created on first run)
+#
+# Every field except 'hotkey' is OPTIONAL. Uncomment a line and change its
+# value to override the default shown next to it. Unknown keys are REJECTED
+# (strict parsing): a typo aborts startup with an error pointing at the line.
+# Most fields also have a per-run CLI flag that overrides the file for that
+# launch only.
+
+# --- hotkey (REQUIRED) -------------------------------------------------------
+# Key combination that unlocks and exits the locked state.
+# Grammar: "<mod>+<mod>+...+<key>" — one or more modifiers plus exactly one key.
+#   Modifiers (case-insensitive): ctrl, option, cmd, shift, fn
+#   Keys: a-z, 0-9, f1-f12, space, return (alias enter), tab, escape (alias
+#         esc), delete, forwarddelete, left, right, up, down,
+#         and the punctuation - = [ ] ; ' , . / \ backtick
+# Matched by PHYSICAL key position, so RU / AZERTY layouts behave identically.
+# Modifier-only combinations are rejected (you must include one real key).
+hotkey: %s
+
+# --- overlay_style -----------------------------------------------------------
+# Look of the full-screen shield that covers every attached display.
+#   black  : opaque black shield (default). Nothing bleeds through.
+#   matrix : animated green "digital rain" over the black shield (cosmetic
+#            only; every blocking guarantee is identical to black).
+#   glass  : TRANSPARENT frosted glass — the blurred desktop shows through.
+#            Trades the no-bleed-through guarantee for the look; keyboard and
+#            trackpad are still fully blocked.
+#   none   : awake-only mode. NO overlay, NO input blocking, NO Focus, NO audio
+#            mute — dndmode just holds the machine awake (like caffeinate).
+#            Needs no Accessibility permission; exit with Ctrl-C only (there is
+#            no hotkey because there is no event tap to observe it).
+# Per-run override: --style <value>
+# overlay_style: black
+
+# --- allow_display_sleep -----------------------------------------------------
+# INVERTED toggle controlling the DISPLAY (the system stays awake either way).
+#   false : keep the display awake too (default).
+#   true  : let the display dim / sleep while background work keeps running —
+#           saves the panel when you only need the machine, not the screen.
+# allow_display_sleep: false
+
+# --- mute --------------------------------------------------------------------
+# System audio muting for the session.
+#   true  : mute on start, restore the prior volume on exit (default). Audio
+#           already muted before start is left muted — the session never
+#           unmutes what it did not mute.
+#   false : leave the volume untouched.
+# Ignored entirely in overlay_style 'none'. Per-run override: --mute=true|false
+# mute: true
+
+# --- focus -------------------------------------------------------------------
+# Do Not Disturb Focus (opt-in).
+#   false : leave Focus untouched (default).
+#   true  : toggle the 'dndmode-on' / 'dndmode-off' Shortcuts, which sync DND
+#           across your Apple devices via iCloud. Those two Shortcuts must
+#           already exist (see README "First-run setup") or startup aborts with
+#           exit code 6.
+# Ignored entirely in overlay_style 'none'. Per-run override: --focus=true|false
+# focus: false
+
+# --- debug -------------------------------------------------------------------
+# Console output gate.
+#   false : SILENT (default). Nothing is printed to stdout / stderr; outcome is
+#           reported through the exit code only. This is a security default —
+#           in 'none' / 'glass' mode the terminal stays visible, so a startup
+#           banner would otherwise leak the unlock hotkey to a bystander.
+#   true  : un-silence the full startup / cleanup banners and debug logging.
+# Per-run equivalent: the --debug flag (either source enables output).
+# debug: false
+`
+
 // writeDefault creates the parent directory (0o700) and writes the default
 // config via atomic tmp+rename (protects against concurrent dndmode
 // starts; the loser of the rename race still ends up with a valid file).
@@ -195,12 +283,14 @@ func writeDefault(path string, cfg Config) error {
 	if err := os.MkdirAll(dir, configDirPerm); err != nil {
 		return fmt.Errorf("mkdir parent %s: %w", dir, err)
 	}
-	// V1 schema is a single string field, so we hand-format the YAML rather
-	// than calling yaml.Marshal. This keeps writeDefault free of a defensive
-	// "marshal error" branch that is unreachable for Config{Hotkey: string}
-	// and shrinks the surface that has to be tested. yaml.Strict() in Load
+	// We hand-format the YAML from a documented template rather than calling
+	// yaml.Marshal: Marshal would drop the comments (the whole point of the
+	// generated file is the inline field documentation) and would emit every
+	// zero-value key uncommented, which would flip the absent-key defaults
+	// (mute, focus, ...). Only `hotkey` is interpolated; all other fields stay
+	// commented so their defaults come from key-absence. yaml.Strict() in Load
 	// re-parses our output round-trip, so any drift would surface there.
-	body := []byte(fmt.Sprintf("hotkey: %s\n", cfg.Hotkey))
+	body := []byte(fmt.Sprintf(defaultConfigTemplate, cfg.Hotkey))
 	base := filepath.Base(path)
 	tmpFile, err := os.CreateTemp(dir, base+".tmp.*")
 	if err != nil {
