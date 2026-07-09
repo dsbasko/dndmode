@@ -380,7 +380,7 @@ func TestController_Debounce_TrailingEdge(t *testing.T) {
 
 	creates0 := td.factory.CreateCount()
 	// Fire 5 events in 30ms — all within debounce window.
-	for i := 0; i < 5; i++ {
+	for range 5 {
 		td.controller.onScreensChanged()
 		time.Sleep(5 * time.Millisecond)
 	}
@@ -619,7 +619,7 @@ func TestController_CursorHide(t *testing.T) {
 				// Three hot-plug rebuilds via reconcile(false) (the inline
 				// dispatcher runs synchronously, so no debounce sleep needed).
 				td.enumerator.set([]uint32{3})
-				for i := 0; i < 3; i++ {
+				for i := range 3 {
 					if err := td.controller.reconcile(false); err != nil {
 						t.Fatalf("reconcile(false) #%d: %v", i+1, err)
 					}
@@ -665,4 +665,3 @@ func TestController_CursorHide(t *testing.T) {
 		})
 	}
 }
-
