@@ -290,7 +290,7 @@ func writeDefault(path string, cfg Config) error {
 	// (mute, focus, ...). Only `hotkey` is interpolated; all other fields stay
 	// commented so their defaults come from key-absence. yaml.Strict() in Load
 	// re-parses our output round-trip, so any drift would surface there.
-	body := []byte(fmt.Sprintf(defaultConfigTemplate, cfg.Hotkey))
+	body := fmt.Appendf(nil, defaultConfigTemplate, cfg.Hotkey)
 	base := filepath.Base(path)
 	tmpFile, err := os.CreateTemp(dir, base+".tmp.*")
 	if err != nil {

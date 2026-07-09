@@ -601,8 +601,8 @@ func TestLoader_Load_DefaultConfigNormalizesMuteFocus(t *testing.T) {
 // expose Watch/Reload/Subscribe/OnChange/WatchFile methods. This regression
 // guard catches accidental additions silently breaking the contract.
 func TestLoader_NoHotReload_NoWatchMethod(t *testing.T) {
-	loader := config.NewLoader("/dev/null")
-	rt := reflect.TypeOf(loader)
+	_ = config.NewLoader("/dev/null")
+	rt := reflect.TypeFor[*config.Loader]()
 	forbidden := []string{"Watch", "Reload", "Subscribe", "OnChange", "WatchFile"}
 	for _, name := range forbidden {
 		if _, ok := rt.MethodByName(name); ok {
@@ -694,7 +694,7 @@ func TestLoader_Load_AtomicWriteUnderConcurrentStart(t *testing.T) {
 	results := make([]config.Config, N)
 	errs := make([]error, N)
 
-	for i := 0; i < N; i++ {
+	for i := range N {
 		wg.Add(1)
 		go func(idx int) {
 			defer wg.Done()

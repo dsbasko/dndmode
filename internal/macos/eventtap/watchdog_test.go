@@ -43,8 +43,8 @@ func TestWatchdog_Threshold_Triggers_AfterFiveConsecutiveFailures(t *testing.T) 
 	t.Parallel()
 
 	tests := []struct {
-		name       string
-		setupMocks func(d *testDeps)
+		name         string
+		setupMocks   func(d *testDeps)
 		validateResp func(t *testing.T, got probeResult)
 	}{
 		{
@@ -65,7 +65,7 @@ func TestWatchdog_Threshold_Triggers_AfterFiveConsecutiveFailures(t *testing.T) 
 			name: "probe_4_false_still_below_threshold",
 			setupMocks: func(d *testDeps) {
 				// pre-seed 3 failures so this call is the 4th
-				for i := 0; i < 3; i++ {
+				for range 3 {
 					d.state.Probe(false)
 				}
 			},
@@ -79,7 +79,7 @@ func TestWatchdog_Threshold_Triggers_AfterFiveConsecutiveFailures(t *testing.T) 
 			name: "probe_5_false_trips_threshold",
 			setupMocks: func(d *testDeps) {
 				// pre-seed 4 failures so this call is the 5th
-				for i := 0; i < 4; i++ {
+				for i := range 4 {
 					if _, th := d.state.Probe(false); th {
 						t.Fatalf("threshold tripped early at i=%d", i)
 					}
@@ -94,7 +94,6 @@ func TestWatchdog_Threshold_Triggers_AfterFiveConsecutiveFailures(t *testing.T) 
 	}
 
 	for _, tt := range tests {
-		tt := tt
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 			d := newTestDeps(t)
@@ -116,7 +115,7 @@ func TestWatchdog_HealthyProbe_ResetsCounter(t *testing.T) {
 	d := newTestDeps(t)
 
 	// Phase 1: feed 4 failures. None should trip.
-	for i := 0; i < 4; i++ {
+	for i := range 4 {
 		_, threshold := d.state.Probe(false)
 		if threshold {
 			t.Fatalf("threshold tripped at failure #%d, want untouched", i+1)
@@ -139,7 +138,7 @@ func TestWatchdog_HealthyProbe_ResetsCounter(t *testing.T) {
 	}
 
 	// Phase 4: 3 more failures — total 4 since reset; STILL no threshold.
-	for i := 0; i < 3; i++ {
+	for i := range 3 {
 		_, threshold = d.state.Probe(false)
 		if threshold {
 			t.Fatalf("threshold tripped at post-reset failure #%d, want untouched until 5th", i+2)
@@ -170,7 +169,7 @@ func TestWatchdog_Threshold_Idempotent(t *testing.T) {
 	d := newTestDeps(t)
 
 	// Trip the threshold.
-	for i := 0; i < 4; i++ {
+	for i := range 4 {
 		if _, th := d.state.Probe(false); th {
 			t.Fatalf("threshold tripped early at i=%d", i)
 		}
@@ -265,8 +264,8 @@ func TestWatchdog_PollThreshold_TripsWatchdogTrippedAndSink(t *testing.T) {
 	// for race-freedom without forcing them onto a serial schedule.
 
 	tests := []struct {
-		name       string
-		setupMocks func(d *pollerTestDeps)
+		name         string
+		setupMocks   func(d *pollerTestDeps)
 		validateResp func(t *testing.T, d *pollerTestDeps, sinkRecv bool, sinkDuration time.Duration)
 	}{
 		{
@@ -312,7 +311,6 @@ func TestWatchdog_PollThreshold_TripsWatchdogTrippedAndSink(t *testing.T) {
 	}
 
 	for _, tt := range tests {
-		tt := tt
 		t.Run(tt.name, func(t *testing.T) {
 			// Reset the package-level latch before EACH subtest to keep
 			// them order-independent. Mirrors what StartWatchdog does in
