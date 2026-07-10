@@ -61,11 +61,23 @@ void* cocoa_create_overlay_window(uint32_t displayID, const char* style, char** 
         return NULL;
     }
 
+    // CRITICAL multi-monitor fix: initWithContentRect:...:screen: interprets the
+    // contentRect origin RELATIVE to `target`'s bottom-left corner, NOT in the
+    // global screen coordinate system (per Apple docs: "The origin is relative to
+    // the origin of the provided screen"). Passing [target frame] — whose origin
+    // is ALREADY the screen's global origin — therefore DOUBLE-OFFSETS the window
+    // by that origin. The primary display (origin 0,0) lands correctly, but every
+    // secondary display (non-zero, possibly negative origin) gets shoved that far
+    // off itself and is left UNCOVERED. Pass a screen-LOCAL rect (origin 0,0 +
+    // the screen's size) so the window covers exactly `target` on any display.
+    NSRect frame = [target frame];                         // global frame (origin + size)
     NSWindow *w = [[NSWindow alloc]
-        initWithContentRect:[target frame]                // full physical frame
-                  styleMask:NSWindowStyleMaskBorderless    // 
-                    backing:NSBackingStoreBuffered         // 
-                      defer:NO                             // 
+        initWithContentRect:NSMakeRect(0, 0,
+                                       frame.size.width,
+                                       frame.size.height)   // screen-LOCAL rect
+                  styleMask:NSWindowStyleMaskBorderless    //
+                    backing:NSBackingStoreBuffered         //
+                      defer:NO                             //
                      screen:target];
 
     if (!w) {
@@ -125,7 +137,29 @@ void* cocoa_create_overlay_window(uint32_t displayID, const char* style, char** 
         }
     }
 
-    [w orderFrontRegardless];                              // 
+    // AUTHORITATIVE positioning: pin the window to the display's exact GLOBAL
+    // frame in absolute (primary-origin-based) screen coordinates. Unlike the
+    // screen-relative initializer above, -setFrame:display: is unambiguous and
+    // consistent across macOS versions, so this is the real coverage guarantee:
+    // whatever AppKit did during init (screen-relative offset, cascade nudge,
+    // constrainFrameRect), this snaps the window back onto `target` in full. The
+    // shield-level set earlier means constrainFrameRect:toScreen: does NOT pull
+    // the top down below the menu bar (that clamp only applies below menu level).
+    [w setFrame:frame display:YES];
+
+    // Opt-in geometry trace for multi-monitor debugging (silent unless the env
+    // var is set — keeps the security-stance "silent by default"). Prints the
+    // TARGET frame vs the ACTUAL window frame so a mismatch (offset/shrink) is
+    // visible at a glance: `DNDMODE_TRACE_SCREENS=1 dndmode --debug`.
+    if (getenv("DNDMODE_TRACE_SCREENS")) {
+        NSRect got = [w frame];
+        NSLog(@"[dndmode] displayID=%u scale=%.1f target=(%.0f,%.0f %.0fx%.0f) window=(%.0f,%.0f %.0fx%.0f)",
+              displayID, [target backingScaleFactor],
+              frame.origin.x, frame.origin.y, frame.size.width, frame.size.height,
+              got.origin.x, got.origin.y, got.size.width, got.size.height);
+    }
+
+    [w orderFrontRegardless];                              //
 
     // Transfer ownership to Go side. Go MUST eventually call
     // cocoa_close_overlay_window with this handle to balance the retain.
