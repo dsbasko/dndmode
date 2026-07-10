@@ -1,314 +1,474 @@
 # dndmode
 
-> Lock your unattended Apple Silicon MacBook without interrupting background processes.
+> Lock your unattended Apple Silicon MacBook without killing the work it is doing.
 
-## What is dndmode
+[![Platform](https://img.shields.io/badge/platform-macOS%2014%2B%20%C2%B7%20arm64-black)](#requirements)
+[![Go](https://img.shields.io/badge/Go-1.26-00ADD8)](go.mod)
+[![Network](https://img.shields.io/badge/network-zero%20calls-success)](#no-network)
+[![License](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
 
-`dndmode` is a CLI utility for Apple Silicon macOS that locks the unattended MacBook
-(keyboard/trackpad blocked, black overlay on every connected display) without
-interrupting background processes such as AI agents. The target user is a developer
-running an agent in YOLO mode who needs to step away from the keyboard without
-killing the long-running task and without leaving the machine wide open to a passerby.
+`dndmode` covers every display with a full-screen shield, blocks the keyboard and
+trackpad at the HID level, keeps the Mac awake, and silences it - all while your
+background processes keep running untouched. You step away, the machine looks and
+behaves as if it is locked, and the long job you left running (an AI agent in YOLO
+mode, a build, a render) never gets interrupted. You come back, type your hotkey,
+and everything is exactly where you left it.
+
+It is a foreground CLI. No daemon, no launchd, no menu-bar icon. You run it, you
+watch it, you end it.
+
+```bash
+dndmode            # lock now, run until the unlock hotkey
+dndmode --timer 1h # lock now, auto-unlock after an hour
+```
+
+---
+
+## Contents
+
+- [Why](#why)
+- [How it works](#how-it-works)
+- [Requirements](#requirements)
+- [Install](#install)
+- [First-run setup](#first-run-setup)
+- [Usage](#usage)
+- [Configuration](#configuration)
+- [Overlay styles](#overlay-styles)
+- [Exit codes](#exit-codes)
+- [Threat model](#threat-model)
+- [Troubleshooting](#troubleshooting)
+- [Uninstall](#uninstall)
+- [Building from source](#building-from-source)
+- [Known limitations](#known-limitations)
+- [License](#license)
+
+---
+
+## Why
+
+You are running an AI agent in YOLO mode, or any long unattended task, and you need
+to leave the laptop. Two bad options remain:
+
+- Lock the screen (`Ctrl+Cmd+Q`). Safe, but macOS may suspend or throttle the
+  session, and a locked screen is an invitation to walk away and forget the job
+  is even alive.
+- Leave it open. The job keeps running, but anyone passing by can touch the
+  keyboard, click a dialog, or read what is on screen.
+
+`dndmode` is the third option: the job keeps running at full speed, and the machine
+is covered and inert to input until you return and enter your hotkey. It is a
+soft-lock for cooperative spaces (home, office, a coworking desk), not
+hardware-grade protection - see the [threat model](#threat-model).
 
 ## How it works
 
-- Per-screen `NSWindow` overlay drawn at `CGShieldingWindowLevel()` covers every
-  connected display (built-in + external) and survives Mission Control / Spaces /
-  full-screen apps.
-- HID-level `CGEventTap` intercepts keyboard, mouse, scroll, and media keys
-  (NOTE: placeholder mock in v1.0 — see [Known limitations](#known-limitations-v10)).
-- `IOPMAssertion` (`kIOPMAssertPreventUserIdleSystemSleep`) keeps the system awake
-  for the entire session.
-- System audio is muted for the session (default `mute: true`) and restored on
-  exit, so notification *sounds* and system beeps stay silent while you are away.
-  Notification *banners* never leak visually because the overlay sits above
-  NotificationCenter at `CGShieldingWindowLevel()`.
-- Do Not Disturb Focus is **off by default** (`focus: false`) and opt-in. When
-  enabled, two macOS Shortcuts named `dndmode-on` and `dndmode-off` toggle DND
-  around the locked window. Focus is disabled by default because macOS syncs it
-  across your Apple devices over iCloud ("Share Across Devices"), so turning DND
-  on at the Mac would silently turn it on your iPhone too — there is no API to
-  enable Focus "on this device only".
-- A configurable hotkey (default `Ctrl+Option+Cmd+X`) ends the locked state from
-  the keyboard; `Ctrl-C` in the originating terminal also unwinds cleanly.
+Four layers run for the length of a session, plus a crash-safety layer underneath
+them.
+
+**Shield overlay.** One borderless `NSWindow` per attached display, drawn at
+`CGShieldingWindowLevel()` (above the screen saver) with the collection behavior
+`canJoinAllSpaces | stationary | fullScreenAuxiliary | ignoresCycle`. That places
+the shield over the menu bar, Dock, Mission Control, Spotlight, Cmd+Tab, and the
+Force Quit dialog, on every Space and next to full-screen apps. Plugging or
+unplugging a display, changing resolution, or rearranging monitors rebuilds the
+overlay within 250 ms. The system cursor is hidden while the shield is up.
+
+**Input lock.** A real `CGEventTap` installed at `kCGHIDEventTap` with
+`kCGHeadInsertEventTap` and `kCGEventTapOptionDefault` - the suppression-capable
+mode, not listen-only. Its callback returns `NULL` for all 15 intercepted event
+types (key down/up, modifier changes, every mouse button, drag, move, scroll, and
+system-defined media keys), so nothing reaches WindowServer. Cmd+Tab, Cmd+Q, and
+the rest are dead. Exactly one event passes the filter: a key-down that matches your
+configured unlock hotkey, which is turned into an internal exit signal and is itself
+swallowed so it never leaks into the app underneath. The tap is silent on wrong
+input by design - a watcher gets no side channel. A GCD watchdog probes the tap
+every 5 s and re-enables it if macOS silently disabled it; after 5 consecutive
+failed re-enables (about 25 s) it gives up and ends the session with a distinct exit
+code. An `NSWorkspace` observer re-arms the tap after sleep or fast user switching.
+
+**Awake lock.** One IOKit power assertion named `dndmode active` (visible in
+`pmset -g assertions`). By default it is `kIOPMAssertPreventUserIdleDisplaySleep`,
+so the display stays lit and the system stays awake. Set `allow_display_sleep: true`
+to switch to `kIOPMAssertPreventUserIdleSystemSleep` instead, which lets the display
+idle-off while the system keeps running.
+
+**Silence.** System audio is muted for the session (default `mute: true`) and
+restored on exit, so notification sounds and beeps stay quiet. The mute is
+state-aware: it records whether audio was already muted before the session and never
+unmutes what it did not mute. Notification *banners* never show because the shield
+sits above Notification Center. Do Not Disturb Focus is a separate opt-in
+(`focus: false` by default) covered [below](#focus--do-not-disturb).
+
+**Crash safety.** A snapshot at `~/.config/dndmode/runtime.json` records the pid,
+the assertion id, and the prior audio/Focus state. A second instance detects the
+first and refuses to start (exit 5). If a session is `kill -9`'d, the next launch
+reads the snapshot, releases the orphaned power assertion by its exact id,
+conditionally restores audio and Focus, and deletes the file - so a hard kill never
+leaves the Mac stuck awake or muted.
 
 ## Requirements
 
-- macOS 14 Sonoma or newer.
-- Apple Silicon (`arm64`) — no Intel support.
-- Accessibility + Input Monitoring TCC permissions (granted on first run via
-  System Settings).
-- Two macOS Shortcuts named exactly `dndmode-on` and `dndmode-off` — **only when
-  `focus: true`** (setup instructions in [First-run setup](#first-run-setup)).
-  The default configuration (`focus: false`) does not require any Shortcuts.
-- Go 1.26+ if building from source.
+- macOS 14 (Sonoma) or newer.
+- Apple Silicon (`arm64`). Intel is not supported.
+- Accessibility and Input Monitoring permissions, granted on first run through
+  System Settings. Both are required for the input lock; the awake-only `none` mode
+  needs neither.
+- Two macOS Shortcuts named exactly `dndmode-on` and `dndmode-off`, but only when
+  `focus: true`. The default configuration needs no Shortcuts.
+- Go 1.26+ only if you build from source.
+
+<a id="no-network"></a>The binary makes zero network calls and has no network code
+in its dependency closure. Verify it yourself with `make audit-net` (static
+dependency check) and `make audit-net-runtime` (live socket check against a running
+instance).
 
 ## Install
 
-Pick ONE install path and stay on it — mixing `go install` and `make install`
-yields two separate binaries (`~/go/bin/dndmode` and `/usr/local/bin/dndmode`)
-with different cdhashes, and TCC treats them as different apps (each needs its
-own Accessibility + Input Monitoring grant).
+Pick one install path and stay on it. Mixing `go install` and `make install`
+produces two separate binaries (`~/go/bin/dndmode` and `/usr/local/bin/dndmode`)
+with different code signatures, and macOS TCC treats them as different apps - each
+needs its own Accessibility and Input Monitoring grant.
 
-- **From source (recommended for stable TCC across rebuilds):**
-  ```bash
-  git clone https://github.com/dsbasko/dndmode
-  cd dndmode
-  make install
-  ```
-  Builds with ad-hoc codesign identifier `com.dsbasko.dndmode` and copies the
-  binary to `/usr/local/bin/dndmode` via `sudo cp`. Subsequent
-  `git pull && make install` upgrades preserve TCC grants because the codesign
-  identifier (and therefore cdhash) is stable across rebuilds. Always invoke
-  `/usr/local/bin/dndmode` (ensure `/usr/local/bin` precedes `~/go/bin` in
-  `$PATH`).
-- **Quick (`go install`):** `go install github.com/dsbasko/dndmode@latest`
-  installs the binary into `$(go env GOPATH)/bin/dndmode`. Each
-  `go install ...@latest` rebuild changes the binary's cdhash → TCC re-prompts
-  for Accessibility + Input Monitoring on every upgrade. **Caveat:** running
-  `make install` from a clone afterwards does NOT fix the GOPATH-bin binary —
-  it creates a SECOND binary at `/usr/local/bin/dndmode` with its own (stable)
-  cdhash. If `~/go/bin` precedes `/usr/local/bin` in `$PATH`, you still execute
-  the unstable GOPATH copy. Workaround: either delete the GOPATH copy
-  (`rm "$(go env GOPATH)/bin/dndmode"`), put `/usr/local/bin` first in
-  `$PATH`, or always invoke `/usr/local/bin/dndmode` explicitly. After every
-  subsequent `go install ...@latest` upgrade, re-run `make install` to refresh
-  the `/usr/local/bin` copy. See [Troubleshooting](#troubleshooting) for the
-  cdhash / TCC mechanics.
+**From source (recommended - stable permissions across upgrades):**
 
-Note: Homebrew is **not** supported in v1 (requires Apple Developer ID; deferred to
-v2).
+```bash
+git clone https://github.com/dsbasko/dndmode
+cd dndmode
+make install
+```
+
+`make install` builds with the ad-hoc codesign identifier `com.dsbasko.dndmode` and
+copies the binary to `/usr/local/bin/dndmode`. Because that identifier (and the
+resulting cdhash) is stable across rebuilds, a later `git pull && make install`
+keeps your TCC grants. Make sure `/usr/local/bin` comes before `~/go/bin` in
+`$PATH`, or always call `/usr/local/bin/dndmode` explicitly.
+
+**Quick (`go install`):**
+
+```bash
+go install github.com/dsbasko/dndmode@latest
+```
+
+This drops the binary in `$(go env GOPATH)/bin`. Every `@latest` rebuild changes the
+cdhash, so TCC sees a new app and re-prompts for Accessibility and Input Monitoring
+on each upgrade. If that annoys you, run `make install` from a clone once and use the
+stable `/usr/local/bin` copy. See [Troubleshooting](#tcc-permissions-lost-after-a-go-install-upgrade)
+for the mechanics.
+
+Homebrew is not supported yet - it needs an Apple Developer ID, which is deferred.
 
 ## First-run setup
 
 1. Install dndmode (see [Install](#install)).
-2. Run `dndmode` for the first time. It will prompt for Accessibility permission.
-   Click **Open System Settings** and enable `dndmode` in
-   **Privacy & Security → Accessibility**.
-3. The polling loop will then ask for Input Monitoring. Same flow: enable
-   `dndmode` in **Privacy & Security → Input Monitoring**.
-4. **Only if you want Focus/DND** (`focus: true` in the config, or `--focus=true`):
-   open the **Shortcuts** app. Create a new shortcut: add the **Set Focus**
-   action → choose **Do Not Disturb** → **Turn On Until Turned Off** → save as
-   `dndmode-on`. Repeat with **Turn Off** and save as `dndmode-off`. With the
-   default `focus: false` you can skip this step entirely.
-5. Run `dndmode` again. You should see `dndmode: active. press Ctrl-C.` on stdout.
-   The default hotkey `Ctrl+Option+Cmd+X` exits the locked state. Customize via
-   `~/.config/dndmode/config.yml`.
+2. Run `dndmode`. It prompts for Accessibility. Click **Open System Settings** and
+   enable dndmode under **Privacy & Security → Accessibility**.
+3. It then waits for Input Monitoring. Enable dndmode under
+   **Privacy & Security → Input Monitoring**. There is no system prompt for this one -
+   dndmode opens the pane, and the run continues once you flip the switch.
+4. Only if you want Focus/DND (`focus: true` or `--focus=true`): open the
+   **Shortcuts** app and create two shortcuts. First, add the **Set Focus** action,
+   choose **Do Not Disturb → Turn On Until Turned Off**, save it as `dndmode-on`.
+   Then a second shortcut that turns it **Off**, saved as `dndmode-off`. With the
+   default `focus: false` you can skip this entirely.
+5. Run `dndmode` again. With `--debug` you will see `dndmode: active. press Ctrl-C.`.
+   The default hotkey `Ctrl+Option+Cmd+X` ends the lock.
 
 ## Usage
 
-- **Start:** `dndmode` (foreground; the terminal blocks until the session ends).
-- **Exit:** press the configured hotkey (default `Ctrl+Option+Cmd+X`), or `Ctrl-C`
-  in the terminal where dndmode runs, or set an automatic deadline with `--timer`
-  (see below).
-- **Configuration:** `~/.config/dndmode/config.yml` (created on first run with the
-  default hotkey).
-- **Mute / Focus:** `mute: true` (default) silences system audio for the session
-  and restores it on exit; `focus: false` (default) leaves Do Not Disturb
-  untouched. Override per run with `dndmode --mute=true|false` /
-  `dndmode --focus=true|false` (flag overrides config; empty/omitted = use config).
-  Invalid values exit with the config-error code (and report on stderr **only**
-  under `--debug` / `debug: true` — see [Quiet by default](#quiet-by-default)),
-  same as an invalid `--style` (except in `none` mode, which skips mute/focus
-  entirely — see below). Behavior matrix:
+**Start:** `dndmode`. It runs in the foreground and blocks the terminal until the
+session ends.
 
-  | `mute`     | `focus`    | Behavior                                                                 |
-  | ---------- | ---------- | ------------------------------------------------------------------------ |
-  | **true**   | **false**  | Mute system audio for the session, never touch Focus. iPhone unaffected; no Shortcuts needed. |
-  | true       | true       | Both: mute + Focus (max silence on Mac, DND still syncs to iPhone via iCloud). |
-  | false      | true       | Focus/DND only (legacy v1 behavior).                                     |
-  | false      | false      | Neither — overlay + awake-lock only.                                     |
+**End a session, any of:**
 
-  If audio is **already muted** when dndmode starts, it is left muted on exit
-  (the session never unmutes what it did not mute). Audio mute is recorded in
-  `runtime.json` (`prior_muted`) so crash recovery can restore sound after a
-  `kill -9`.
-- **Overlay style for a single run:** `dndmode --style <black|matrix|glass|none>`
-  overrides `overlay_style` from the config file for that launch only — the YAML
-  is ignored. Omit the flag to use whatever the config says. Under `--debug` /
-  `debug: true` the startup banner reports the effective style and its source,
-  e.g. `overlay_style=glass (flag)` (silent otherwise — see below).
-- **Auto-disable timer:** `dndmode --timer <duration>` ends the session
-  automatically after the given [Go duration](https://pkg.go.dev/time#ParseDuration)
-  (`30m`, `1h30m`, `90s`) — a clean shutdown identical to pressing the unlock
-  hotkey (exit `0`). The countdown starts once dndmode is **active**, so time spent
-  granting permissions never eats into it. Works with **every** `overlay_style`,
-  including `none`. Per-run **only** — there is intentionally no config key (typing
-  `--timer` is the deliberate opt-in); omit it to run until the hotkey or `Ctrl-C`.
-  An invalid or non-positive value (`--timer 5x`, `--timer 0`) exits with the
-  config-error code, same as an invalid `--style`. Under `--debug` / `debug: true`
-  the startup banner reports the armed deadline, e.g. `timer=30m`.
-- **Awake-only mode (`none`):** `overlay_style: none` (or `dndmode --style none`)
-  turns dndmode into a thin [`caffeinate(8)`](x-man-page://caffeinate) wrapper —
-  it does **not** mute audio, does **not** enable Do Not Disturb, does **not**
-  block the keyboard/trackpad (so **no Accessibility permission is needed**), and
-  draws **no overlay** — regardless of `mute`/`focus` config or flags. It
-  only holds a system-awake assertion for as long as dndmode runs. Exit with
-  `Ctrl-C` (there is no hotkey in this mode — there is no event tap to observe
-  one). Under the hood it runs `caffeinate -d -i -s -w <pid>` (`-d` is dropped
-  when `allow_display_sleep: true`); `-w <pid>` ties the assertion to dndmode's
-  lifetime so it self-releases even if dndmode is `kill -9`'d.
-- <a id="quiet-by-default"></a>**Quiet by default:** dndmode prints **nothing** to
-  stdout or stderr — no startup banner, no diagnostics, no logs — and reports
+- Press the unlock hotkey (default `Ctrl+Option+Cmd+X`).
+- Press `Ctrl-C` (or send `SIGTERM`/`SIGHUP`) in the terminal running dndmode.
+- Set a deadline with `--timer` and let it expire.
+
+**Flags.** Every flag is per-run. The tri-state flags fall back to the config file
+when omitted.
+
+| Flag | Values | Default | Effect |
+| --- | --- | --- | --- |
+| `--style` | `black` \| `matrix` \| `glass` \| `none` | config | Overlay look for this run; wins over `overlay_style`. |
+| `--mute` | `true` \| `false` | config | Mute system audio for this run. |
+| `--focus` | `true` \| `false` | config | Toggle Do Not Disturb for this run. |
+| `--timer` | Go duration (`30m`, `1h30m`, `90s`) | off | Auto-unlock after the duration, then exit `0`. |
+| `--debug` | (boolean) | off | Un-silence banners, diagnostics, and logs. |
+
+A few notes on behavior:
+
+- **`--timer`** starts counting once dndmode is active, so time spent granting
+  permissions never eats into it. It works with every overlay style, including
+  `none`. There is deliberately no config key - typing the flag is the opt-in.
+- **Quiet by default.** dndmode prints nothing to stdout or stderr and reports
   outcome only through its [exit code](#exit-codes). This is a security default:
-  with `overlay_style: none` or `glass` the terminal stays visible while dndmode
-  is active, so a printed banner would leak the unlock hotkey to anyone watching
-  the screen. Pass `--debug` (or set `debug: true` in `config.yml`) to un-silence
-  everything — the `config=… hotkey=…` banner, the `active` / cleanup banners, and
-  debug-level logging — e.g. when a run exits non-zero and you need to see why.
-  The `--debug` flag and `debug: true` are equivalent; either enables output, and
-  neither is needed for normal operation.
+  with `glass` or `none` the terminal stays visible while dndmode runs, and a
+  printed banner would leak your unlock hotkey to anyone watching. Pass `--debug`
+  (or set `debug: true`) to turn output back on when a run exits non-zero and you
+  need to see why.
+- **Invalid flag values** (`--timer 5x`, `--mute banana`, `--style neon`) exit with
+  the config-error code `1`, and print the reason on stderr only under `--debug`.
 
-### Exit codes
+## Configuration
 
-| Code | Constant                  | Meaning                                                                      |
-| ---- | ------------------------- | ---------------------------------------------------------------------------- |
-| 0    | `exitOK`                  | Success (clean exit via hotkey or SIGINT).                                   |
-| 1    | `exitConfigErr`           | Config error: bad YAML or modifier-only hotkey in `config.yml`.              |
-| 2    | `exitPlatformErr`         | Platform error: not arm64, macOS < 14, or IOKit fundamentals failed.         |
-| 3    | `exitPermissionDenied`    | SIGINT received while waiting for Accessibility / Input Monitoring grants.   |
-| 4    | `exitSecureInputConflict` | Another app holds Secure Event Input (Terminal sudo, password fields, 1Password). |
-| 5    | `exitConcurrentInstance`  | Another live `dndmode` instance detected (LIFE-12 / orphan IOPMAssertion).   |
-| 6    | `exitFocusSetup`          | Required Shortcuts `dndmode-on` or `dndmode-off` not found — **only checked when `focus: true`**. |
-| 7    | `exitRuntimeJSON`         | Cannot delete stale `~/.config/dndmode/runtime.json` (permission / IO).      |
+The config file lives at `~/.config/dndmode/config.yml` and is created with defaults
+on first run. Only `hotkey` is written as an active key; every other setting is shown
+commented at its default, so uncommenting a line only ever overrides.
+
+```yaml
+# ~/.config/dndmode/config.yml
+
+# Unlock hotkey. Requires at least one modifier plus one key.
+# Modifiers: ctrl, option, cmd, shift, fn.
+# Keys: a-z, 0-9, f1-f12, arrows, space, return/enter, tab, escape/esc,
+#       delete, forwarddelete, and punctuation ( - = [ ] ; ' , . / \ ` ).
+hotkey: Ctrl+Option+Cmd+X
+
+# Overlay look: black (default) | matrix | glass | none
+# overlay_style: black
+
+# false (default) keeps the display awake; true lets it idle-off while the
+# system stays awake. Note the inverted sense of the name.
+# allow_display_sleep: false
+
+# Mute system audio for the session and restore it on exit (default true).
+# mute: true
+
+# Toggle Do Not Disturb via the dndmode-on / dndmode-off Shortcuts (default
+# false). Enabling it syncs DND to your other Apple devices over iCloud.
+# focus: false
+
+# Print banners, diagnostics, and debug logs (default false = silent).
+# debug: false
+```
+
+| Key | Type | Default | Meaning |
+| --- | --- | --- | --- |
+| `hotkey` | string | `Ctrl+Option+Cmd+X` | The combination that ends the lock. |
+| `overlay_style` | string | `black` | Shield look, or `none` for awake-only mode. |
+| `allow_display_sleep` | bool | `false` | `false` keeps the display awake; `true` lets it idle-off. |
+| `mute` | bool | `true` | Mute system audio for the session. |
+| `focus` | bool | `false` | Toggle Do Not Disturb via Shortcuts. |
+| `debug` | bool | `false` | Un-silence output. |
+
+The hotkey is matched by physical key position, so it behaves the same on a US,
+Russian, or AZERTY layout. Caps Lock and the numeric-keypad flag are ignored during
+matching, so a stray Caps Lock can never lock you out.
+
+The YAML parser is strict about unknown keys but not about values: a misspelled key
+(`overaly_style`) is rejected on load, while a bad value (`overlay_style: blak`) is
+caught a moment later. Either way the process exits `1` with a line-and-column error
+under `--debug`.
+
+### Focus / Do Not Disturb
+
+Focus is off by default and opt-in for one reason: macOS syncs it across your Apple
+devices over iCloud ("Share Across Devices"). Turning DND on at the Mac would
+silently turn it on your iPhone too, and there is no API to enable Focus on this
+device only. The default `mute: true` already covers the local goal - silencing
+sounds - without touching your other devices.
+
+When you do enable it, dndmode runs the `dndmode-on` Shortcut at startup and
+`dndmode-off` on exit. It checks that both shortcuts exist up front, before locking
+anything, and exits `6` with setup instructions if either is missing. It does not
+remember or restore whatever Focus you had before - on exit it simply turns Focus
+off (see [Known limitations](#known-limitations)).
+
+## Overlay styles
+
+| Style | Look | Bleeds through? | Input blocked? |
+| --- | --- | --- | --- |
+| `black` | Opaque black shield (default). | No | Yes |
+| `matrix` | Green digital rain over an opaque black shield. Cosmetic. | No | Yes |
+| `glass` | Frosted `NSVisualEffectView`; the blurred desktop shows through. | Yes, by design | Yes |
+| `none` | No overlay. Awake-only mode - see below. | n/a | No |
+
+`glass` is the only style that is not opaque. It trades the no-bleed-through
+guarantee for the look; input is still fully blocked underneath.
+
+**Awake-only mode (`none`).** `overlay_style: none` (or `dndmode --style none`) turns
+dndmode into a thin [`caffeinate(8)`](https://ss64.com/mac/caffeinate.html) wrapper.
+It does not draw an overlay, does not block the keyboard or trackpad, does not mute
+audio, and does not touch Focus - so it needs no Accessibility permission. It only
+holds a system-awake assertion for as long as it runs. Under the hood it runs
+`caffeinate -d -i -s -w <pid>` (the `-d` is dropped when `allow_display_sleep: true`);
+`-w <pid>` ties the assertion to dndmode's lifetime so it self-releases even after a
+`kill -9`. There is no hotkey in this mode - there is no event tap to observe one -
+so you exit with `Ctrl-C` or `--timer`.
+
+## Exit codes
+
+dndmode's exit code is its primary contract. In the default silent mode it is the
+only thing it tells you.
+
+| Code | Meaning |
+| --- | --- |
+| `0` | Clean exit via the hotkey, a signal, or `--timer` expiry. |
+| `1` | Config error: bad YAML, an invalid hotkey, or an invalid flag value. |
+| `2` | Platform error: not arm64, macOS < 14, IOKit/Cocoa failure, or (in `none` mode) an unexpected `caffeinate` death. |
+| `3` | Interrupted while waiting for Accessibility / Input Monitoring grants. |
+| `4` | Secure Event Input is held by another app, or the input tap was silently disabled and the watchdog gave up. |
+| `5` | Another live dndmode instance is already running. |
+| `6` | Required Shortcuts `dndmode-on` / `dndmode-off` not found (only when `focus: true`). |
+| `7` | Cannot delete a stale `~/.config/dndmode/runtime.json`. |
+| `8` | Internal panic, recovered after cleanup. |
 
 ## Threat model
 
-### What dndmode DOES protect against
+### What dndmode protects against
 
-- Casual passerby trying to interact with unlocked MacBook
-- Family member / colleague clicking around while AI agent runs
-- Display power button / Mission Control / Cmd+Tab probing
-- Notification banners (hidden under the shield overlay) and notification sounds
-  (system audio muted for the session); Focus/DND optionally on top (`focus: true`)
+- A passerby, family member, or colleague touching the keyboard or trackpad while an
+  agent runs. Keyboard, mouse, scroll, media keys, Cmd+Tab, and Cmd+Q are all
+  blocked at the HID level.
+- Visual access to the desktop on every connected display, including probing through
+  Mission Control, Spotlight, or the Force Quit dialog.
+- Notification banners (hidden under the shield) and sounds (audio muted for the
+  session), with Focus/DND optionally on top.
 
-### What dndmode does NOT protect against
+### What dndmode does not protect against
 
-- Touch ID / biometric unlock (impossible to block without root)
-- Power button hold (hard shutdown — out of scope)
-- Recovery mode (Cmd+R on boot — out of scope)
-- Hardware key-loggers / DMA via Thunderbolt
-- Malware with root privileges
-- Physical access >5 minutes
-- Remote SSH / VNC sessions (target is local console only)
+- Touch ID / biometric unlock (impossible to block without root).
+- Power-button hold (hard shutdown) and Recovery mode (Cmd+R at boot).
+- Hardware keyloggers or DMA over Thunderbolt.
+- Malware running as root.
+- Sustained physical access.
+- Remote SSH / VNC sessions - the target is the local console only.
 
-### Per-component coverage
+### Per-layer coverage
 
-| Component             | Protects against                         | Limitations                                                  |
-| --------------------- | ---------------------------------------- | ------------------------------------------------------------ |
-| Overlay (Phase 2)     | Visual access to desktop                 | Bypassable via Cmd+Tab in v1 (Phase 4 closes this).          |
-| HID tap (Phase 4)     | Keyboard + mouse + scroll + media        | NOT IMPLEMENTED in v1 — placeholder mock.                    |
-| IOPM Assertion (Phase 3) | System idle sleep                     | Display can still sleep (intentional).                       |
-| Audio mute            | Notification sounds + system beeps       | On by default; restored on exit. Skipped in `none` mode.     |
-| Focus (Phase 5)       | Notification banners                     | Opt-in (`focus: true`); DND syncs to iPhone via iCloud.      |
+| Layer | Covers | Notes |
+| --- | --- | --- |
+| Shield overlay | Visual access to every display | `glass` shows a blurred desktop by design. |
+| Input lock (`CGEventTap`) | Keyboard, mouse, scroll, media, Cmd+Tab, Cmd+Q | Needs Accessibility; self-heals via a watchdog and a wake observer. |
+| Awake lock (IOPMAssertion) | System and display idle sleep | Display kept awake by default; `allow_display_sleep` flips it. |
+| Audio mute | Notification sounds and beeps | On by default, restored on exit; skipped in `none` mode. |
+| Focus/DND | Notification banners | Opt-in; DND syncs to iPhone over iCloud. |
 
-**Disclaimer:** dndmode is a soft-lock for cooperative environments, not red-team-grade
-hardware protection. Use at your own risk.
-
-The binary has zero network dependencies — verify with `make audit-net` after install
-(DIST-04 invariant).
+dndmode is a soft-lock for cooperative environments, not red-team-grade hardware
+protection. Use it at your own risk.
 
 ## Troubleshooting
 
-### TCC permissions broken after `go install` upgrade
+### TCC permissions lost after a `go install` upgrade
 
-Each `go install github.com/dsbasko/dndmode@latest` rebuild changes the
-binary's cdhash, which TCC (macOS privacy database) uses for identity.
-Without stable codesign, TCC sees a "new app" and revokes Accessibility
-+ Input Monitoring on every upgrade.
+Each `go install ...@latest` rebuild changes the binary's cdhash, which TCC uses as
+identity. Without a stable signature it sees a new app and revokes Accessibility and
+Input Monitoring on every upgrade.
 
-**Workaround 1 (recommended):** Use `make install` after `go install`.
-This re-applies the stable ad-hoc codesign with identifier
-`com.dsbasko.dndmode`, preserving TCC permissions across rebuilds.
+Fix it by using the stable ad-hoc signature:
 
-**Workaround 2 (nuclear):** Reset TCC entries and re-grant:
+```bash
+make install   # re-applies identifier com.dsbasko.dndmode, preserving grants
+```
+
+Or reset the entries and re-grant from scratch:
 
 ```bash
 tccutil reset Accessibility com.dsbasko.dndmode
 tccutil reset ListenEvent com.dsbasko.dndmode
-./dndmode  # will re-prompt for permissions
+dndmode        # re-prompts for permissions
 ```
-
-Apple Developer ID (planned for v2) eliminates this issue entirely.
 
 ### Required Shortcuts not found (exit 6)
 
-Re-create `dndmode-on` / `dndmode-off` via the Shortcuts app — see
-[First-run setup](#first-run-setup) step 4. Empirical: `shortcuts run "<missing>"`
-exits with status 1; dndmode reports this as exit 6 with the create-shortcut guide
-on stderr.
+Re-create `dndmode-on` and `dndmode-off` in the Shortcuts app - see
+[First-run setup](#first-run-setup) step 4. dndmode prints the missing names and a
+create-shortcut guide on stderr under `--debug`.
 
 ### Secure Event Input conflict (exit 4)
 
-Find the app holding SecureInput (typically a Terminal sudo prompt, password
-manager, or active password field), dismiss it, then re-run dndmode. To inspect:
+Another app holds Secure Event Input - usually a Terminal `sudo` prompt, a password
+manager, or an active password field. Dismiss it and re-run. To find the holder:
 
 ```bash
 ioreg -l -w 0 | grep SecureInput
 ```
 
+Exit `4` also fires if the input tap was silently disabled and the watchdog could not
+bring it back. In that case, re-run and check that Accessibility is still granted.
+
 ### Another instance is already active (exit 5)
 
-Find the running dndmode and signal it to exit:
-
 ```bash
-pgrep -x dndmode      # find the PID(s)
+pgrep -x dndmode      # find the pid(s)
 pkill -TERM dndmode   # ask it to exit cleanly
 ```
 
-Or wait for it to exit normally, then re-run.
+Or wait for it to finish, then re-run.
 
-### Cannot delete stale runtime file (exit 7)
-
-Manually clean up, then re-run:
+### Cannot delete a stale runtime file (exit 7)
 
 ```bash
 rm -f ~/.config/dndmode/runtime.json
 ```
 
-Causes: read-only filesystem, ACL denying delete, or disk full.
+Causes are a read-only filesystem, an ACL denying delete, or a full disk.
 
-### Cocoa smoke tests panic with NSWindow main-thread error
+## Uninstall
 
-These tests are gated by the `manual` build tag in v1.0. `go test ./...` (default)
-skips them. To run intentionally from a GUI session:
+```bash
+sudo rm /usr/local/bin/dndmode
+# optional: also clear the permission entries
+tccutil reset Accessibility com.dsbasko.dndmode
+tccutil reset ListenEvent com.dsbasko.dndmode
+```
+
+## Building from source
+
+The project is Go 1.26 with cgo bridging into AppKit, Quartz, IOKit, and
+ApplicationServices through raw Objective-C files. It builds for `darwin/arm64` only.
+
+```bash
+make build         # CGO build + ad-hoc codesign into ./dndmode
+make test          # unit tests with -race
+make test-cover    # tests with a coverage summary
+make lint          # go vet + golangci-lint
+make acceptance    # subprocess acceptance tests (build tag: acceptance)
+make audit-net     # assert zero network dependencies in the binary
+make clean         # remove the binary, coverage, and generated mocks
+```
+
+GUI smoke tests that create real `NSWindow`s are gated behind the `manual` build
+tag, so `go test ./...` skips them. Run them intentionally from a GUI session:
 
 ```bash
 go test -tags=manual ./internal/macos/cocoa/...
 ```
 
-### Uninstall
+Rough layout:
 
-```bash
-sudo rm /usr/local/bin/dndmode
-# Optional: also reset TCC entries
-tccutil reset Accessibility com.dsbasko.dndmode
-tccutil reset ListenEvent com.dsbasko.dndmode
+```
+cmd/dndmode/          CLI entry point, startup pipeline, LIFO teardown
+internal/config/      YAML config + hotkey string parser
+internal/matcher/     pure-Go hotkey matching model
+internal/macos/
+  cocoa/              per-screen shield windows and overlay styles
+  eventtap/           CGEventTap input lock + watchdog + wake re-arm
+  powerassert/        IOPMAssertion awake lock + orphan cleanup
+  caffeinate/         awake-only (none) mode wrapper
+  audiomute/          system audio mute and restore
+  focus/              Do Not Disturb via the Shortcuts CLI
+  permissions/        Accessibility, Input Monitoring, platform, secure-input gates
+internal/state/       teardown registry + runtime.json crash recovery
+internal/supervisor/  single-point shutdown fan-in
 ```
 
-## Known limitations (v1.0)
+## Known limitations
 
-- **Keyboard / mouse blocking is NOT implemented in v1.0** — the input layer is
-  currently a placeholder mock-tap. `Cmd+Tab`, `Cmd+Q`, and other system shortcuts
-  still function. The visual overlay is in place, but a determined local user can
-  switch apps. Phase 4 (CGEventTap-based input blocking) is the planned scope of
-  v1.1.
-- No prior-Focus snapshot/restore — when `focus: true`, after exit Focus is always
-  set to "no focus" (deliberate v1 limitation, FOC-04). v2-FOC-snapshot will add
-  restore. (Audio mute, by contrast, *is* saved/restored: a session that finds
-  audio already muted leaves it muted on exit.)
-- No daemon mode — foreground process only. The terminal where dndmode launched
-  must stay open. v2 may add launchd integration.
-- macOS Sequoia 15.x signing requirement — unsigned binaries refuse to launch.
-  `make build` applies ad-hoc codesign automatically; `go install` relies on Go's
-  linker-signed signature (sufficient to launch, but not for TCC stability — see
-  [Troubleshooting](#troubleshooting)).
-- Two `dndmode` instances cannot run concurrently — the second instance exits 5
-  with instructions (LIFE-12 enforcement).
+- **No prior-Focus restore.** With `focus: true`, dndmode turns Focus off on exit
+  rather than restoring whatever you had before. Audio, by contrast, is restored:
+  a session that finds audio already muted leaves it muted.
+- **`glass` bleeds through.** It shows a blurred desktop on purpose. Use `black` or
+  `matrix` if you need the desktop fully hidden.
+- **Foreground only.** No daemon or launchd mode. The terminal that launched dndmode
+  must stay open.
+- **One instance at a time.** A second dndmode exits `5` with instructions.
+- **Signing.** Recent macOS refuses unsigned binaries. `make build` applies ad-hoc
+  codesigning; `go install` relies on Go's linker-signed signature, which launches
+  but is not stable enough for TCC across upgrades.
 
 ## License
 
-dndmode is released under the MIT License. See [LICENSE](./LICENSE) for full text.
+Released under the MIT License. See [LICENSE](LICENSE) for the full text.
 
 © 2026 Dmitriy Basenko.
