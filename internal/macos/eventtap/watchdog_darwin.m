@@ -68,6 +68,15 @@ static int g_fail_count = 0;
 // `g_observed_tap` in the binary (here); wake_darwin.m declares `extern`.
 volatile CFMachPortRef g_observed_tap = NULL;
 
+// gesturetap_reenable lives in gesturetap_darwin.m (session-level gesture
+// tap). Both the watchdog handler below and the wake-observer blocks
+// (wake_darwin.m) call it right after their g_observed_tap NULL-guard so
+// the gesture tap self-heals on the same cadence as the main tap. The
+// gesture tap keeps no failure counter of its own: the silent-disable
+// failure mode kills both taps together, and the main tap's counter is the
+// exit signal.
+extern void gesturetap_reenable(void);
+
 // eventtap_set_observed_tap is the single writer for g_observed_tap.
 // Called from Go (via cgo) at two moments:
 //
@@ -166,6 +175,12 @@ int watchdog_start(CFMachPortRef tap) {
         if (tap_snap == NULL) {
             return;
         }
+
+        // Heal the session-level gesture tap on the same probe cadence.
+        // Placed AFTER the guard above so a Release in progress (NULL
+        // written at Step 1) also suppresses late gesture re-enables.
+        // Idempotent no-op when the gesture tap is healthy.
+        gesturetap_reenable();
 
         // Legacy defensive null check on the captured `tap` parameter is
         // now subsumed by the snapshot above — the captured `tap` was

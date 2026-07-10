@@ -33,6 +33,12 @@ static id g_session_token = nil;
 // are defended unconditionally).
 extern volatile CFMachPortRef g_observed_tap;
 
+// gesturetap_reenable lives in gesturetap_darwin.m. Called from both
+// observer blocks after their g_observed_tap NULL-guard: sleep / fast user
+// switch can disable BOTH taps, so the wake re-arm covers both. Idempotent
+// (CGEventTapEnable on an enabled tap is a documented no-op).
+extern void gesturetap_reenable(void);
+
 // wake_observer_install subscribes to NSWorkspace wake + session-active
 // notifications via `[[NSWorkspace sharedWorkspace] notificationCenter]`
 // (NOT the global Foundation notification center; NSWorkspace
@@ -83,6 +89,7 @@ int wake_observer_install(CFMachPortRef tap) {
             return;
         }
         CGEventTapEnable(tap_snap, true);
+        gesturetap_reenable();
     }];
 
     g_session_token = [nc addObserverForName:NSWorkspaceSessionDidBecomeActiveNotification
@@ -100,6 +107,7 @@ int wake_observer_install(CFMachPortRef tap) {
             return;
         }
         CGEventTapEnable(tap_snap, true);
+        gesturetap_reenable();
     }];
 
     // fix: seed the shared global ONLY after both observer

@@ -1,8 +1,22 @@
-// Package eventtap wraps `CGEventTapCreate` at `kCGHIDEventTap` level via
-// cgo, providing HID-level keyboard/mouse input blocking for Phase 4 of
-// dndmode. The package is the single entry point to CGEventTap, the watchdog
-// keeping the tap alive (`dispatch_source_t` 5s timer), and the NSWorkspace
-// wake observer that re-arms the tap after system sleep / fast user switch.
+// Package eventtap wraps `CGEventTapCreate` via cgo, providing full input
+// blocking for Phase 4 of dndmode with TWO taps:
+//
+//   - the PRIMARY tap at `kCGHIDEventTap` (tap_darwin.m) blocks every
+//     keyboard / mouse / scroll / media event and matches the unlock hotkey;
+//   - the GESTURE tap at `kCGSessionEventTap` (gesturetap_darwin.m)
+//     suppresses trackpad multitouch gestures — Mission Control / App
+//     Exposé / Spaces dock-swipes, pinches — which WindowServer synthesizes
+//     PAST the HID tap point and delivers to the Dock as session-level CGS
+//     events (private types 29/30). The HID tap can never see those, so
+//     without the second tap a 3/4-finger swipe opens Mission Control over
+//     the shield. Both tap sources are serviced by the same worker run
+//     loop / locked OS thread.
+//
+// The package is the single entry point to CGEventTap, the watchdog keeping
+// both taps alive (`dispatch_source_t` 5s timer; the main tap's health
+// counter is the exit signal, the gesture tap is re-enabled on the same
+// probe), and the NSWorkspace wake observer that re-arms both taps after
+// system sleep / fast user switch.
 //
 // Public API (fully implements; here ships skeleton + sentinel
 // errors + pure-Go watchdog policy):
