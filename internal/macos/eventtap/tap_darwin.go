@@ -25,6 +25,18 @@ extern void eventtap_enable(CFMachPortRef tap, int enable);
 // and Step 4 (watchdog_stop) / Step 5 (wake_observer_remove).
 extern void eventtap_set_observed_tap(CFMachPortRef tap);
 
+// gesturetap_* is the session-level trackpad-gesture suppression tap
+// (gesturetap_darwin.m) — the second tap that closes the Mission Control /
+// App Exposé / Spaces / Launchpad swipe leak. Dock gestures are synthesized
+// by WindowServer PAST the HID tap point and exist only as session-level
+// CGS events (types 29/30), so the kCGHIDEventTap in tap_darwin.m can never
+// see them. Installed by installInternal onto the SAME worker run loop as
+// the main tap source (hs.loop), torn down via the Releaser closures with a
+// strict gesture-before-main uninstall order (see Releaser field docs).
+extern int  gesturetap_install_c(CFRunLoopRef loop);
+extern void gesturetap_disable_c(void);
+extern void gesturetap_uninstall_c(void);
+
 // cf_to_void_ptr is the package-private C helper that converts a cgo
 // opaque pointer (CFMachPortRef) to a `void *` (which cgo maps to Go's
 // `unsafe.Pointer`). Defined inline because a direct
@@ -176,6 +188,24 @@ type Releaser struct {
 	clearObservedFn func() // writes NULL to g_observed_tap atomically
 	uninstallFn     func()
 
+	// gestureDisableFn / gestureUninstallFn tear down the SECOND tap — the
+	// session-level trackpad-gesture suppressor (gesturetap_darwin.m) that
+	// closes the Mission Control / App Exposé / Spaces swipe leak the HID
+	// tap cannot see. Ordering constraints inside Release:
+	//
+	//   - gestureDisableFn runs in Step 1 right after disableFn +
+	//     clearObservedFn — trackpad gestures recover together with the
+	//     keyboard even if later CF teardown fails;
+	//   - gestureUninstallFn runs at Step 2a, BEFORE uninstallFn: both tap
+	//     sources share the worker run loop, and uninstallFn ends with
+	//     CFRunLoopStop — after that the worker thread exits and the loop
+	//     ref dangles, so the gesture source must leave the loop first.
+	//
+	// nil in test constructors that don't exercise the gesture path
+	// (Release nil-guards both).
+	gestureDisableFn   func()
+	gestureUninstallFn func()
+
 	// watchdogStop / wakeStop are the tear-down
 	// closures returned by `StartWatchdog` and `InstallWakeObserver`
 	// respectively. Set by `InstallAll`. The plain `Install` constructor
@@ -282,6 +312,23 @@ func (r *Releaser) Release() error {
 	if r.clearObservedFn != nil {
 		r.clearObservedFn()
 	}
+	// Gesture tap disable belongs to the same Step 1 contract: input
+	// (including trackpad gestures) recovers immediately, before any CF
+	// teardown below runs. The clearObservedFn NULL-write above also stops
+	// the watchdog / wake observers from re-enabling the gesture tap via
+	// gesturetap_reenable (their g_observed_tap guard runs first).
+	if r.gestureDisableFn != nil {
+		r.gestureDisableFn()
+	}
+
+	// --- Step 2a: gesture tap teardown MUST precede the main uninstall.
+	// uninstallFn ends with CFRunLoopStop on the SHARED worker run loop;
+	// once the worker goroutine unwinds, the loop ref the gesture source
+	// is attached to dangles (see gesturetap_uninstall_c ordering
+	// contract). ---
+	if r.gestureUninstallFn != nil {
+		r.gestureUninstallFn()
+	}
 
 	// --- Steps 2 + 3: CFRunLoopRemoveSource CFRelease(source+tap)
 	// + CFRunLoopStop, bundled in eventtap_uninstall_c. ---
@@ -329,6 +376,8 @@ func (r *Releaser) Release() error {
 	r.disableFn = nil
 	r.clearObservedFn = nil
 	r.uninstallFn = nil
+	r.gestureDisableFn = nil
+	r.gestureUninstallFn = nil
 
 	// Store AFTER teardown completes. Concurrent callers blocked on
 	// mu.Lock will see released=true under mu and short-circuit; new
@@ -541,14 +590,26 @@ func installInternal(spec hotkey.Spec, sink chan<- struct{}, log *slog.Logger) (
 		}
 		return nil, zero, fmt.Errorf("%w: worker run-loop registration rc=%d", ErrTapInstallFailed, int(hs.rc))
 	}
-	//: hs.loop is captured by the C-side static
-	// `g_worker_runloop`. The channel handshake itself is load-bearing
-	// (synchronizes with the worker goroutine's runtime.LockOSThread()
-	// completion) but the Go-side loop pointer is never re-used — the
-	// C-side static is the canonical store. Underscore-binding makes
-	// "we read the value to synchronize, then discard it" explicit
-	// instead of pretending it's "captured for future diagnostic logging."
-	_ = hs.loop
+	// Second tap: session-level trackpad-gesture suppressor
+	// (gesturetap_darwin.m). hs.loop — the worker run loop the handshake
+	// just delivered — hosts the gesture tap source too, so both taps are
+	// serviced by the same locked OS thread and no extra goroutine is
+	// needed. The HID tap above cannot see dock gestures at all:
+	// WindowServer synthesizes them from the raw multitouch stream and
+	// hands them to the Dock at session level (CGS types 29/30); without
+	// this tap a 3/4-finger swipe opens Mission Control over the shield.
+	//
+	// Failure is FATAL like the main tap (same triggers: Accessibility
+	// revoked, SecureEventInput, mach ports): silently degrading would
+	// leave the gesture hole open with no observable signal, violating the
+	// "all input blocked" contract. Rollback mirrors the handshake-failure
+	// path above — eventtap_uninstall_c tears down the main tap and stops
+	// the worker loop; the failed gesture install cleaned its own state.
+	if rc := C.gesturetap_install_c(hs.loop); rc != 0 {
+		C.eventtap_uninstall_c(cTap)
+		var zero C.CFMachPortRef
+		return nil, zero, fmt.Errorf("%w: gesture tap rc=%d (session-level dock-gesture suppression)", ErrTapInstallFailed, int(rc))
+	}
 
 	stopPoller := make(chan struct{})
 	pollerDone := make(chan struct{})
@@ -574,14 +635,26 @@ func installInternal(spec hotkey.Spec, sink chan<- struct{}, log *slog.Logger) (
 	uninstallFn := func() {
 		C.eventtap_uninstall_c(cTap)
 	}
+	// Gesture-tap closures capture NOTHING — the C side owns the canonical
+	// state via the gesturetap_darwin.m statics (same file-scope keying as
+	// clearObservedFn). Ordering relative to the main-tap closures is
+	// enforced by Release, not here.
+	gestureDisableFn := func() {
+		C.gesturetap_disable_c()
+	}
+	gestureUninstallFn := func() {
+		C.gesturetap_uninstall_c()
+	}
 
 	r := &Releaser{
-		log:             log,
-		stopPoller:      stopPoller,
-		pollerDone:      pollerDone,
-		disableFn:       disableFn,
-		clearObservedFn: clearObservedFn,
-		uninstallFn:     uninstallFn,
+		log:                log,
+		stopPoller:         stopPoller,
+		pollerDone:         pollerDone,
+		disableFn:          disableFn,
+		clearObservedFn:    clearObservedFn,
+		uninstallFn:        uninstallFn,
+		gestureDisableFn:   gestureDisableFn,
+		gestureUninstallFn: gestureUninstallFn,
 	}
 
 	// Poller goroutine: reads `matched` on a 10ms ticker, on success

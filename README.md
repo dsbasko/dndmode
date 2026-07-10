@@ -73,18 +73,23 @@ Force Quit dialog, on every Space and next to full-screen apps. Plugging or
 unplugging a display, changing resolution, or rearranging monitors rebuilds the
 overlay within 250 ms. The system cursor is hidden while the shield is up.
 
-**Input lock.** A real `CGEventTap` installed at `kCGHIDEventTap` with
-`kCGHeadInsertEventTap` and `kCGEventTapOptionDefault` - the suppression-capable
-mode, not listen-only. Its callback returns `NULL` for all 15 intercepted event
-types (key down/up, modifier changes, every mouse button, drag, move, scroll, and
-system-defined media keys), so nothing reaches WindowServer. Cmd+Tab, Cmd+Q, and
-the rest are dead. Exactly one event passes the filter: a key-down that matches your
-configured unlock hotkey, which is turned into an internal exit signal and is itself
-swallowed so it never leaks into the app underneath. The tap is silent on wrong
-input by design - a watcher gets no side channel. A GCD watchdog probes the tap
-every 5 s and re-enables it if macOS silently disabled it; after 5 consecutive
-failed re-enables (about 25 s) it gives up and ends the session with a distinct exit
-code. An `NSWorkspace` observer re-arms the tap after sleep or fast user switching.
+**Input lock.** Two `CGEventTap`s, both `kCGHeadInsertEventTap` with
+`kCGEventTapOptionDefault` - the suppression-capable mode, not listen-only. The
+primary tap sits at `kCGHIDEventTap`; its callback returns `NULL` for all 15
+intercepted event types (key down/up, modifier changes, every mouse button, drag,
+move, scroll, and system-defined media keys), so nothing reaches WindowServer.
+Cmd+Tab, Cmd+Q, and the rest are dead. Exactly one event passes the filter: a
+key-down that matches your configured unlock hotkey, which is turned into an
+internal exit signal and is itself swallowed so it never leaks into the app
+underneath. A second tap at `kCGSessionEventTap` swallows the trackpad gesture
+stream (the session-level gesture and dock-control events WindowServer synthesizes
+past the HID tap point), so three- and four-finger swipes for Mission Control,
+App Exposé and Space switching, and the Launchpad pinch die before the Dock sees
+them. Both taps are silent on wrong input by design - a watcher gets no side
+channel. A GCD watchdog probes every 5 s and re-enables both taps if macOS
+silently disabled them; after 5 consecutive failed re-enables of the primary tap
+(about 25 s) it gives up and ends the session with a distinct exit code. An
+`NSWorkspace` observer re-arms both taps after sleep or fast user switching.
 
 **Awake lock.** One IOKit power assertion named `dndmode active` (visible in
 `pmset -g assertions`). By default it is `kIOPMAssertPreventUserIdleDisplaySleep`,
@@ -319,7 +324,8 @@ only thing it tells you.
 
 - A passerby, family member, or colleague touching the keyboard or trackpad while an
   agent runs. Keyboard, mouse, scroll, media keys, Cmd+Tab, and Cmd+Q are all
-  blocked at the HID level.
+  blocked at the HID level; trackpad gestures (Mission Control / App Exposé /
+  Spaces swipes, Launchpad pinch) are blocked at the session level.
 - Visual access to the desktop on every connected display, including probing through
   Mission Control, Spotlight, or the Force Quit dialog.
 - Notification banners (hidden under the shield) and sounds (audio muted for the

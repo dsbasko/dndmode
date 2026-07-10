@@ -17,14 +17,17 @@ import (
 // invocation order — so we can verify disable-first ordering and
 // two-layer idempotency without invoking the real cgo bridge.
 type releaserTestDeps struct {
-	disableCalls   atomic.Int64
-	uninstallCalls atomic.Int64
+	disableCalls          atomic.Int64
+	uninstallCalls        atomic.Int64
+	gestureDisableCalls   atomic.Int64
+	gestureUninstallCalls atomic.Int64
 
-	// callOrder records the sequence of "disable" / "uninstall" strings,
-	// in the order the fake closures were invoked. Slice append is NOT
-	// goroutine-safe in general, but in the Release path the two closures
-	// are invoked from the same goroutine (mutex-serialised), so a plain
-	// slice is sufficient. The race tests use atomic counters above.
+	// callOrder records the sequence of "disable" / "gesture-disable" /
+	// "gesture-uninstall" / "uninstall" strings, in the order the fake
+	// closures were invoked. Slice append is NOT goroutine-safe in general,
+	// but in the Release path the closures are invoked from the same
+	// goroutine (mutex-serialised), so a plain slice is sufficient. The
+	// race tests use atomic counters above.
 	callOrder []string
 
 	releaser *Releaser
@@ -50,6 +53,18 @@ func newReleaserTestDeps(t *testing.T) *releaserTestDeps {
 		d.callOrder = append(d.callOrder, "uninstall")
 	}
 	d.releaser = newReleaserWithDeps(disableFn, uninstallFn, stopPoller, pollerDone, nil)
+	// Gesture-tap closures are wired via direct field assignment (same
+	// package) rather than widening newReleaserWithDeps: the production
+	// installInternal path sets these fields the same way, and existing
+	// callers of the seam stay source-compatible.
+	d.releaser.gestureDisableFn = func() {
+		d.gestureDisableCalls.Add(1)
+		d.callOrder = append(d.callOrder, "gesture-disable")
+	}
+	d.releaser.gestureUninstallFn = func() {
+		d.gestureUninstallCalls.Add(1)
+		d.callOrder = append(d.callOrder, "gesture-uninstall")
+	}
 	return d
 }
 
@@ -91,13 +106,27 @@ func TestReleaser_Release_IsIdempotent(t *testing.T) {
 	if got := d.uninstallCalls.Load(); got != 1 {
 		t.Errorf("after 3 Release calls, uninstallCalls = %d, want 1 (gate must block)", got)
 	}
+	if got := d.gestureDisableCalls.Load(); got != 1 {
+		t.Errorf("after 3 Release calls, gestureDisableCalls = %d, want 1 (gate must block)", got)
+	}
+	if got := d.gestureUninstallCalls.Load(); got != 1 {
+		t.Errorf("after 3 Release calls, gestureUninstallCalls = %d, want 1 (gate must block)", got)
+	}
 }
 
-// TestReleaser_Release_DisableBeforeUninstall verifies the invariant:
-// the tap is disabled BEFORE CFRelease teardown so the keyboard recovers
-// immediately even if subsequent CF teardown fails. The fake closures
-// append "disable"/"uninstall" to callOrder; the test asserts the slice
-// is exactly ["disable", "uninstall"] in that order.
+// TestReleaser_Release_DisableBeforeUninstall verifies two ordering
+// invariants at once:
+//
+//  1. disable-first — BOTH taps are disabled (Step 1) before any CFRelease
+//     teardown, so keyboard AND trackpad gestures recover immediately even
+//     if subsequent CF teardown fails;
+//  2. gesture-uninstall BEFORE main uninstall (Step 2a before Steps 2+3) —
+//     the main uninstall ends with CFRunLoopStop on the SHARED worker run
+//     loop; the gesture source must leave that loop before it can be torn
+//     down (see gesturetap_uninstall_c ordering contract).
+//
+// The fake closures append their tags to callOrder; the test asserts the
+// exact four-step sequence.
 func TestReleaser_Release_DisableBeforeUninstall(t *testing.T) {
 	t.Parallel()
 
@@ -106,7 +135,7 @@ func TestReleaser_Release_DisableBeforeUninstall(t *testing.T) {
 		t.Fatalf("Release: %v", err)
 	}
 
-	want := []string{"disable", "uninstall"}
+	want := []string{"disable", "gesture-disable", "gesture-uninstall", "uninstall"}
 	if len(d.callOrder) != len(want) {
 		t.Fatalf("callOrder = %v, want %v (len mismatch)", d.callOrder, want)
 	}
