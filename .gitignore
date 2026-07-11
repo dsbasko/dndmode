@@ -6,4 +6,8 @@ Thumbs.db
 /dndmode
 coverage.out
 
+# Generated mocks (mockgen via `make generate`; removed by `make clean`)
+internal/*/mocks/
+internal/*/*/mocks/
+
 !.gitignore
