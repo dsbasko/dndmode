@@ -38,7 +38,7 @@ func TestSmoke_Controller_FullPath(t *testing.T) {
 		t.Skip("no displays attached")
 	}
 
-	c := cocoa.NewController("black", log)
+	c := cocoa.NewController("black", 0, log)
 	if err := c.CreateWindowsForAllScreens(); err != nil {
 		// On a no-display CI machine we'd skip above; if we reach here
 		// with err == ErrNoDisplays it's likely a race vs hot-plug — fail

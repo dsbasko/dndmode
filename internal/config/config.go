@@ -12,6 +12,7 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
+	"math"
 	"os"
 	"path/filepath"
 
@@ -45,6 +46,15 @@ const (
 	// in this mode because there is no event tap to observe one).
 	OverlayStyleNone = "none"
 
+	// DefaultGlassBlur is the CIGaussianBlur radius (in points) used for
+	// overlay_style "glass" when glass_blur is absent and no --style glass:N
+	// override is given. ~16 keeps large shapes recognizable while text stays
+	// unreadable. Mirrors kGlassBlurRadius in window_darwin.m.
+	DefaultGlassBlur = 16.0
+	// maxGlassBlur caps glass_blur at a sane upper bound: beyond this the whole
+	// desktop is an undifferentiated wash and CIGaussianBlur only gets slower.
+	maxGlassBlur = 500.0
+
 	// configDirPerm is 0o700 — owner read/write/execute only (
 	// mitigation: world cannot read user config).
 	configDirPerm fs.FileMode = 0o700
@@ -63,6 +73,12 @@ type Config struct {
 	// (main.go via ValidateOverlayStyle), NOT by yaml.Strict() — Strict only
 	// guards unknown KEYS, so a known key with a junk value parses fine (QUICK-gh8).
 	OverlayStyle string `yaml:"overlay_style"`
+	// GlassBlur is the CIGaussianBlur radius (in points) for overlay_style
+	// "glass". It is a *float64 so an ABSENT key defaults to DefaultGlassBlur via
+	// NormalizeGlassBlur (mirrors the Mute *bool nil-default pattern). Only
+	// meaningful for glass; ignored for black/matrix/none. Per-run override: the
+	// --style glass:N flag suffix (main.go). Validated by ValidateGlassBlur.
+	GlassBlur *float64 `yaml:"glass_blur"`
 	// AllowDisplaySleep has INVERTED polarity: the Go zero value false
 	// (default / key absent) keeps the display awake via the IOPMAssertion
 	// type kIOPMAssertPreventUserIdleDisplaySleep; true restores the legacy
@@ -132,6 +148,36 @@ func ValidateOverlayStyle(s string) error {
 	}
 }
 
+// NormalizeGlassBlur is the single source of the nil=>DefaultGlassBlur rule for
+// the glass blur radius (mirrors NormalizeMute): a config that omits glass_blur
+// (Config.GlassBlur == nil) defaults to DefaultGlassBlur; an explicit value is
+// returned unchanged. Callers normalize once and thread the float downstream
+// (main.go -> NewController -> cocoa_create_overlay_window).
+func NormalizeGlassBlur(v *float64) float64 {
+	if v == nil {
+		return DefaultGlassBlur
+	}
+	return *v
+}
+
+// ValidateGlassBlur gates the glass blur radius: it must be finite, non-negative
+// and no larger than maxGlassBlur. Applies to BOTH the config glass_blur value
+// and the --style glass:N flag suffix. 0 is accepted (no blur, though that makes
+// glass pointless); negative, NaN/Inf, or absurdly large values are rejected
+// with a message suitable for main.go's stderr.
+func ValidateGlassBlur(v float64) error {
+	switch {
+	case math.IsNaN(v) || math.IsInf(v, 0):
+		return fmt.Errorf("glass blur radius must be a finite number")
+	case v < 0:
+		return fmt.Errorf("glass blur radius %g must be >= 0", v)
+	case v > maxGlassBlur:
+		return fmt.Errorf("glass blur radius %g exceeds max %g", v, maxGlassBlur)
+	default:
+		return nil
+	}
+}
+
 // Loader reads a single YAML file at a fixed path. NewLoader does not touch
 // disk; only Load() performs IO. Loader is single-use semantically; calling
 // Load() multiple times will re-read the file each time, but this is NOT a
@@ -154,7 +200,7 @@ func (l *Loader) Path() string { return l.path }
 // default config to disk (creating parent dirs as needed) and returns the
 // default with created=true. On YAML syntax error, returns a wrapped error
 // whose message contains the goccy-formatted line:col + source snippet
-//.
+// .
 func (l *Loader) Load() (Config, bool, error) {
 	raw, err := os.ReadFile(l.path)
 	switch {
@@ -223,13 +269,26 @@ hotkey: %s
 #            only; every blocking guarantee is identical to black).
 #   glass  : TRANSPARENT frosted glass — the blurred desktop shows through.
 #            Trades the no-bleed-through guarantee for the look; keyboard and
-#            trackpad are still fully blocked.
+#            trackpad are still fully blocked. Blur strength = glass_blur below.
+#            Captures + blurs the desktop, so it needs the Screen Recording
+#            permission; without it, falls back to a plain system frost.
 #   none   : awake-only mode. NO overlay, NO input blocking, NO Focus, NO audio
 #            mute — dndmode just holds the machine awake (like caffeinate).
 #            Needs no Accessibility permission; exit with Ctrl-C only (there is
 #            no hotkey because there is no event tap to observe it).
-# Per-run override: --style <value>
+# Per-run override: --style <value>. For glass the radius can be appended:
+#   --style glass:24 overrides glass_blur for this run only (--style glass uses
+#   the glass_blur value below, or its default).
 # overlay_style: black
+
+# --- glass_blur --------------------------------------------------------------
+# Blur radius (in points) for overlay_style 'glass' — how strongly the desktop
+# behind the shield is blurred. Only used by 'glass'; ignored otherwise.
+#   Lower  (~8)  : sharper — more detail, text starts to become legible.
+#   Default (16) : shapes recognizable, text unreadable.
+#   Higher (~30) : everything dissolves into a smooth frost.
+# Per-run override: the --style glass:<radius> flag (e.g. --style glass:24).
+# glass_blur: 16
 
 # --- allow_display_sleep -----------------------------------------------------
 # INVERTED toggle controlling the DISPLAY (the system stays awake either way).

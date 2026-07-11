@@ -121,3 +121,48 @@ size_t cocoa_enumerate_screens(uint32_t* outIDs, size_t maxIDs) {
     }
     return n;
 }
+
+// cocoa_screens_geometry_signature returns a 64-bit change-detector over the
+// FULL geometry of every attached screen: for each NSScreen it folds the
+// CGDirectDisplayID, the display's frame (origin + size), and the backing scale.
+//
+// It deliberately reads [s frame] (the hardware display bounds), NOT
+// [s visibleFrame]: a menu-bar show/hide changes only visibleFrame, so the
+// Prohibited→Accessory activation flip at overlay start (which makes the menu
+// bar appear and fires a spurious NSApplicationDidChangeScreenParameters) leaves
+// this signature UNCHANGED, while a REAL reconfig — resolution, mirror,
+// rearrange, connect/disconnect — changes it. controller.reconcile compares the
+// signature across events to SKIP rebuilding a live overlay on a no-op reconfig
+// (the glass CABackdropLayer blur does not survive a destroy+recreate).
+//
+// Per-screen fold is FNV-1a; screens are combined ADDITIVELY so the result is
+// independent of [NSScreen screens] ordering (the main display can move without
+// a real geometry change). Collision risk is negligible for a change-detector;
+// the worst case is one missed rebuild, which the dual observer + the next real
+// event recover.
+//
+// MUST be called from the main thread ([NSScreen screens] main-thread invariant).
+uint64_t cocoa_screens_geometry_signature(void) {
+    NSArray<NSScreen*> *screens = [NSScreen screens];
+    NSUInteger n = [screens count];
+    uint64_t acc = 0;
+    for (NSUInteger i = 0; i < n; i++) {
+        NSScreen *s = [screens objectAtIndex:i];
+        NSNumber *idNum = [[s deviceDescription] objectForKey:@"NSScreenNumber"];
+        uint32_t did = idNum ? [idNum unsignedIntValue] : 0;
+        NSRect f = [s frame];
+        int64_t fields[6] = {
+            (int64_t)did,
+            (int64_t)f.origin.x, (int64_t)f.origin.y,
+            (int64_t)f.size.width, (int64_t)f.size.height,
+            (int64_t)([s backingScaleFactor] * 100.0),
+        };
+        uint64_t h = 1469598103934665603ULL; // FNV-1a 64-bit offset basis
+        for (int k = 0; k < 6; k++) {
+            h = (h ^ (uint64_t)fields[k]) * 1099511628211ULL; // FNV-1a prime
+        }
+        acc += h;
+    }
+    // Fold the screen count so 0-vs-1 screens differ even in degenerate cases.
+    return acc ^ ((uint64_t)n * 1099511628211ULL);
+}
