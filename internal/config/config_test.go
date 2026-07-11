@@ -3,6 +3,7 @@
 package config_test
 
 import (
+	"math"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -446,6 +447,100 @@ func TestLoader_Load_OverlayStyle(t *testing.T) {
 			cfg, created, err := td.loader.Load()
 			tt.validateResp(t, cfg, created, err)
 		})
+	}
+}
+
+// glass_blur is an optional *float64. An ABSENT key yields nil (=>
+// NormalizeGlassBlur DefaultGlassBlur); a present value (int or float) round-trips.
+// yaml.Strict() accepts the known key; ValidateGlassBlur is the value gate.
+func TestLoader_Load_GlassBlur(t *testing.T) {
+	tests := []struct {
+		name     string
+		yamlBody string
+		validate func(t *testing.T, cfg config.Config)
+	}{
+		{
+			name:     "glass_blur: 24 present (int)",
+			yamlBody: "hotkey: Ctrl+Shift+Q\nglass_blur: 24\n",
+			validate: func(t *testing.T, cfg config.Config) {
+				if cfg.GlassBlur == nil {
+					t.Fatalf("GlassBlur = nil, want non-nil *24")
+				}
+				if *cfg.GlassBlur != 24 {
+					t.Errorf("*GlassBlur = %g, want 24", *cfg.GlassBlur)
+				}
+				if got := config.NormalizeGlassBlur(cfg.GlassBlur); got != 24 {
+					t.Errorf("NormalizeGlassBlur = %g, want 24", got)
+				}
+			},
+		},
+		{
+			name:     "glass_blur: 12.5 present (float)",
+			yamlBody: "hotkey: Ctrl+Shift+Q\nglass_blur: 12.5\n",
+			validate: func(t *testing.T, cfg config.Config) {
+				if cfg.GlassBlur == nil || *cfg.GlassBlur != 12.5 {
+					t.Fatalf("GlassBlur = %v, want *12.5", cfg.GlassBlur)
+				}
+			},
+		},
+		{
+			name:     "glass_blur absent → nil → NormalizeGlassBlur default",
+			yamlBody: "hotkey: Ctrl+Shift+Q\n",
+			validate: func(t *testing.T, cfg config.Config) {
+				if cfg.GlassBlur != nil {
+					t.Errorf("GlassBlur = %v, want nil (absent key)", cfg.GlassBlur)
+				}
+				if got := config.NormalizeGlassBlur(cfg.GlassBlur); got != config.DefaultGlassBlur {
+					t.Errorf("NormalizeGlassBlur(nil) = %g, want %g", got, config.DefaultGlassBlur)
+				}
+			},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			td := newTestDeps(t)
+			if err := os.MkdirAll(filepath.Dir(td.path), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(td.path, []byte(tt.yamlBody), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			cfg, _, err := td.loader.Load()
+			if err != nil {
+				t.Fatalf("Load: %v", err)
+			}
+			tt.validate(t, cfg)
+		})
+	}
+}
+
+// NormalizeGlassBlur: nil => DefaultGlassBlur, non-nil => value unchanged.
+func TestNormalizeGlassBlur(t *testing.T) {
+	if got := config.NormalizeGlassBlur(nil); got != config.DefaultGlassBlur {
+		t.Errorf("NormalizeGlassBlur(nil) = %g, want %g", got, config.DefaultGlassBlur)
+	}
+	for _, v := range []float64{0, 8, 16, 42.5, 500} {
+		v := v
+		if got := config.NormalizeGlassBlur(&v); got != v {
+			t.Errorf("NormalizeGlassBlur(&%g) = %g, want %g", v, got, v)
+		}
+	}
+}
+
+// ValidateGlassBlur accepts finite values in [0, maxGlassBlur]; rejects negative,
+// too-large, NaN and Inf.
+func TestValidateGlassBlur(t *testing.T) {
+	valid := []float64{0, 0.5, 16, 500}
+	for _, v := range valid {
+		if err := config.ValidateGlassBlur(v); err != nil {
+			t.Errorf("ValidateGlassBlur(%g) = %v, want nil", v, err)
+		}
+	}
+	invalid := []float64{-1, -0.001, 500.001, 10000, math.NaN(), math.Inf(1), math.Inf(-1)}
+	for _, v := range invalid {
+		if err := config.ValidateGlassBlur(v); err == nil {
+			t.Errorf("ValidateGlassBlur(%g) = nil, want error", v)
+		}
 	}
 }
 

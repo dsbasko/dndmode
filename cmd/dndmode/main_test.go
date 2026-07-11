@@ -101,3 +101,67 @@ func Test_parseTimer(t *testing.T) {
 		})
 	}
 }
+
+// Test_parseStyleFlag pins the --style parsing: a bare style passes through with
+// no blur override; a "glass:<n>" suffix yields the parsed radius; the suffix is
+// rejected on any non-glass base or with a bad/out-of-range radius. The base
+// style is NOT validated here (main() runs ValidateOverlayStyle) so e.g.
+// "neon" passes through untouched. Pure decision point, unit-tested directly.
+func Test_parseStyleFlag(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name     string
+		in       string
+		wantBase string
+		wantBlur *float64 // nil = expect no override
+		wantErr  bool
+	}{
+		{name: "bare glass → no override", in: "glass", wantBase: "glass", wantBlur: nil},
+		{name: "bare black → no override", in: "black", wantBase: "black", wantBlur: nil},
+		{name: "bare none → no override", in: "none", wantBase: "none", wantBlur: nil},
+		{name: "unknown base passes through (validated later)", in: "neon", wantBase: "neon", wantBlur: nil},
+		{name: "glass:24 → 24", in: "glass:24", wantBase: "glass", wantBlur: fptr(24)},
+		{name: "glass:8.5 float → 8.5", in: "glass:8.5", wantBase: "glass", wantBlur: fptr(8.5)},
+		{name: "glass:0 accepted", in: "glass:0", wantBase: "glass", wantBlur: fptr(0)},
+		{name: "glass with spaces around n", in: "glass: 20 ", wantBase: "glass", wantBlur: fptr(20)},
+		{name: "suffix on black rejected", in: "black:10", wantErr: true},
+		{name: "suffix on unknown base rejected", in: "neon:10", wantErr: true},
+		{name: "non-numeric radius rejected", in: "glass:abc", wantErr: true},
+		{name: "empty radius rejected", in: "glass:", wantErr: true},
+		{name: "negative radius rejected", in: "glass:-4", wantErr: true},
+		{name: "over-max radius rejected", in: "glass:100000", wantErr: true},
+		{name: "double colon rejected", in: "glass:16:9", wantErr: true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			base, blur, err := parseStyleFlag(tt.in)
+			if tt.wantErr {
+				if err == nil {
+					t.Fatalf("parseStyleFlag(%q) err = nil, want error", tt.in)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("parseStyleFlag(%q) unexpected err = %v", tt.in, err)
+			}
+			if base != tt.wantBase {
+				t.Errorf("parseStyleFlag(%q) base = %q, want %q", tt.in, base, tt.wantBase)
+			}
+			switch {
+			case tt.wantBlur == nil && blur != nil:
+				t.Errorf("parseStyleFlag(%q) blur = %g, want nil", tt.in, *blur)
+			case tt.wantBlur != nil && blur == nil:
+				t.Errorf("parseStyleFlag(%q) blur = nil, want %g", tt.in, *tt.wantBlur)
+			case tt.wantBlur != nil && blur != nil && *blur != *tt.wantBlur:
+				t.Errorf("parseStyleFlag(%q) blur = %g, want %g", tt.in, *blur, *tt.wantBlur)
+			}
+		})
+	}
+}
+
+// fptr returns a pointer to v — a tiny helper for the *float64 want-fields above.
+func fptr(v float64) *float64 { return &v }

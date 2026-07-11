@@ -11,11 +11,20 @@ import (
 	"unsafe"
 )
 
-// screenEnumerator returns the current list of CGDirectDisplayIDs. The
-// production implementation uses cgo to call [NSScreen screens]; tests
-// inject a fake to drive reconcile transitions without a GUI session.
+// screenEnumerator returns the current list of CGDirectDisplayIDs plus a
+// geometry Signature. The production implementation uses cgo to call
+// [NSScreen screens]; tests inject a fake to drive reconcile transitions
+// without a GUI session.
+//
+// Signature is a 64-bit change-detector over the FULL geometry of all screens
+// (displayID + frame + backing scale). reconcile compares it across events to
+// skip rebuilding a live overlay on a no-op reconfig — critically the menu-bar
+// visibleFrame change from the Prohibited→Accessory activation flip at overlay
+// start, which must NOT destroy the glass CABackdropLayer blur. Enumerate still
+// supplies the ids the rebuild path keys windows by.
 type screenEnumerator interface {
 	Enumerate() []uint32
+	Signature() uint64
 }
 
 // windowFactory creates and closes per-display NSWindows. Production impl
@@ -31,6 +40,7 @@ type windowFactory interface {
 type cgoScreenEnumerator struct{}
 
 func (cgoScreenEnumerator) Enumerate() []uint32 { return enumerateScreens() }
+func (cgoScreenEnumerator) Signature() uint64   { return screensGeometrySignature() }
 
 // cgoWindowFactory is the production implementation backed by
 // cocoa_create_overlay_window / cocoa_close_overlay_window (window_darwin.m).
@@ -38,10 +48,13 @@ func (cgoScreenEnumerator) Enumerate() []uint32 { return enumerateScreens() }
 // threaded into every Create — this keeps the style out of the windowFactory
 // interface (Create(displayID uint32)), so the test fake and
 // newControllerWithDeps signature are untouched (QUICK-gh8).
-type cgoWindowFactory struct{ style string }
+type cgoWindowFactory struct {
+	style     string
+	glassBlur float64 // CIGaussianBlur radius (points) for glass; ignored otherwise
+}
 
 func (f cgoWindowFactory) Create(displayID uint32) (unsafe.Pointer, error) {
-	return createOverlayWindowStyled(displayID, f.style)
+	return createOverlayWindowStyled(displayID, f.style, f.glassBlur)
 }
 func (cgoWindowFactory) Close(w unsafe.Pointer) { closeOverlayWindow(w) }
 
@@ -106,6 +119,7 @@ func (cgoActivationPolicy) Background() { appBackground() }
 //     Release is called from defer rs.Cleanup() on the main goroutine.
 //   - Internal mu: protects the windows map and debouncer pointer.
 //   - released (atomic.Bool) + releaseOnce (sync.Once): two-layer idempotency
+//
 // per + Phase 1 mock_releaser.go pattern.
 type Controller struct {
 	log *slog.Logger
@@ -114,6 +128,15 @@ type Controller struct {
 	windows     map[uint32]unsafe.Pointer // displayID → boxed NSWindow*
 	debouncer   *time.Timer
 	debounceWin time.Duration
+
+	// lastGeomSig / haveGeomSig cache the screen-geometry Signature of the most
+	// recent rebuild. A runtime reconcile whose fresh Signature matches is a
+	// no-op reconfig (e.g. the menu-bar visibleFrame change from the activation
+	// flip at start) and is SKIPPED so the live overlay — and, for glass, its
+	// CABackdropLayer blur — is not torn down and recreated. Guarded by c.mu.
+	// haveGeomSig is false until the first rebuild records a baseline.
+	lastGeomSig uint64
+	haveGeomSig bool
 
 	// cursorHidden guards the one-shot system-cursor hide. Set true after a
 	// successful cold-start reconcile (CreateWindowsForAllScreens) hides the
@@ -146,17 +169,19 @@ type Controller struct {
 // 31-35). The returned Controller has registered its onScreensChanged
 // callback with the package-level activeOnScreensChanged registry.
 //
-// style selects the overlay look (black|matrix, QUICK-gh8); the caller passes
-// the NormalizeOverlayStyle'd value from config. It is threaded into the
-// cgoWindowFactory so every per-display window is created with that style,
-// WITHOUT widening the windowFactory interface.
-func NewController(style string, log *slog.Logger) *Controller {
+// style selects the overlay look (black|matrix|glass, QUICK-gh8); the caller
+// passes the NormalizeOverlayStyle'd value from config. glassBlur is the
+// CIGaussianBlur radius (points) for the glass style (resolved by main.go from
+// config glass_blur / the --style glass:N flag); it is ignored for every other
+// style. Both are threaded into the cgoWindowFactory so every per-display window
+// is created with them, WITHOUT widening the windowFactory interface.
+func NewController(style string, glassBlur float64, log *slog.Logger) *Controller {
 	if log == nil {
 		log = slog.Default()
 	}
 	return newControllerWithDeps(log,
 		cgoScreenEnumerator{},
-		cgoWindowFactory{style: style},
+		cgoWindowFactory{style: style, glassBlur: glassBlur},
 		cgoObserverRegistrar{},
 		cgoMainDispatcher{},
 		cgoCursorHider{},
@@ -258,24 +283,45 @@ func (c *Controller) reconcile(coldStart bool) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
-	// Step 1: destroy all current windows (full rebuild).
+	// Step 1: enumerate screens + snapshot their geometry Signature BEFORE
+	// touching the live windows, so a no-op reconfig bails out without teardown.
+	ids := c.screens.Enumerate()
+	sig := c.screens.Signature()
+
+	// Step 2: no-op guard (runtime only). An unchanged geometry Signature means
+	// nothing about the displays actually changed — the event is spurious, most
+	// commonly the menu-bar visibleFrame change from the Prohibited→Accessory
+	// activation flip fired right after cold-start (CreateWindowsForAllScreens).
+	// Skip the full rebuild so the live overlay stays up; for overlay_style glass
+	// this preserves the CABackdropLayer blur, which does NOT survive a
+	// destroy+recreate. Cold-start never skips (haveGeomSig is false until the
+	// first rebuild records a baseline). A real reconfig (resolution, mirror,
+	// rearrange, connect/disconnect) changes the Signature and rebuilds as before.
+	if !coldStart && c.haveGeomSig && sig == c.lastGeomSig {
+		return nil
+	}
+
+	// Committed to a rebuild (or teardown): record the new baseline so the next
+	// no-op event compares against it.
+	c.lastGeomSig = sig
+	c.haveGeomSig = true
+
+	// Step 3: destroy all current windows (full rebuild — no incremental diff).
 	for id, w := range c.windows {
 		c.windowsOf.Close(w)
 		delete(c.windows, id)
 	}
 
-	// Step 2: enumerate current screens.
-	ids := c.screens.Enumerate()
-
+	// Step 4: 0 screens → cold-start errors; runtime warns, leaves map empty.
 	if len(ids) == 0 {
 		if coldStart {
-			return ErrNoDisplays // 
+			return ErrNoDisplays //
 		}
 		c.log.Warn("all displays disconnected; overlay invisible until hot-plug returns")
-		return nil // 
+		return nil //
 	}
 
-	// Step 3: create one NSWindow per screen.
+	// Step 5: create one NSWindow per screen.
 	for i, id := range ids {
 		w, err := c.windowsOf.Create(id)
 		if err != nil {

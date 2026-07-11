@@ -17,24 +17,62 @@ import (
 
 // fakeEnumerator is a test-injectable screenEnumerator. Returns a snapshot
 // of the current ids slice (atomic swap on transitions for hot-plug
-// simulations).
+// simulations). It also counts Enumerate calls (enumN) — one per reconcile,
+// including the no-op-skip path, so debounce tests can assert how many
+// reconciles actually ran regardless of whether they rebuilt.
 type fakeEnumerator struct {
-	mu  sync.Mutex
-	ids []uint32
+	mu       sync.Mutex
+	ids      []uint32
+	geomBump uint64 // bumped to simulate a geometry-only reconfig (same ids)
+	enumN    int    // Enumerate call count
 }
 
 func (f *fakeEnumerator) Enumerate() []uint32 {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	f.enumN++
 	out := make([]uint32, len(f.ids))
 	copy(out, f.ids)
 	return out
+}
+
+// Signature mirrors the production geometry change-detector: an order-independent
+// FNV fold of the current ids XOR-mixed with geomBump. Changing the id set OR
+// bumping geometry changes the result; an unchanged set with unchanged geometry
+// keeps it stable (so reconcile's no-op guard skips).
+func (f *fakeEnumerator) Signature() uint64 {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	var acc uint64
+	for _, id := range f.ids {
+		h := uint64(1469598103934665603)
+		h = (h ^ uint64(id)) * 1099511628211
+		acc += h
+	}
+	return acc ^ (uint64(len(f.ids)) * 1099511628211) ^ f.geomBump
 }
 
 func (f *fakeEnumerator) set(ids []uint32) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.ids = ids
+}
+
+// bumpGeometry simulates a geometry-only reconfig (same displayIDs, changed
+// resolution/arrangement) so the Signature changes without the id set changing —
+// the real reason reconcile must still rebuild despite an unchanged id set.
+func (f *fakeEnumerator) bumpGeometry() {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.geomBump++
+}
+
+// enumerateCount returns how many times Enumerate has been called (== number of
+// reconcile invocations, skip or rebuild).
+func (f *fakeEnumerator) enumerateCount() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.enumN
 }
 
 // fakeWindowFactory records Create/Close calls, allows failure injection.
@@ -312,6 +350,70 @@ func TestController_Reconcile_FullRebuild(t *testing.T) {
 	}
 }
 
+// TestController_Reconcile_SkipUnchanged verifies the no-op guard: a runtime
+// reconcile whose geometry Signature is unchanged (same displays, same layout —
+// e.g. the spurious menu-bar event from the Prohibited→Accessory activation flip
+// at start) must NOT tear down and recreate the live overlay. This guard is what
+// keeps the glass CABackdropLayer blur alive past the first second.
+func TestController_Reconcile_SkipUnchanged(t *testing.T) {
+	td := newTestDeps(t, 0)
+	defer td.controller.Release()
+
+	td.enumerator.set([]uint32{1, 2})
+	if err := td.controller.reconcile(true); err != nil {
+		t.Fatalf("cold-start: %v", err)
+	}
+	closes0 := td.factory.CloseCount()
+	creates0 := td.factory.CreateCount()
+
+	// Same displays, same geometry → no-op reconfig: nothing torn down or rebuilt.
+	if err := td.controller.reconcile(false); err != nil {
+		t.Fatalf("reconcile(false) unchanged: %v", err)
+	}
+	if got := td.factory.CloseCount() - closes0; got != 0 {
+		t.Errorf("closes on unchanged reconcile = %d, want 0 (overlay must not be torn down)", got)
+	}
+	if got := td.factory.CreateCount() - creates0; got != 0 {
+		t.Errorf("creates on unchanged reconcile = %d, want 0 (overlay must not be rebuilt)", got)
+	}
+	if got := td.controller.WindowCount(); got != 2 {
+		t.Errorf("WindowCount after unchanged reconcile = %d, want 2 (unchanged)", got)
+	}
+}
+
+// TestController_Reconcile_GeometryChangeRebuilds verifies the guard does NOT
+// over-suppress: a real reconfig that keeps the SAME displayIDs but changes
+// geometry (resolution / mirror / rearrange) changes the Signature and MUST
+// rebuild, so the overlay resizes to keep covering every screen (no coverage
+// hole — the security stance).
+func TestController_Reconcile_GeometryChangeRebuilds(t *testing.T) {
+	td := newTestDeps(t, 0)
+	defer td.controller.Release()
+
+	td.enumerator.set([]uint32{1, 2})
+	if err := td.controller.reconcile(true); err != nil {
+		t.Fatalf("cold-start: %v", err)
+	}
+	closes0 := td.factory.CloseCount()
+	creates0 := td.factory.CreateCount()
+
+	// Same ids, but geometry changed (e.g. a resolution change) → Signature
+	// differs → full rebuild.
+	td.enumerator.bumpGeometry()
+	if err := td.controller.reconcile(false); err != nil {
+		t.Fatalf("reconcile(false) geometry change: %v", err)
+	}
+	if got := td.factory.CloseCount() - closes0; got != 2 {
+		t.Errorf("closes on geometry change = %d, want 2 (old windows torn down)", got)
+	}
+	if got := td.factory.CreateCount() - creates0; got != 2 {
+		t.Errorf("creates on geometry change = %d, want 2 (rebuilt for new geometry)", got)
+	}
+	if got := td.controller.WindowCount(); got != 2 {
+		t.Errorf("WindowCount after geometry change = %d, want 2", got)
+	}
+}
+
 func TestController_Reconcile_AbortOnCreateFail(t *testing.T) {
 	td := newTestDeps(t, 0)
 	defer td.controller.Release()
@@ -378,31 +480,31 @@ func TestController_Debounce_TrailingEdge(t *testing.T) {
 		t.Fatalf("cold-start: %v", err)
 	}
 
-	creates0 := td.factory.CreateCount()
-	// Fire 5 events in 30ms — all within debounce window.
+	enum0 := td.enumerator.enumerateCount()
+	// Fire 5 events in ~25ms — all within debounce window.
 	for range 5 {
 		td.controller.onScreensChanged()
 		time.Sleep(5 * time.Millisecond)
 	}
-	// During the burst no reconcile should have fired (debounce still pending).
-	creates1 := td.factory.CreateCount()
-	if creates1 != creates0 {
-		t.Errorf("reconcile fired during debounce burst: creates0=%d creates1=%d", creates0, creates1)
+	// During the burst no reconcile should have run yet (debounce still pending).
+	// reconcile is what calls Enumerate, so the count measures reconcile runs
+	// directly — independent of whether a run rebuilds or hits the no-op guard.
+	if got := td.enumerator.enumerateCount(); got != enum0 {
+		t.Errorf("reconcile ran during debounce burst: enum0=%d now=%d", enum0, got)
 	}
 
 	// Wait past debounce window.
 	time.Sleep(120 * time.Millisecond)
 
-	creates2 := td.factory.CreateCount()
-	// One reconcile = createCount += len(ids) = +2. Allow >=2 in case timing
-	// produced exactly one or somehow two (we tolerate one-extra to keep
-	// test non-flaky on busy CI but assert NOT 5 reconciles worth).
-	delta := creates2 - creates0
-	if delta < 2 {
-		t.Errorf("trailing-edge reconcile did not fire: createCount delta = %d, want >= 2", delta)
+	// Exactly one trailing reconcile should have run (each reconcile calls
+	// Enumerate once). Tolerate two in case CI timing split the burst, but
+	// assert the 5 events collapsed — NOT five reconciles.
+	delta := td.enumerator.enumerateCount() - enum0
+	if delta < 1 {
+		t.Errorf("trailing-edge reconcile did not run: enumerate delta = %d, want >= 1", delta)
 	}
-	if delta > 4 {
-		t.Errorf("debounce did not collapse burst: createCount delta = %d, want <= 4 (one or two reconciles, not 5)", delta)
+	if delta > 2 {
+		t.Errorf("debounce did not collapse burst: enumerate delta = %d, want <= 2 (not five)", delta)
 	}
 }
 

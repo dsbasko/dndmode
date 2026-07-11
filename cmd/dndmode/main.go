@@ -31,6 +31,7 @@ import (
 	"runtime"
 	"runtime/debug"
 	"strconv"
+	"strings"
 	"syscall"
 	"time"
 
@@ -137,6 +138,33 @@ func parseTimer(flagVal string) (time.Duration, error) {
 		return 0, fmt.Errorf("must be positive (e.g. 30m, 1h30m, 90s)")
 	}
 	return d, nil
+}
+
+// parseStyleFlag splits a --style value into its base style and an optional
+// blur-radius override. "glass:24" => ("glass", *24, nil); a bare "glass" or any
+// other style => (s, nil, nil). The ":<radius>" suffix is ONLY valid with glass
+// (it sets the CIGaussianBlur radius for this run, overriding config glass_blur);
+// a suffix on any other base, or a non-numeric / out-of-range radius, is an
+// error. The base style itself is NOT validated here — the caller runs
+// config.ValidateOverlayStyle so its error text can name the source (flag vs
+// config). Kept pure so it is unit-tested directly (Test_parseStyleFlag) like
+// parseTimer / resolveBoolFlag.
+func parseStyleFlag(s string) (string, *float64, error) {
+	base, blurStr, hasBlur := strings.Cut(s, ":")
+	if !hasBlur {
+		return s, nil, nil
+	}
+	if base != config.OverlayStyleGlass {
+		return "", nil, fmt.Errorf("the ':<radius>' suffix is only valid with glass (got %q)", base)
+	}
+	v, perr := strconv.ParseFloat(strings.TrimSpace(blurStr), 64)
+	if perr != nil {
+		return "", nil, fmt.Errorf("blur radius %q must be a number", blurStr)
+	}
+	if verr := config.ValidateGlassBlur(v); verr != nil {
+		return "", nil, verr
+	}
+	return base, &v, nil
 }
 
 // armTimer starts a one-shot timer that auto-disables dndmode after d by calling
@@ -353,8 +381,15 @@ func run() int {
 	// (passed into NewController). styleSource feeds the Step 6 banner.
 	overlayStyle := cfg.OverlayStyle
 	styleSource := "config"
+	var blurOverride *float64 // set only by a --style glass:N suffix
 	if *styleFlag != "" {
-		overlayStyle = *styleFlag
+		base, bo, perr := parseStyleFlag(*styleFlag)
+		if perr != nil {
+			fmt.Fprintf(errW, "dndmode: invalid --style %q: %v.\n", *styleFlag, perr)
+			return exitConfigErr
+		}
+		overlayStyle = base
+		blurOverride = bo
 		styleSource = "flag"
 	}
 	if err := config.ValidateOverlayStyle(overlayStyle); err != nil {
@@ -366,6 +401,19 @@ func run() int {
 		return exitConfigErr
 	}
 	overlayStyle = config.NormalizeOverlayStyle(overlayStyle)
+
+	// Resolve the glass blur radius (only meaningful for overlay_style glass): a
+	// --style glass:N suffix (blurOverride, already validated in parseStyleFlag)
+	// wins; otherwise the config glass_blur value (nil => DefaultGlassBlur via
+	// NormalizeGlassBlur), validated HERE so a junk glass_blur in YAML fails fast
+	// like an invalid style. Threaded into NewController at Step 15.
+	glassBlur := config.NormalizeGlassBlur(cfg.GlassBlur)
+	if blurOverride != nil {
+		glassBlur = *blurOverride
+	} else if err := config.ValidateGlassBlur(glassBlur); err != nil {
+		fmt.Fprintf(errW, "dndmode: invalid glass_blur %g: %v. Fix glass_blur in %s.\n", glassBlur, err, cfgPath)
+		return exitConfigErr
+	}
 
 	// --- Step 5b.2: Resolve + validate the auto-disable timer (flag-only) ---
 	// The timer is a per-run flag with no config key, so there is nothing to fall
@@ -387,6 +435,9 @@ func run() int {
 		fmt.Fprintf(outW, "dndmode: created default config at %s\n", cfgPath)
 	}
 	fmt.Fprintf(outW, "dndmode: config=%s hotkey=%s overlay_style=%s (%s)\n", cfgPath, cfg.Hotkey, overlayStyle, styleSource)
+	if overlayStyle == config.OverlayStyleGlass {
+		fmt.Fprintf(outW, "dndmode: glass_blur=%g\n", glassBlur)
+	}
 	if timerDur > 0 {
 		fmt.Fprintf(outW, "dndmode: timer=%s — auto-disable after this long\n", timerDur)
 	}
@@ -712,7 +763,7 @@ func run() int {
 	}
 
 	// --- Step 15 (Phase 3): Controller + per-screen overlay windows (P2) ---
-	controller := cocoa.NewController(overlayStyle, log)
+	controller := cocoa.NewController(overlayStyle, glassBlur, log)
 	if err := controller.CreateWindowsForAllScreens(); err != nil {
 		if errors.Is(err, cocoa.ErrNoDisplays) {
 			fmt.Fprintln(errW,

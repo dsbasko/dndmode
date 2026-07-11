@@ -9,11 +9,12 @@ package cocoa
 #include <stdint.h>
 #include <stddef.h>
 
-extern int    cocoa_screens_register_observers(void);
-extern int    cocoa_screens_unregister_observers(void);
-extern size_t cocoa_enumerate_screens(uint32_t* outIDs, size_t maxIDs);
-extern int    cocoa_test_get_screen_register_count(void);
-extern int    cocoa_test_get_cg_register_count(void);
+extern int      cocoa_screens_register_observers(void);
+extern int      cocoa_screens_unregister_observers(void);
+extern size_t   cocoa_enumerate_screens(uint32_t* outIDs, size_t maxIDs);
+extern uint64_t cocoa_screens_geometry_signature(void);
+extern int      cocoa_test_get_screen_register_count(void);
+extern int      cocoa_test_get_cg_register_count(void);
 */
 import "C"
 
@@ -110,6 +111,19 @@ func enumerateScreens() []uint32 {
 		out[i] = uint32(ids[i])
 	}
 	return out
+}
+
+// screensGeometrySignature returns a 64-bit change-detector over the full
+// geometry (displayID + frame + backing scale) of all attached screens. The
+// controller compares it across reconcile events to skip rebuilding a live
+// overlay on a no-op screen-reconfig (notably the menu-bar visibleFrame change
+// from the activation-policy flip at overlay start, which must NOT tear down the
+// glass CABackdropLayer blur). See cocoa_screens_geometry_signature in
+// screens_darwin.m for why it reads frame (not visibleFrame).
+//
+// MUST be called from the main goroutine (NSScreen main-thread invariant).
+func screensGeometrySignature() uint64 {
+	return uint64(C.cocoa_screens_geometry_signature())
 }
 
 // testScreenRegisterCount returns the cumulative number of times the
