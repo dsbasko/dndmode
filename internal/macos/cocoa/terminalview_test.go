@@ -70,9 +70,9 @@ func TestTerminalView_Tokenize_Classification(t *testing.T) {
 		},
 		{
 			name: "string with dot inside stays string",
-			line: `"dndmode.active"`,
+			line: `"cache.warm"`,
 			want: []termSegment{
-				{start: 0, length: 16, cls: termClassString},
+				{start: 0, length: 12, cls: termClassString},
 			},
 		},
 		{
@@ -150,12 +150,12 @@ func TestTerminalView_Tokenize_Classification(t *testing.T) {
 // drawRect: relies on — that x = start*cellW lays segments into one gap-free grid.
 func TestTerminalView_Tokenize_Coverage(t *testing.T) {
 	lines := []string{
-		"package dndmode",
-		"    windows []*overlayWindow",
-		"    const name = \"dndmode.active\"",
-		"    return true // stay silent on wrong input",
-		"static const NSUInteger kShieldBehavior =",
-		"for i := 0; i < len(displays); i++ {",
+		"package workerpool",
+		"    jobs    []*queuedJob",
+		"    const name = \"cache.warm\"",
+		"    return d * 2 // exponential, capped",
+		"static const unsigned kPollFlags =",
+		"for i := 0; i < len(shards); i++ {",
 	}
 
 	for _, line := range lines {

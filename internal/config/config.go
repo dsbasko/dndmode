@@ -65,8 +65,6 @@ const (
 	// configDirPerm is 0o700 — owner read/write/execute only (
 	// mitigation: world cannot read user config).
 	configDirPerm fs.FileMode = 0o700
-	// configFilePerm is 0o600 — owner read/write only.
-	configFilePerm fs.FileMode = 0o600
 )
 
 // Config is the v1 dndmode configuration schema. Add fields cautiously —

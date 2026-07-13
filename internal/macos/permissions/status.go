@@ -77,15 +77,15 @@ type ttyWriter struct {
 // Trailing \n is required so the subsequent Update's \r-prefix repaints
 // the line below the banner, not over it.
 func (t *ttyWriter) EntryBanner() {
-	fmt.Fprintln(t.w, "dndmode: waiting for grants…")
+	_, _ = fmt.Fprintln(t.w, "dndmode: waiting for grants…")
 }
 
 func (t *ttyWriter) Update(ax, im bool) {
-	fmt.Fprintf(t.w, "\rdndmode: waiting — ax: %s im: %s", glyph(ax), glyph(im))
+	_, _ = fmt.Fprintf(t.w, "\rdndmode: waiting — ax: %s im: %s", glyph(ax), glyph(im))
 }
 
 func (t *ttyWriter) Final() {
-	fmt.Fprintln(t.w, "\rdndmode: grants received.")
+	_, _ = fmt.Fprintln(t.w, "\rdndmode: grants received.")
 }
 
 // pipeWriter writes ONE startup line on the first Update — the line
@@ -131,11 +131,11 @@ func (p *pipeWriter) Update(ax, im bool) {
 		// Final fully describe the state.
 		return
 	}
-	fmt.Fprintf(p.w, "dndmode: waiting for grants — ax: %s, im: %s\n", axState(ax), axState(im))
+	_, _ = fmt.Fprintf(p.w, "dndmode: waiting for grants — ax: %s, im: %s\n", axState(ax), axState(im))
 }
 
 func (p *pipeWriter) Final() {
-	fmt.Fprintln(p.w, "dndmode: grants received.")
+	_, _ = fmt.Fprintln(p.w, "dndmode: grants received.")
 }
 
 // axState maps a bool grant state to the lowercase noun form used in

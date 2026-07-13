@@ -281,7 +281,7 @@ func run() int {
 	// the minimum-regression resolution per the design notes.
 	defer func() {
 		if r := recover(); r != nil {
-			fmt.Fprintf(errW, "dndmode: PANIC: %v\n%s\n", r, debug.Stack())
+			_, _ = fmt.Fprintf(errW, "dndmode: PANIC: %v\n%s\n", r, debug.Stack())
 			os.Exit(exitInternalErr)
 		}
 	}()
@@ -335,7 +335,7 @@ func run() int {
 		}
 		// Single user-facing line on stdout. Printed AFTER Cleanup
 		// completes — proof that defer chain ran.
-		fmt.Fprintln(outW, "dndmode: cleaning up… done.")
+		_, _ = fmt.Fprintln(outW, "dndmode: cleaning up… done.")
 	}()
 
 	// --- Step 4: Resolve config path (mitigation) ---
@@ -350,7 +350,7 @@ func run() int {
 	loader := config.NewLoader(cfgPath)
 	cfg, created, err := loader.Load()
 	if err != nil {
-		fmt.Fprintln(errW, err)
+		_, _ = fmt.Fprintln(errW, err)
 		return exitConfigErr
 	}
 	// `debug: true` in config raises the output gate too (the --debug flag, Step
@@ -365,7 +365,7 @@ func run() int {
 
 	// --- Step 5b: Validate hotkey grammar ---
 	if _, err := hotkey.Parse(cfg.Hotkey); err != nil {
-		fmt.Fprintf(errW, "dndmode: invalid hotkey %q: %v. Fix the hotkey grammar in ~/.config/dndmode/config.yml.\n", cfg.Hotkey, err)
+		_, _ = fmt.Fprintf(errW, "dndmode: invalid hotkey %q: %v. Fix the hotkey grammar in ~/.config/dndmode/config.yml.\n", cfg.Hotkey, err)
 		return exitConfigErr
 	}
 
@@ -385,7 +385,7 @@ func run() int {
 	if *styleFlag != "" {
 		base, bo, perr := parseStyleFlag(*styleFlag)
 		if perr != nil {
-			fmt.Fprintf(errW, "dndmode: invalid --style %q: %v.\n", *styleFlag, perr)
+			_, _ = fmt.Fprintf(errW, "dndmode: invalid --style %q: %v.\n", *styleFlag, perr)
 			return exitConfigErr
 		}
 		overlayStyle = base
@@ -394,9 +394,9 @@ func run() int {
 	}
 	if err := config.ValidateOverlayStyle(overlayStyle); err != nil {
 		if styleSource == "flag" {
-			fmt.Fprintf(errW, "dndmode: invalid --style %q: %v.\n", overlayStyle, err)
+			_, _ = fmt.Fprintf(errW, "dndmode: invalid --style %q: %v.\n", overlayStyle, err)
 		} else {
-			fmt.Fprintf(errW, "dndmode: invalid overlay_style %q: %v. Fix overlay_style in ~/.config/dndmode/config.yml (valid: black, matrix, terminal, glass, none).\n", overlayStyle, err)
+			_, _ = fmt.Fprintf(errW, "dndmode: invalid overlay_style %q: %v. Fix overlay_style in ~/.config/dndmode/config.yml (valid: black, matrix, terminal, glass, none).\n", overlayStyle, err)
 		}
 		return exitConfigErr
 	}
@@ -411,7 +411,7 @@ func run() int {
 	if blurOverride != nil {
 		glassBlur = *blurOverride
 	} else if err := config.ValidateGlassBlur(glassBlur); err != nil {
-		fmt.Fprintf(errW, "dndmode: invalid glass_blur %g: %v. Fix glass_blur in %s.\n", glassBlur, err, cfgPath)
+		_, _ = fmt.Fprintf(errW, "dndmode: invalid glass_blur %g: %v. Fix glass_blur in %s.\n", glassBlur, err, cfgPath)
 		return exitConfigErr
 	}
 
@@ -426,20 +426,20 @@ func run() int {
 	// branch above.
 	timerDur, err := parseTimer(*timerFlag)
 	if err != nil {
-		fmt.Fprintf(errW, "dndmode: invalid --timer %q: %v.\n", *timerFlag, err)
+		_, _ = fmt.Fprintf(errW, "dndmode: invalid --timer %q: %v.\n", *timerFlag, err)
 		return exitConfigErr
 	}
 
 	// --- Step 6: Print banner (stdout-only) ---
 	if created {
-		fmt.Fprintf(outW, "dndmode: created default config at %s\n", cfgPath)
+		_, _ = fmt.Fprintf(outW, "dndmode: created default config at %s\n", cfgPath)
 	}
-	fmt.Fprintf(outW, "dndmode: config=%s hotkey=%s overlay_style=%s (%s)\n", cfgPath, cfg.Hotkey, overlayStyle, styleSource)
+	_, _ = fmt.Fprintf(outW, "dndmode: config=%s hotkey=%s overlay_style=%s (%s)\n", cfgPath, cfg.Hotkey, overlayStyle, styleSource)
 	if overlayStyle == config.OverlayStyleGlass {
-		fmt.Fprintf(outW, "dndmode: glass_blur=%g\n", glassBlur)
+		_, _ = fmt.Fprintf(outW, "dndmode: glass_blur=%g\n", glassBlur)
 	}
 	if timerDur > 0 {
-		fmt.Fprintf(outW, "dndmode: timer=%s — auto-disable after this long\n", timerDur)
+		_, _ = fmt.Fprintf(outW, "dndmode: timer=%s — auto-disable after this long\n", timerDur)
 	}
 
 	// --- Step 3 (Phase 3): signal-driven ctx ---
@@ -459,15 +459,15 @@ func run() int {
 	if err := permissions.CheckPlatform(permissions.CurrentArch(), ver); err != nil {
 		switch {
 		case errors.Is(err, permissions.ErrNonArm64):
-			fmt.Fprintf(errW,
+			_, _ = fmt.Fprintf(errW,
 				"dndmode: requires macOS on Apple Silicon (arm64), got %s/%s.\n",
 				runtime.GOOS, runtime.GOARCH)
 		case errors.Is(err, permissions.ErrMacOSBelow14):
-			fmt.Fprintf(errW,
+			_, _ = fmt.Fprintf(errW,
 				"dndmode: requires macOS 14 (Sonoma) or newer, got %d.%d.\n",
 				ver.Major, ver.Minor)
 		default:
-			fmt.Fprintf(errW, "dndmode: platform check failed: %v. Re-run on macOS 14+ Apple Silicon.\n", err)
+			_, _ = fmt.Fprintf(errW, "dndmode: platform check failed: %v. Re-run on macOS 14+ Apple Silicon.\n", err)
 		}
 		return exitPlatformErr
 	}
@@ -495,12 +495,12 @@ func run() int {
 	// exactly like an invalid --style.
 	effectiveMute, err := resolveBoolFlag(*muteFlag, config.NormalizeMute(cfg.Mute))
 	if err != nil {
-		fmt.Fprintf(errW, "dndmode: invalid --mute %q: %v.\n", *muteFlag, err)
+		_, _ = fmt.Fprintf(errW, "dndmode: invalid --mute %q: %v.\n", *muteFlag, err)
 		return exitConfigErr
 	}
 	effectiveFocus, err := resolveBoolFlag(*focusFlag, cfg.Focus)
 	if err != nil {
-		fmt.Fprintf(errW, "dndmode: invalid --focus %q: %v.\n", *focusFlag, err)
+		_, _ = fmt.Fprintf(errW, "dndmode: invalid --focus %q: %v.\n", *focusFlag, err)
 		return exitConfigErr
 	}
 
@@ -527,7 +527,7 @@ func run() int {
 		// warn-not-fatal because corrupted state is recovery's domain.
 		log.Warn("pre-check inconclusive", slog.Any("err", err))
 	} else if alive {
-		fmt.Fprintf(errW,
+		_, _ = fmt.Fprintf(errW,
 			"dndmode: another instance is already active (PID=%d). Send SIGTERM or wait for its exit, then re-run.\n",
 			peerPID)
 		return exitConcurrentInstance
@@ -552,17 +552,17 @@ func run() int {
 	// only when debug is on (so NewStatusWriter's *os.File TTY detection still
 	// gives the \r-repaint UX), io.Discard otherwise so a waiting run stays fully
 	// silent. Passing the gatedWriter here instead would defeat TTY detection.
-	var statusOut io.Writer = io.Discard
+	var statusOut = io.Discard
 	if debugOn {
 		statusOut = os.Stdout
 	}
 	statusW := permissions.NewStatusWriter(statusOut)
 	if err := permissions.WaitForGrants(ctx, chk, link, statusW, promptFn, log, 500*time.Millisecond); err != nil {
 		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
-			fmt.Fprintln(errW, "dndmode: aborted while waiting for permissions.")
+			_, _ = fmt.Fprintln(errW, "dndmode: aborted while waiting for permissions.")
 			return exitPermissionDenied
 		}
-		fmt.Fprintf(errW, "dndmode: wait for grants failed: %v. Check Console.app for TCC daemon errors and re-run.\n", err)
+		_, _ = fmt.Fprintf(errW, "dndmode: wait for grants failed: %v. Check Console.app for TCC daemon errors and re-run.\n", err)
 		return exitPlatformErr
 	}
 
@@ -579,7 +579,7 @@ func run() int {
 	if effectiveFocus {
 		if err := focus.CheckShortcuts(ctx, runner); err != nil {
 			if errors.Is(err, focus.ErrShortcutsMissing) {
-				fmt.Fprintln(errW,
+				_, _ = fmt.Fprintln(errW,
 					"dndmode: required Shortcuts not found (need: dndmode-on, dndmode-off).\n\n"+
 						"To create them:\n"+
 						"  1. Open the Shortcuts app (⌘+Space → \"Shortcuts\").\n"+
@@ -590,14 +590,14 @@ func run() int {
 						"Then re-run dndmode.")
 				return exitFocusSetup
 			}
-			fmt.Fprintf(errW, "dndmode: shortcuts check failed: %v. Inspect /usr/bin/shortcuts availability and re-run.\n", err)
+			_, _ = fmt.Fprintf(errW, "dndmode: shortcuts check failed: %v. Inspect /usr/bin/shortcuts availability and re-run.\n", err)
 			return exitPlatformErr
 		}
 	}
 
 	// --- Step 10 (Phase 3): SecureEventInput check (exit 4) ---
 	if permissions.IsSecureEventInputActive() {
-		fmt.Fprintln(errW,
+		_, _ = fmt.Fprintln(errW,
 			"dndmode: Secure Event Input is active (typically Terminal sudo prompt, password fields, or 1Password). Close those, then re-run.")
 		return exitSecureInputConflict
 	}
@@ -620,7 +620,7 @@ func run() int {
 		log,
 	); err != nil {
 		if errors.Is(err, runtimepkg.ErrConcurrentInstance) {
-			fmt.Fprintf(errW,
+			_, _ = fmt.Fprintf(errW,
 				"dndmode: %v. Send SIGTERM or wait for its exit, then re-run.\n", err)
 			return exitConcurrentInstance
 		}
@@ -630,14 +630,14 @@ func run() int {
 			// user-facing template names the absolute path twice on
 			// purpose: once in the diagnostic, once in the rm command,
 			// so copy-paste from terminal selection is unambiguous.
-			fmt.Fprintf(errW,
+			_, _ = fmt.Fprintf(errW,
 				"dndmode: cannot delete stale runtime file (%s): %v.\n"+
 					"Run: rm -f %s\n"+
 					"Then re-run dndmode.\n",
 				runtimeMgr.Path(), err, runtimeMgr.Path())
 			return exitRuntimeJSON
 		}
-		fmt.Fprintf(errW, "dndmode: crash recovery failed: %v\n", err)
+		_, _ = fmt.Fprintf(errW, "dndmode: crash recovery failed: %v\n", err)
 		return exitPlatformErr
 	}
 
@@ -654,11 +654,11 @@ func run() int {
 		log,
 	); err != nil {
 		if errors.Is(err, powerassert.ErrConcurrentInstance) {
-			fmt.Fprintf(errW,
+			_, _ = fmt.Fprintf(errW,
 				"dndmode: %v. Send SIGTERM or wait for its exit, then re-run.\n", err)
 			return exitConcurrentInstance
 		}
-		fmt.Fprintf(errW, "dndmode: orphan cleanup failed: %v. Inspect 'pmset -g assertions' for stuck entries and re-run.\n", err)
+		_, _ = fmt.Fprintf(errW, "dndmode: orphan cleanup failed: %v. Inspect 'pmset -g assertions' for stuck entries and re-run.\n", err)
 		return exitPlatformErr
 	}
 
@@ -680,7 +680,7 @@ func run() int {
 	// awake); true → legacy PreventUserIdleSystemSleep (display may idle-off).
 	assertion, err := powerassert.Acquire("dndmode active", cfg.AllowDisplaySleep, log)
 	if err != nil {
-		fmt.Fprintf(errW, "dndmode: acquire awake-lock failed: %v. Check IOKit availability and re-run.\n", err)
+		_, _ = fmt.Fprintf(errW, "dndmode: acquire awake-lock failed: %v. Check IOKit availability and re-run.\n", err)
 		return exitPlatformErr
 	}
 	rs.Push(assertion) // released 3rd in LIFO (between controller и runtime-mock)
@@ -713,7 +713,7 @@ func run() int {
 		PriorMuted:   priorMuted,
 		FocusEnabled: &effectiveFocus,
 	}); err != nil {
-		fmt.Fprintf(errW, "dndmode: write runtime.json failed: %v. Inspect %s and re-run.\n", err, runtimeMgr.Path())
+		_, _ = fmt.Fprintf(errW, "dndmode: write runtime.json failed: %v. Inspect %s and re-run.\n", err, runtimeMgr.Path())
 		return exitPlatformErr
 	}
 
@@ -758,7 +758,7 @@ func run() int {
 	// above is the cheapest resource — fail fast on IOKit errors before any
 	// AppKit objects exist.
 	if err := cocoa.Init(log); err != nil {
-		fmt.Fprintf(errW, "dndmode: cocoa init failed: %v. Check Console.app for AppKit asserts and re-run.\n", err)
+		_, _ = fmt.Fprintf(errW, "dndmode: cocoa init failed: %v. Check Console.app for AppKit asserts and re-run.\n", err)
 		return exitPlatformErr
 	}
 
@@ -766,11 +766,11 @@ func run() int {
 	controller := cocoa.NewController(overlayStyle, glassBlur, log)
 	if err := controller.CreateWindowsForAllScreens(); err != nil {
 		if errors.Is(err, cocoa.ErrNoDisplays) {
-			fmt.Fprintln(errW,
+			_, _ = fmt.Fprintln(errW,
 				"dndmode: no displays detected (lid closed without external monitor?). "+
 					"Open the lid or connect a display, then re-run.")
 		} else {
-			fmt.Fprintf(errW, "dndmode: create overlay windows failed: %v. Reconnect displays and re-run.\n", err)
+			_, _ = fmt.Fprintf(errW, "dndmode: create overlay windows failed: %v. Reconnect displays and re-run.\n", err)
 		}
 		return exitPlatformErr
 	}
@@ -817,18 +817,18 @@ func run() int {
 	if parseErr != nil {
 		// Unreachable: Step 5b already validated. Defensive only — keeps
 		// the failure surface explicit instead of relying on global state.
-		fmt.Fprintf(errW, "dndmode: re-parse hotkey failed: %v\n", parseErr)
+		_, _ = fmt.Fprintf(errW, "dndmode: re-parse hotkey failed: %v\n", parseErr)
 		return exitConfigErr
 	}
 	tapRel, err := eventtap.InstallAll(spec, sup.ExitTrigger(), log)
 	if err != nil {
 		if errors.Is(err, eventtap.ErrTapInstallFailed) {
-			fmt.Fprintf(errW,
+			_, _ = fmt.Fprintf(errW,
 				"dndmode: install CGEventTap failed: %v.\n"+
 					"Likely causes: Accessibility revoked between PreFlight and now (re-grant via System Settings → Privacy & Security → Accessibility), or another app holds SecureEventInput (close sudo / password fields).\n", err)
 			return exitPlatformErr
 		}
-		fmt.Fprintf(errW, "dndmode: install eventtap subsystems failed: %v\n", err)
+		_, _ = fmt.Fprintf(errW, "dndmode: install eventtap subsystems failed: %v\n", err)
 		return exitPlatformErr
 	}
 	rs.Push(tapRel) // released FIRST in LIFO (Name == "eventtap")
@@ -857,7 +857,7 @@ func run() int {
 	defer stopTimer()
 
 	// --- Step 18 (Phase 3): Active state banner (P2: AFTER controller create) ---
-	fmt.Fprintln(outW, "dndmode: active. press Ctrl-C.")
+	_, _ = fmt.Fprintln(outW, "dndmode: active. press Ctrl-C.")
 
 	// --- Step 19 (Phase 3): Block on [NSApp run] until ctx-cancel or unexpected exit ---
 	if err := cocoa.RunApp(ctx); err != nil {
@@ -927,7 +927,7 @@ func runCaffeinateOnly(ctx context.Context, stop func(), allowDisplaySleep bool,
 		if errors.Is(err, context.Canceled) {
 			return exitOK
 		}
-		fmt.Fprintf(errW,
+		_, _ = fmt.Fprintf(errW,
 			"dndmode: start caffeinate failed: %v. Ensure /usr/bin/caffeinate exists and re-run.\n", err)
 		return exitPlatformErr
 	}
@@ -940,7 +940,7 @@ func runCaffeinateOnly(ctx context.Context, stop func(), allowDisplaySleep bool,
 	stopTimer := armTimer(timerDur, stop, log)
 	defer stopTimer()
 
-	fmt.Fprintln(outW, "dndmode: active (caffeinate-only, no overlay). press Ctrl-C.")
+	_, _ = fmt.Fprintln(outW, "dndmode: active (caffeinate-only, no overlay). press Ctrl-C.")
 
 	select {
 	case <-ctx.Done():

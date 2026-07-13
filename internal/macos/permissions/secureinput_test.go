@@ -20,5 +20,5 @@ import (
 // the call site in cmd/dndmode/main.go.
 func TestIsSecureEventInputActive_Signature(t *testing.T) {
 	t.Helper()
-	var _ func() bool = permissions.IsSecureEventInputActive
+	_ = (func() bool)(permissions.IsSecureEventInputActive)
 }
