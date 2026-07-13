@@ -48,16 +48,20 @@ func TestSmoke_Terminal_CreateClose(t *testing.T) {
 		}
 	}()
 
-	w, err := createOverlayWindowStyled(id, "terminal", 0)
-	if err != nil {
-		t.Fatalf("createOverlayWindowStyled(%d, terminal): %v", id, err)
-	}
-	if w == nil {
-		t.Fatalf("createOverlayWindowStyled returned nil handle without error")
-	}
+	// Exercise every terminal language (each selects a different corpus table +
+	// tokenizer syntax); "" is the bare-terminal Go default.
+	for _, lang := range []string{"", "go", "python", "typescript", "rust"} {
+		w, err := createOverlayWindowStyled(id, "terminal", 0, lang)
+		if err != nil {
+			t.Fatalf("createOverlayWindowStyled(%d, terminal:%q): %v", id, lang, err)
+		}
+		if w == nil {
+			t.Fatalf("createOverlayWindowStyled(terminal:%q) returned nil handle without error", lang)
+		}
 
-	// Let at least one animation tick (~33ms at 30 FPS) fire before teardown.
-	time.Sleep(150 * time.Millisecond)
+		// Let at least one animation tick (~33ms at 30 FPS) fire before teardown.
+		time.Sleep(150 * time.Millisecond)
 
-	closeOverlayWindow(w) // must not panic; TerminalView stops+releases its timer.
+		closeOverlayWindow(w) // must not panic; TerminalView stops+releases its timer.
+	}
 }

@@ -53,6 +53,19 @@ const (
 	// in this mode because there is no event tap to observe one).
 	OverlayStyleNone = "none"
 
+	// TerminalLangGo / Python / TypeScript / Rust are the languages the
+	// `terminal` overlay style can render, selected by the --style terminal:<lang>
+	// flag suffix (mirrors --style glass:N). Each maps to its own compiled-in
+	// source corpus with language-appropriate syntax highlighting. A bare
+	// `terminal` (no suffix) defaults to Go.
+	TerminalLangGo         = "go"
+	TerminalLangPython     = "python"
+	TerminalLangTypeScript = "typescript"
+	TerminalLangRust       = "rust"
+	// DefaultTerminalLanguage is the language a bare `terminal` renders (mirrors
+	// DefaultGlassBlur for the glass param).
+	DefaultTerminalLanguage = TerminalLangGo
+
 	// DefaultGlassBlur is the CIGaussianBlur radius (in points) used for
 	// overlay_style "glass" when glass_blur is absent and no --style glass:N
 	// override is given. ~16 keeps large shapes recognizable while text stays
@@ -84,6 +97,13 @@ type Config struct {
 	// meaningful for glass; ignored for black/matrix/terminal/none. Per-run override: the
 	// --style glass:N flag suffix (main.go). Validated by ValidateGlassBlur.
 	GlassBlur *float64 `yaml:"glass_blur"`
+	// TerminalLanguage selects the source language for overlay_style "terminal":
+	// "go" (default / absent), "python", "typescript" or "rust". Only meaningful
+	// for terminal; ignored for every other style. Per-run override: the
+	// --style terminal:<lang> flag suffix (main.go) WINS over this. A plain string
+	// so an ABSENT/empty key defaults to Go via NormalizeTerminalLanguage;
+	// validated by ValidateTerminalLanguage (mirrors the GlassBlur gate).
+	TerminalLanguage string `yaml:"terminal_language"`
 	// AllowDisplaySleep has INVERTED polarity: the Go zero value false
 	// (default / key absent) keeps the display awake via the IOPMAssertion
 	// type kIOPMAssertPreventUserIdleDisplaySleep; true restores the legacy
@@ -150,6 +170,28 @@ func ValidateOverlayStyle(s string) error {
 		return nil
 	default:
 		return fmt.Errorf("unknown overlay_style %q (valid: black, matrix, terminal, glass, none)", s)
+	}
+}
+
+// NormalizeTerminalLanguage maps "" => the default terminal language (Go),
+// mirroring NormalizeOverlayStyle. A bare `--style terminal` (no :suffix) and an
+// absent value both normalize here; callers thread the result downstream.
+func NormalizeTerminalLanguage(s string) string {
+	if s == "" {
+		return DefaultTerminalLanguage
+	}
+	return s
+}
+
+// ValidateTerminalLanguage accepts "" (treated as the default, Go) and the four
+// supported languages; anything else returns a non-nil error suitable for
+// main.go's stderr template. Gates the --style terminal:<lang> flag suffix.
+func ValidateTerminalLanguage(s string) error {
+	switch s {
+	case "", TerminalLangGo, TerminalLangPython, TerminalLangTypeScript, TerminalLangRust:
+		return nil
+	default:
+		return fmt.Errorf("unknown terminal language %q (valid: go, python, typescript, rust)", s)
 	}
 }
 
@@ -275,6 +317,8 @@ hotkey: %s
 #   terminal : scrolling stream of syntax-highlighted pseudo-source that types
 #            itself out behind a blinking caret over the black shield (cosmetic
 #            only; opaque, every blocking guarantee is identical to black).
+#            Language is set by terminal_language below (default go); the
+#            --style terminal:<lang> flag overrides it for a single run.
 #   glass  : TRANSPARENT frosted glass — the blurred desktop shows through.
 #            Trades the no-bleed-through guarantee for the look; keyboard and
 #            trackpad are still fully blocked. Blur strength = glass_blur below.
@@ -297,6 +341,13 @@ hotkey: %s
 #   Higher (~30) : everything dissolves into a smooth frost.
 # Per-run override: the --style glass:<radius> flag (e.g. --style glass:24).
 # glass_blur: 16
+
+# --- terminal_language -------------------------------------------------------
+# Source language rendered by overlay_style 'terminal': go (default), python,
+# typescript or rust. Each has its own compiled-in corpus + syntax highlighting.
+# Only used by 'terminal'; ignored otherwise.
+# Per-run override: the --style terminal:<lang> flag (e.g. --style terminal:rust).
+# terminal_language: go
 
 # --- allow_display_sleep -----------------------------------------------------
 # INVERTED toggle controlling the DISPLAY (the system stays awake either way).

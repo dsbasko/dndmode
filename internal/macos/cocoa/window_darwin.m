@@ -142,7 +142,8 @@ static NSImage *captureBlurredDesktopImage(uint32_t displayID, NSScreen *target,
 // `style` selects the overlay content: "matrix" (QUICK-gh8) installs an animated
 // MatrixView over an opaque black base; "terminal" installs an animated
 // TerminalView (scrolling syntax-highlighted source) over the same opaque black
-// base; "glass" (QUICK-glass) shows a STATIC,
+// base — the `language` arg (go/python/typescript/rust; NULL => go) selects the
+// corpus + highlighting; "glass" (QUICK-glass) shows a STATIC,
 // tunable-radius CIGaussianBlur of a one-shot ScreenCaptureKit screenshot of the
 // desktop (frosted glass — the ONLY non-opaque style; falls back to
 // NSVisualEffectView frost if Screen Recording is not granted or the capture
@@ -160,7 +161,8 @@ static NSImage *captureBlurredDesktopImage(uint32_t displayID, NSScreen *target,
 // without activation) appear exactly once in the body for unambiguous grep
 // audits.
 void* cocoa_create_overlay_window(uint32_t displayID, const char* style,
-                                  double blurRadius, char** outErr) {
+                                  double blurRadius, const char* language,
+                                  char** outErr) {
     NSScreen *target = nil;
     for (NSScreen *s in [NSScreen screens]) {
         NSNumber *n = [[s deviceDescription] objectForKey:@"NSScreenNumber"];
@@ -293,7 +295,8 @@ void* cocoa_create_overlay_window(uint32_t displayID, const char* style,
         // transparent) — same T-gh8-03 no-bleed-through guarantee as matrix.
         // TerminalView's @interface comes from terminalview_darwin.h.
         } else if (style != NULL && strcmp(style, "terminal") == 0) {
-            TerminalView *tv = [[TerminalView alloc] initWithFrame:[[w contentView] bounds]];
+            TerminalView *tv = [[TerminalView alloc] initWithFrame:[[w contentView] bounds]
+                                                          language:language];
             [tv setAutoresizingMask:(NSViewWidthSizable | NSViewHeightSizable)];
             [w setContentView:tv];
         }

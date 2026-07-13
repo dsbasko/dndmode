@@ -9,7 +9,7 @@ package cocoa
 #include <stdint.h>
 #include <stdlib.h>
 
-extern void* cocoa_create_overlay_window(uint32_t displayID, const char* style, double blurRadius, char** outErr);
+extern void* cocoa_create_overlay_window(uint32_t displayID, const char* style, double blurRadius, const char* language, char** outErr);
 extern void  cocoa_close_overlay_window(void* windowHandle);
 extern long  cocoa_window_level(void* windowHandle);
 extern int   cocoa_window_is_visible(void* windowHandle);
@@ -32,18 +32,22 @@ import (
 // desktop snapshot). The window keeps every shield guarantee regardless of style
 // (QUICK-gh8). blurRadius is the CIGaussianBlur radius (points) for the "glass"
 // style; a non-positive value means "use the built-in default" and it is ignored
-// for every other style. Returns the boxed NSWindow pointer (caller owns; pass
+// for every other style. language selects the source language for the "terminal"
+// style ("go"/"python"/"typescript"/"rust"; "" => go) and is ignored for every
+// other style. Returns the boxed NSWindow pointer (caller owns; pass
 // to closeOverlayWindow exactly once). On failure returns (nil, error) with the
 // C-side strdup'd message bridged via C.GoString + C.free.
 //
 // MUST be called from the main goroutine (NSWindow + NSScreen API requires
 // main thread). Caller is controller.reconcile via cgoWindowFactory, which
 // runs under DispatchMain (ensures main-thread invariant).
-func createOverlayWindowStyled(displayID uint32, style string, blurRadius float64) (unsafe.Pointer, error) {
+func createOverlayWindowStyled(displayID uint32, style string, blurRadius float64, language string) (unsafe.Pointer, error) {
 	cStyle := C.CString(style)
 	defer C.free(unsafe.Pointer(cStyle))
+	cLang := C.CString(language)
+	defer C.free(unsafe.Pointer(cLang))
 	var cErr *C.char
-	w := C.cocoa_create_overlay_window(C.uint32_t(displayID), cStyle, C.double(blurRadius), &cErr)
+	w := C.cocoa_create_overlay_window(C.uint32_t(displayID), cStyle, C.double(blurRadius), cLang, &cErr)
 	if w == nil {
 		msg := C.GoString(cErr)
 		C.free(unsafe.Pointer(cErr))
@@ -59,7 +63,7 @@ func createOverlayWindowStyled(displayID uint32, style string, blurRadius float6
 //
 // MUST be called from the main goroutine (see createOverlayWindowStyled).
 func createOverlayWindow(displayID uint32) (unsafe.Pointer, error) {
-	return createOverlayWindowStyled(displayID, "black", 0)
+	return createOverlayWindowStyled(displayID, "black", 0, "")
 }
 
 // closeOverlayWindow orders out + closes the NSWindow and releases the

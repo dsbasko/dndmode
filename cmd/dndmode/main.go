@@ -140,31 +140,40 @@ func parseTimer(flagVal string) (time.Duration, error) {
 	return d, nil
 }
 
-// parseStyleFlag splits a --style value into its base style and an optional
-// blur-radius override. "glass:24" => ("glass", *24, nil); a bare "glass" or any
-// other style => (s, nil, nil). The ":<radius>" suffix is ONLY valid with glass
-// (it sets the CIGaussianBlur radius for this run, overriding config glass_blur);
-// a suffix on any other base, or a non-numeric / out-of-range radius, is an
-// error. The base style itself is NOT validated here — the caller runs
-// config.ValidateOverlayStyle so its error text can name the source (flag vs
+// parseStyleFlag splits a --style value into its base style plus an optional
+// ":<suffix>" whose meaning depends on the base:
+//   - "glass:24"        => ("glass", *24, "", nil)  -- CIGaussianBlur radius override
+//   - "terminal:python" => ("terminal", nil, "python", nil)  -- source language
+// A bare style => (s, nil, "", nil). A suffix on any base other than glass or
+// terminal, a non-numeric / out-of-range glass radius, or an unknown terminal
+// language is an error. The base style itself is NOT validated here — the caller
+// runs config.ValidateOverlayStyle so its error text can name the source (flag vs
 // config). Kept pure so it is unit-tested directly (Test_parseStyleFlag) like
 // parseTimer / resolveBoolFlag.
-func parseStyleFlag(s string) (string, *float64, error) {
-	base, blurStr, hasBlur := strings.Cut(s, ":")
-	if !hasBlur {
-		return s, nil, nil
+func parseStyleFlag(s string) (string, *float64, string, error) {
+	base, suffix, hasSuffix := strings.Cut(s, ":")
+	if !hasSuffix {
+		return s, nil, "", nil
 	}
-	if base != config.OverlayStyleGlass {
-		return "", nil, fmt.Errorf("the ':<radius>' suffix is only valid with glass (got %q)", base)
+	switch base {
+	case config.OverlayStyleGlass:
+		v, perr := strconv.ParseFloat(strings.TrimSpace(suffix), 64)
+		if perr != nil {
+			return "", nil, "", fmt.Errorf("blur radius %q must be a number", suffix)
+		}
+		if verr := config.ValidateGlassBlur(v); verr != nil {
+			return "", nil, "", verr
+		}
+		return base, &v, "", nil
+	case config.OverlayStyleTerminal:
+		lang := strings.TrimSpace(suffix)
+		if verr := config.ValidateTerminalLanguage(lang); verr != nil {
+			return "", nil, "", verr
+		}
+		return base, nil, lang, nil
+	default:
+		return "", nil, "", fmt.Errorf("the ':<...>' suffix is only valid with glass or terminal (got %q)", base)
 	}
-	v, perr := strconv.ParseFloat(strings.TrimSpace(blurStr), 64)
-	if perr != nil {
-		return "", nil, fmt.Errorf("blur radius %q must be a number", blurStr)
-	}
-	if verr := config.ValidateGlassBlur(v); verr != nil {
-		return "", nil, verr
-	}
-	return base, &v, nil
 }
 
 // armTimer starts a one-shot timer that auto-disables dndmode after d by calling
@@ -295,7 +304,7 @@ func run() int {
 	// for a single run without editing ~/.config/dndmode/config.yml. Empty (the
 	// default) means "use whatever the config says". Validated at Step 5b.1 with
 	// the same ValidateOverlayStyle gate as the config value.
-	styleFlag := flag.String("style", "", "override overlay_style for this run (black|matrix|terminal|glass|none); empty = use config")
+	styleFlag := flag.String("style", "", "override overlay_style for this run (black|matrix|terminal[:go|python|typescript|rust]|glass[:radius]|none); empty = use config")
 	// --mute / --focus override the config keys for a single run (same
 	// precedence as --style: non-empty WINS over YAML, empty = use config).
 	// Tri-state strings ("" | "true" | "false") rather than flag.Bool because a
@@ -382,14 +391,16 @@ func run() int {
 	overlayStyle := cfg.OverlayStyle
 	styleSource := "config"
 	var blurOverride *float64 // set only by a --style glass:N suffix
+	var langOverride string   // set only by a --style terminal:<lang> suffix
 	if *styleFlag != "" {
-		base, bo, perr := parseStyleFlag(*styleFlag)
+		base, bo, lo, perr := parseStyleFlag(*styleFlag)
 		if perr != nil {
 			_, _ = fmt.Fprintf(errW, "dndmode: invalid --style %q: %v.\n", *styleFlag, perr)
 			return exitConfigErr
 		}
 		overlayStyle = base
 		blurOverride = bo
+		langOverride = lo
 		styleSource = "flag"
 	}
 	if err := config.ValidateOverlayStyle(overlayStyle); err != nil {
@@ -415,6 +426,21 @@ func run() int {
 		return exitConfigErr
 	}
 
+	// Resolve the terminal source language (only meaningful for overlay_style
+	// terminal): the --style terminal:<lang> suffix (langOverride, already
+	// validated in parseStyleFlag) wins; otherwise the config terminal_language
+	// value, validated HERE so a junk value in YAML fails fast like an invalid
+	// style. Normalized ("" => go). Threaded into NewController at Step 15;
+	// ignored for every non-terminal style. Mirrors the glass_blur resolution.
+	terminalLanguage := cfg.TerminalLanguage
+	if langOverride != "" {
+		terminalLanguage = langOverride
+	} else if err := config.ValidateTerminalLanguage(terminalLanguage); err != nil {
+		_, _ = fmt.Fprintf(errW, "dndmode: invalid terminal_language %q: %v. Fix terminal_language in %s.\n", terminalLanguage, err, cfgPath)
+		return exitConfigErr
+	}
+	terminalLanguage = config.NormalizeTerminalLanguage(terminalLanguage)
+
 	// --- Step 5b.2: Resolve + validate the auto-disable timer (flag-only) ---
 	// The timer is a per-run flag with no config key, so there is nothing to fall
 	// back to: an empty flag means "no deadline". A non-empty value is validated
@@ -437,6 +463,8 @@ func run() int {
 	_, _ = fmt.Fprintf(outW, "dndmode: config=%s hotkey=%s overlay_style=%s (%s)\n", cfgPath, cfg.Hotkey, overlayStyle, styleSource)
 	if overlayStyle == config.OverlayStyleGlass {
 		_, _ = fmt.Fprintf(outW, "dndmode: glass_blur=%g\n", glassBlur)
+	} else if overlayStyle == config.OverlayStyleTerminal {
+		_, _ = fmt.Fprintf(outW, "dndmode: terminal_language=%s\n", terminalLanguage)
 	}
 	if timerDur > 0 {
 		_, _ = fmt.Fprintf(outW, "dndmode: timer=%s — auto-disable after this long\n", timerDur)
@@ -763,7 +791,7 @@ func run() int {
 	}
 
 	// --- Step 15 (Phase 3): Controller + per-screen overlay windows (P2) ---
-	controller := cocoa.NewController(overlayStyle, glassBlur, log)
+	controller := cocoa.NewController(overlayStyle, glassBlur, terminalLanguage, log)
 	if err := controller.CreateWindowsForAllScreens(); err != nil {
 		if errors.Is(err, cocoa.ErrNoDisplays) {
 			_, _ = fmt.Fprintln(errW,

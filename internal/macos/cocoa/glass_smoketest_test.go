@@ -44,7 +44,7 @@ func TestSmoke_Glass_CreateClose(t *testing.T) {
 		}
 	}()
 
-	w, err := createOverlayWindowStyled(id, "glass", 16)
+	w, err := createOverlayWindowStyled(id, "glass", 16, "")
 	if err != nil {
 		t.Fatalf("createOverlayWindowStyled(%d, glass): %v", id, err)
 	}

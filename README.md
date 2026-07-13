@@ -194,7 +194,7 @@ when omitted.
 
 | Flag | Values | Default | Effect |
 | --- | --- | --- | --- |
-| `--style` | `black` \| `matrix` \| `terminal` \| `glass` \| `none` | config | Overlay look for this run; wins over `overlay_style`. |
+| `--style` | `black` \| `matrix` \| `terminal`[`:go`\|`python`\|`typescript`\|`rust`] \| `glass`[`:radius`] \| `none` | config | Overlay look for this run; wins over `overlay_style`. `terminal:<lang>` picks the source language (default `go`). |
 | `--mute` | `true` \| `false` | config | Mute system audio for this run. |
 | `--focus` | `true` \| `false` | config | Toggle Do Not Disturb for this run. |
 | `--timer` | Go duration (`30m`, `1h30m`, `90s`) | off | Auto-unlock after the duration, then exit `0`. |
@@ -231,6 +231,10 @@ hotkey: Ctrl+Option+Cmd+X
 
 # Overlay look: black (default) | matrix | terminal | glass | none
 # overlay_style: black
+
+# Language for overlay_style 'terminal': go (default) | python | typescript | rust.
+# Overridden per-run by --style terminal:<lang>.
+# terminal_language: go
 
 # false (default) keeps the display awake; true lets it idle-off while the
 # system stays awake. Note the inverted sense of the name.
@@ -294,13 +298,29 @@ guarantee for the look; input is still fully blocked underneath.
 
 **`terminal`.** A second animated style for anyone who finds `matrix` too loud. It
 renders a scrolling stream of fake source code - lines type out one character at a
-time behind a blinking caret, then jump-scroll up as new lines arrive, with light
-syntax highlighting over a dark editor palette. Like `matrix`, it is a purely
-cosmetic content swap on top of the same opaque black shield, so every blocking
-guarantee (no bleed-through, HID input lock, shield window level) is identical to
-`black`. The scrolling text is fully synthetic and compiled in - no real file,
-project, or system data is ever read or shown - and the animation is ambient: it
+time (~160 WPM) behind a blinking caret, then jump-scroll up as new lines arrive,
+with light syntax highlighting over a dark editor palette, in a centred code
+column. Like `matrix`, it is a purely cosmetic content swap on top of the same
+opaque black shield, so every blocking guarantee (no bleed-through, HID input lock,
+shield window level) is identical to `black`. The scrolling text is fully synthetic
+and compiled in - no real file, project, or system data is ever read or shown, and
+no line shows a package/module/import declaration - and the animation is ambient: it
 never reacts to input, so it leaks no signal that keystrokes are being intercepted.
+
+Pick the language two ways (same precedence as glass `glass_blur` vs
+`--style glass:<radius>`): set `terminal_language:` in `config.yml` for the
+default, and/or append `--style terminal:<lang>` to override it for a single run.
+Valid values are `go` (default), `python`, `typescript`, and `rust`; a bare
+`--style terminal` with no config key renders Go. Each language has its own
+compiled-in corpus, large enough that the stream does not repeat for over two
+hours, and its own syntax highlighting.
+
+```
+dndmode --style terminal            # Go (default)
+dndmode --style terminal:python
+dndmode --style terminal:typescript
+dndmode --style terminal:rust
+```
 
 **Awake-only mode (`none`).** `overlay_style: none` (or `dndmode --style none`) turns
 dndmode into a thin [`caffeinate(8)`](https://ss64.com/mac/caffeinate.html) wrapper.
