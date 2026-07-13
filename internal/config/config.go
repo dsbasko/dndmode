@@ -39,7 +39,7 @@ const (
 	OverlayStyleTerminal = "terminal"
 	// OverlayStyleGlass makes the shield TRANSPARENT and frosts it: an
 	// NSVisualEffectView blurs whatever is behind the window (frosted glass).
-	// Unlike black/matrix it is intentionally non-opaque — the desktop shows
+	// Unlike black/matrix/terminal it is intentionally non-opaque — the desktop shows
 	// through, blurred — so it trades the no-bleed-through guarantee for the
 	// look. Input is still fully blocked (CGEventTap); only the visuals differ.
 	OverlayStyleGlass = "glass"
