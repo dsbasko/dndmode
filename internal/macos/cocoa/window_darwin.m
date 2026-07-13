@@ -8,6 +8,7 @@
 #import <stdint.h>
 #import <string.h>
 #import "matrixview_darwin.h"  // @interface MatrixView (cgo compiles each .m as a separate TU, so a bare @class forward decl is not enough)
+#import "terminalview_darwin.h"  // @interface TerminalView (same separate-TU rule as MatrixView above)
 
 // kGlassBlurRadius is the Gaussian blur radius (in points) for the "glass" style.
 // The overlay grabs a ONE-SHOT screenshot of the desktop (ScreenCaptureKit) and
@@ -139,14 +140,16 @@ static NSImage *captureBlurredDesktopImage(uint32_t displayID, NSScreen *target,
 // blocking.
 //
 // `style` selects the overlay content: "matrix" (QUICK-gh8) installs an animated
-// MatrixView over an opaque black base; "glass" (QUICK-glass) shows a STATIC,
+// MatrixView over an opaque black base; "terminal" installs an animated
+// TerminalView (scrolling syntax-highlighted source) over the same opaque black
+// base; "glass" (QUICK-glass) shows a STATIC,
 // tunable-radius CIGaussianBlur of a one-shot ScreenCaptureKit screenshot of the
 // desktop (frosted glass — the ONLY non-opaque style; falls back to
 // NSVisualEffectView frost if Screen Recording is not granted or the capture
 // fails); for "black", NULL, or anything else the plain
-// opaque-black path is untouched. black + matrix keep setOpaque:YES (T-gh8-03 no
-// bleed-through); glass deliberately relaxes that for the look while input stays
-// blocked.
+// opaque-black path is untouched. black + matrix + terminal keep setOpaque:YES
+// (T-gh8-03 no bleed-through); glass deliberately relaxes that for the look while
+// input stays blocked.
 //
 // Critical pitfall (the design notes): default releasedWhenClosed=YES
 // combined with ARC + __bridge_retained ownership causes double-free on
@@ -285,6 +288,14 @@ void* cocoa_create_overlay_window(uint32_t displayID, const char* style,
             MatrixView *mv = [[MatrixView alloc] initWithFrame:[[w contentView] bounds]];
             [mv setAutoresizingMask:(NSViewWidthSizable | NSViewHeightSizable)];
             [w setContentView:mv];
+        // terminal swaps in an animated scrolling-source contentView over the
+        // SAME opaque black base (opaque TerminalView layer on top, never
+        // transparent) — same T-gh8-03 no-bleed-through guarantee as matrix.
+        // TerminalView's @interface comes from terminalview_darwin.h.
+        } else if (style != NULL && strcmp(style, "terminal") == 0) {
+            TerminalView *tv = [[TerminalView alloc] initWithFrame:[[w contentView] bounds]];
+            [tv setAutoresizingMask:(NSViewWidthSizable | NSViewHeightSizable)];
+            [w setContentView:tv];
         }
     }
 
