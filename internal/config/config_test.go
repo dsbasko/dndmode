@@ -330,10 +330,11 @@ func TestLoader_Load_PrettyErrorOnSyntaxError(t *testing.T) {
 // QUICK-gh8 — overlay_style is an optional string field. yaml.Strict() rejects
 // unknown KEYS but does NOT validate VALUES, so a recognised key with any value
 // parses cleanly; value validation is the caller's job (main.go via
-// config.ValidateOverlayStyle). These 4 cases pin: (1) `matrix` round-trips,
-// (2) `black` round-trips, (3) an ABSENT key leaves OverlayStyle == "" which
-// NormalizeOverlayStyle maps to "black", (4) an invalid VALUE still Load()s but
-// ValidateOverlayStyle rejects it while accepting "", "black", "matrix".
+// config.ValidateOverlayStyle). These cases pin: every valid style (`black`,
+// `matrix`, `terminal`, `glass`, `none`) round-trips, an ABSENT key leaves
+// OverlayStyle == "" which NormalizeOverlayStyle maps to "black", and an invalid
+// VALUE still Load()s but ValidateOverlayStyle rejects it while accepting "",
+// "black", "matrix", "terminal", "glass", "none".
 func TestLoader_Load_OverlayStyle(t *testing.T) {
 	tests := []struct {
 		name         string

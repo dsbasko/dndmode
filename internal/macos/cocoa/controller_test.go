@@ -316,7 +316,7 @@ func newTestDeps(t *testing.T, debounceWin time.Duration) *testDeps {
 
 func TestController_Reconcile_FullRebuild(t *testing.T) {
 	td := newTestDeps(t, 0)
-	defer td.controller.Release()
+	defer func() { _ = td.controller.Release() }()
 
 	td.enumerator.set([]uint32{1, 2, 3})
 	if err := td.controller.reconcile(true); err != nil {
@@ -357,7 +357,7 @@ func TestController_Reconcile_FullRebuild(t *testing.T) {
 // keeps the glass CABackdropLayer blur alive past the first second.
 func TestController_Reconcile_SkipUnchanged(t *testing.T) {
 	td := newTestDeps(t, 0)
-	defer td.controller.Release()
+	defer func() { _ = td.controller.Release() }()
 
 	td.enumerator.set([]uint32{1, 2})
 	if err := td.controller.reconcile(true); err != nil {
@@ -388,7 +388,7 @@ func TestController_Reconcile_SkipUnchanged(t *testing.T) {
 // hole — the security stance).
 func TestController_Reconcile_GeometryChangeRebuilds(t *testing.T) {
 	td := newTestDeps(t, 0)
-	defer td.controller.Release()
+	defer func() { _ = td.controller.Release() }()
 
 	td.enumerator.set([]uint32{1, 2})
 	if err := td.controller.reconcile(true); err != nil {
@@ -416,7 +416,7 @@ func TestController_Reconcile_GeometryChangeRebuilds(t *testing.T) {
 
 func TestController_Reconcile_AbortOnCreateFail(t *testing.T) {
 	td := newTestDeps(t, 0)
-	defer td.controller.Release()
+	defer func() { _ = td.controller.Release() }()
 
 	td.factory.failOnIndex = 1 // 2nd of 3 fails
 	td.enumerator.set([]uint32{10, 20, 30})
@@ -435,7 +435,7 @@ func TestController_Reconcile_AbortOnCreateFail(t *testing.T) {
 
 func TestController_Reconcile_ColdStart_NoDisplays(t *testing.T) {
 	td := newTestDeps(t, 0)
-	defer td.controller.Release()
+	defer func() { _ = td.controller.Release() }()
 
 	td.enumerator.set([]uint32{})
 	err := td.controller.reconcile(true)
@@ -449,7 +449,7 @@ func TestController_Reconcile_ColdStart_NoDisplays(t *testing.T) {
 
 func TestController_Reconcile_RuntimeDrop_NoDisplays(t *testing.T) {
 	td := newTestDeps(t, 0)
-	defer td.controller.Release()
+	defer func() { _ = td.controller.Release() }()
 
 	// Start with 2 displays.
 	td.enumerator.set([]uint32{100, 200})
@@ -473,7 +473,7 @@ func TestController_Reconcile_RuntimeDrop_NoDisplays(t *testing.T) {
 
 func TestController_Debounce_TrailingEdge(t *testing.T) {
 	td := newTestDeps(t, 50*time.Millisecond)
-	defer td.controller.Release()
+	defer func() { _ = td.controller.Release() }()
 
 	td.enumerator.set([]uint32{1, 2})
 	if err := td.controller.reconcile(true); err != nil {
@@ -510,7 +510,7 @@ func TestController_Debounce_TrailingEdge(t *testing.T) {
 
 func TestController_WindowsByDisplayID(t *testing.T) {
 	td := newTestDeps(t, 0)
-	defer td.controller.Release()
+	defer func() { _ = td.controller.Release() }()
 
 	td.enumerator.set([]uint32{0xAA, 0xBB})
 	if err := td.controller.reconcile(true); err != nil {
