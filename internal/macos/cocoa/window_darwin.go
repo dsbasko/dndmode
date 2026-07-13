@@ -27,8 +27,9 @@ import (
 // createOverlayWindowStyled allocates and configures one full-screen NSWindow
 // for the given CGDirectDisplayID with the requested overlay style ("black" =>
 // plain opaque-black shield; "matrix" => a MatrixView digital-rain contentView
-// over the same opaque-black base; "glass" => a static, blurred desktop
-// snapshot). The window keeps every shield guarantee regardless of style
+// over the same opaque-black base; "terminal" => a TerminalView scrolling-source
+// contentView over the same opaque-black base; "glass" => a static, blurred
+// desktop snapshot). The window keeps every shield guarantee regardless of style
 // (QUICK-gh8). blurRadius is the CIGaussianBlur radius (points) for the "glass"
 // style; a non-positive value means "use the built-in default" and it is ignored
 // for every other style. Returns the boxed NSWindow pointer (caller owns; pass

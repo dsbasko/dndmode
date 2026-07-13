@@ -260,12 +260,12 @@ filesystem, git, or system data is ever read or shown. No input handling is adde
 - Modify: `internal/macos/cocoa/window_darwin.m`
 - Modify: `internal/macos/cocoa/window_darwin.go`
 
-- [ ] `#import "terminalview_darwin.h"` in `window_darwin.m`
-- [ ] in `cocoa_create_overlay_window`, inside the opaque (else) branch, add `strcmp(style, "terminal") == 0` → install a `TerminalView` content view (mirrors the `matrix` branch; keeps `setOpaque:YES`)
-- [ ] update the `cocoa_create_overlay_window` header comment to document the `terminal` style
-- [ ] update the `createOverlayWindowStyled` doc comment in `window_darwin.go` to include `terminal`
-- [ ] tests: wiring is exercised by the smoke test (Task 7); no new Go unit surface here
-- [ ] run `go build ./...` and `go vet ./...` — must pass before next task
+- [x] `#import "terminalview_darwin.h"` in `window_darwin.m`
+- [x] in `cocoa_create_overlay_window`, inside the opaque (else) branch, add `strcmp(style, "terminal") == 0` → install a `TerminalView` content view (mirrors the `matrix` branch; keeps `setOpaque:YES`)
+- [x] update the `cocoa_create_overlay_window` header comment to document the `terminal` style
+- [x] update the `createOverlayWindowStyled` doc comment in `window_darwin.go` to include `terminal`
+- [x] tests: wiring is exercised by the smoke test (Task 7); no new Go unit surface here
+- [x] run `go build ./...` and `go vet ./...` — must pass before next task
 
 ### Task 6: Sync user-facing style strings (flag usage, error text, docstrings)
 
