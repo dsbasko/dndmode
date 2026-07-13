@@ -231,13 +231,13 @@ filesystem, git, or system data is ever read or shown. No input handling is adde
 **Files:**
 - Modify: `internal/macos/cocoa/terminalview_darwin.m`
 
-- [ ] add the static `kCorpus[]` source lines (Go/C flavored, ASCII, a few dndmode-themed)
-- [ ] add the visible-line buffer + `rebuild` sizing it to the view height/width; free + realloc like `MatrixView` (`calloc`/`free`, NULL-reset)
-- [ ] hook `setFrameSize:` and `resizeSubviewsWithOldSize:` to rebuild
-- [ ] add typing state (`visibleChars`, chars/frame speed, `phase`, PAUSE countdown, caret blink counter)
-- [ ] implement `step:` — TYPING advances chars; PAUSE counts down; SCROLL shifts the buffer up, pulls `kCorpus[(cursor++) % N]` into the bottom slot, resets typing; then `setNeedsDisplay:YES`
-- [ ] tests: non-unit-testable Obj-C animation state (see Task 2 rationale); exercised by the smoke test (Task 7)
-- [ ] run `go build ./...` and `go vet ./...` — must pass before next task
+- [x] add the static `kCorpus[]` source lines (Go/C flavored, ASCII, a few dndmode-themed)
+- [x] add the visible-line buffer + `rebuild` sizing it to the view height/width; free + realloc like `MatrixView` (`calloc`/`free`, NULL-reset)
+- [x] hook `setFrameSize:` and `resizeSubviewsWithOldSize:` to rebuild
+- [x] add typing state (`visibleChars`, chars/frame speed, `phase`, PAUSE countdown, caret blink counter)
+- [x] implement `step:` — TYPING advances chars; PAUSE counts down; SCROLL shifts the buffer up, pulls `kCorpus[(cursor++) % N]` into the bottom slot, resets typing; then `setNeedsDisplay:YES`
+- [x] tests: non-unit-testable Obj-C animation state (see Task 2 rationale); exercised by the smoke test (Task 7)
+- [x] run `go build ./...` and `go vet ./...` — must pass before next task
 
 ### Task 4: Syntax tokenizer + full drawRect (Obj-C)
 
