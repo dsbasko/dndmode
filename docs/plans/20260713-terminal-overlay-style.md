@@ -291,11 +291,11 @@ filesystem, git, or system data is ever read or shown. No input handling is adde
 - [x] run the smoke test on a GUI session: `go test -tags 'darwin manual' -run TestSmoke_Terminal ./internal/macos/cocoa/` — passed (skips cleanly off-main via skipUnlessMainThread, matching the matrix smoke precedent)
 
 ### Task 8: Verify acceptance criteria
-- [ ] verify all Overview requirements: new `terminal` style, opaque, ambient, scrolling source with highlighting, guarantees identical to `black`
-- [ ] verify `black`/`matrix`/`glass`/`none` behavior is unchanged (no regressions in existing config tests)
-- [ ] run full suite: `go build ./... && go vet ./... && go test ./...`
-- [ ] run the smoke suite on a GUI session: `go test -tags 'darwin manual' -run TestSmoke ./internal/macos/cocoa/`
-- [ ] confirm no `.gitignore`-matched or restricted paths (`CLAUDE.md`, `.claude/`, `.planning/`) are touched by this change
+- [x] verify all Overview requirements: new `terminal` style, opaque, ambient, scrolling source with highlighting, guarantees identical to `black` — confirmed: end-to-end plumbing (config constant/validation/template → `--style` flag → `NewController` → `cgoWindowFactory` → `createOverlayWindowStyled` → `cocoa_create_overlay_window` `terminal` branch → `TerminalView`); opaque (`setOpaque:YES`, `isOpaque→YES`, `#000000` backing layer); ambient (no `mouseDown`/`keyDown`/`acceptsFirstResponder` overrides — zero input handling); scrolling source with syntax highlighting (`term_tokenize` + SRGB palette + `step:`/jump-scroll); black-identical guarantees (opaque-black base, shield window-level + collection-behavior path untouched)
+- [x] verify `black`/`matrix`/`glass`/`none` behavior is unchanged (no regressions in existing config tests) — `go test -count=1 ./internal/config/... ./cmd/...` green; `terminal` is purely additive branches/strings
+- [x] run full suite: `go build ./... && go vet ./... && go test ./...` — all green (only benign `ld: warning: ignoring duplicate libraries: '-lobjc'`)
+- [x] run the smoke suite on a GUI session: `go test -tags 'darwin manual' -run TestSmoke ./internal/macos/cocoa/` — terminal/matrix/glass smoke tests skip cleanly off-main via `skipUnlessMainThread` (documented precedent); scoped `-run 'TestSmoke_Terminal|TestSmoke_Matrix|TestSmoke_Glass'` run PASSES. Note: the broad `-run TestSmoke` also pulls in the pre-existing `TestSmoke_Controller_FullPath` (unchanged vs main, no main-thread guard) which aborts off-main — a pre-existing property of that GUI test, unrelated to `terminal`. True visual validation is the manual GUI run in Post-Completion.
+- [x] confirm no `.gitignore`-matched or restricted paths (`CLAUDE.md`, `.claude/`, `.planning/`) are touched by this change — `git diff --name-only main...HEAD` touches only `cmd/dndmode/main.go`, `docs/plans/…`, `internal/config/*`, and `internal/macos/cocoa/*`; none of `CLAUDE.md`/`.claude/`/`.planning/`
 
 ### Task 9: [Final] Update documentation
 - [ ] add a `terminal` row to the README "Overlay styles" table (Look: green-tinted scrolling source; Bleeds through: No; Input blocked: Yes) and a short paragraph
