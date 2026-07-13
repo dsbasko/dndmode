@@ -217,14 +217,14 @@ filesystem, git, or system data is ever read or shown. No input handling is adde
 - Create: `internal/macos/cocoa/terminalview_darwin.h`
 - Create: `internal/macos/cocoa/terminalview_darwin.m`
 
-- [ ] create `terminalview_darwin.h` with `@interface TerminalView : NSView @end` and the shared-header rationale comment (mirrors `matrixview_darwin.h`)
-- [ ] create `terminalview_darwin.m`: `initWithFrame:` sets `wantsLayer = YES`, opaque black backing layer, builds the monospaced font(s)
-- [ ] implement `isOpaque` → `YES` and `isFlipped` → `YES` (rows grow downward)
-- [ ] implement the FPS-capped `NSTimer` (`kTermFrameInterval = 1.0/30.0`) `startTimer`/`stopTimer`, added to the **main** run loop in `NSRunLoopCommonModes`
-- [ ] implement the leak-free lifecycle: `viewDidMoveToWindow` (start when window != nil), `viewWillMoveToWindow:nil` (stop), `dealloc` (stop + free buffers, double-invalidate guarded)
-- [ ] add a minimal `drawRect:` that fills opaque black (placeholder until Task 4)
-- [ ] tests: rendering is not unit-testable (WindowServer owns pixels — `matrix` precedent); coverage is the smoke test (Task 7) + visual run (Post-Completion)
-- [ ] run `go build ./...` and `go vet ./...` (cgo compiles the new `.m`) — must pass before next task
+- [x] create `terminalview_darwin.h` with `@interface TerminalView : NSView @end` and the shared-header rationale comment (mirrors `matrixview_darwin.h`)
+- [x] create `terminalview_darwin.m`: `initWithFrame:` sets `wantsLayer = YES`, opaque black backing layer, builds the monospaced font(s)
+- [x] implement `isOpaque` → `YES` and `isFlipped` → `YES` (rows grow downward)
+- [x] implement the FPS-capped `NSTimer` (`kTermFrameInterval = 1.0/30.0`) `startTimer`/`stopTimer`, added to the **main** run loop in `NSRunLoopCommonModes`
+- [x] implement the leak-free lifecycle: `viewDidMoveToWindow` (start when window != nil), `viewWillMoveToWindow:nil` (stop), `dealloc` (stop + free buffers, double-invalidate guarded)
+- [x] add a minimal `drawRect:` that fills opaque black (placeholder until Task 4)
+- [x] tests: rendering is not unit-testable (WindowServer owns pixels — `matrix` precedent); coverage is the smoke test (Task 7) + visual run (Post-Completion)
+- [x] run `go build ./...` and `go vet ./...` (cgo compiles the new `.m`) — must pass before next task
 
 ### Task 3: Corpus, visible-line buffer, typing + jump-scroll (Obj-C)
 
