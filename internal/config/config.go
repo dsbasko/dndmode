@@ -30,6 +30,13 @@ const (
 	// OverlayStyleMatrix renders animated green digital rain over the opaque
 	// black shield (cosmetic only; every window guarantee is unchanged).
 	OverlayStyleMatrix = "matrix"
+	// OverlayStyleTerminal renders a scrolling stream of syntax-highlighted
+	// pseudo-source over the opaque black shield: lines type themselves out
+	// behind a blinking caret, then jump-scroll up as new lines arrive. Like
+	// matrix it is cosmetic only — setOpaque:YES, pure #000000 fill, every
+	// blocking guarantee (HID event tap, shield level, no bleed-through) is
+	// byte-for-byte identical to black. Ambient only: it never reacts to input.
+	OverlayStyleTerminal = "terminal"
 	// OverlayStyleGlass makes the shield TRANSPARENT and frosts it: an
 	// NSVisualEffectView blurs whatever is behind the window (frosted glass).
 	// Unlike black/matrix it is intentionally non-opaque — the desktop shows
@@ -68,15 +75,15 @@ type Config struct {
 	Hotkey string `yaml:"hotkey"`
 	// OverlayStyle selects the overlay look. Absent/empty => "black" (v1
 	// default, via NormalizeOverlayStyle); the only valid non-empty values are
-	// "black", "matrix", "glass" and "none" ("none" = caffeinate-only mode,
-	// no overlay/DND/input-block — see OverlayStyleNone). The VALUE is validated by the caller
+	// "black", "matrix", "terminal", "glass" and "none" ("none" = caffeinate-only
+	// mode, no overlay/DND/input-block — see OverlayStyleNone). The VALUE is validated by the caller
 	// (main.go via ValidateOverlayStyle), NOT by yaml.Strict() — Strict only
 	// guards unknown KEYS, so a known key with a junk value parses fine (QUICK-gh8).
 	OverlayStyle string `yaml:"overlay_style"`
 	// GlassBlur is the CIGaussianBlur radius (in points) for overlay_style
 	// "glass". It is a *float64 so an ABSENT key defaults to DefaultGlassBlur via
 	// NormalizeGlassBlur (mirrors the Mute *bool nil-default pattern). Only
-	// meaningful for glass; ignored for black/matrix/none. Per-run override: the
+	// meaningful for glass; ignored for black/matrix/terminal/none. Per-run override: the
 	// --style glass:N flag suffix (main.go). Validated by ValidateGlassBlur.
 	GlassBlur *float64 `yaml:"glass_blur"`
 	// AllowDisplaySleep has INVERTED polarity: the Go zero value false
@@ -134,17 +141,17 @@ func NormalizeMute(m *bool) bool {
 }
 
 // ValidateOverlayStyle accepts "" (treated as black), "black", "matrix",
-// "glass" and "none"; anything else returns a non-nil error whose message is
-// suitable for embedding in main.go's stderr template. yaml.Strict() cannot
-// catch a bad VALUE (only unknown keys), so this is the real gate before any
-// window is created (T-gh8-01). "none" is accepted here but routes to the
+// "terminal", "glass" and "none"; anything else returns a non-nil error whose
+// message is suitable for embedding in main.go's stderr template. yaml.Strict()
+// cannot catch a bad VALUE (only unknown keys), so this is the real gate before
+// any window is created (T-gh8-01). "none" is accepted here but routes to the
 // caffeinate-only path in main.go — it never reaches the overlay controller.
 func ValidateOverlayStyle(s string) error {
 	switch s {
-	case "", OverlayStyleBlack, OverlayStyleMatrix, OverlayStyleGlass, OverlayStyleNone:
+	case "", OverlayStyleBlack, OverlayStyleMatrix, OverlayStyleTerminal, OverlayStyleGlass, OverlayStyleNone:
 		return nil
 	default:
-		return fmt.Errorf("unknown overlay_style %q (valid: black, matrix, glass, none)", s)
+		return fmt.Errorf("unknown overlay_style %q (valid: black, matrix, terminal, glass, none)", s)
 	}
 }
 
@@ -267,6 +274,9 @@ hotkey: %s
 #   black  : opaque black shield (default). Nothing bleeds through.
 #   matrix : animated green "digital rain" over the black shield (cosmetic
 #            only; every blocking guarantee is identical to black).
+#   terminal : scrolling stream of syntax-highlighted pseudo-source that types
+#            itself out behind a blinking caret over the black shield (cosmetic
+#            only; opaque, every blocking guarantee is identical to black).
 #   glass  : TRANSPARENT frosted glass — the blurred desktop shows through.
 #            Trades the no-bleed-through guarantee for the look; keyboard and
 #            trackpad are still fully blocked. Blur strength = glass_blur below.

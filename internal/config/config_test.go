@@ -356,6 +356,21 @@ func TestLoader_Load_OverlayStyle(t *testing.T) {
 			},
 		},
 		{
+			name:     "overlay_style: terminal present",
+			yamlBody: "hotkey: Ctrl+Shift+Q\noverlay_style: terminal\n",
+			validateResp: func(t *testing.T, cfg config.Config, created bool, err error) {
+				if err != nil {
+					t.Fatalf("unexpected error: %v", err)
+				}
+				if created {
+					t.Errorf("created = true, want false (file pre-existed)")
+				}
+				if cfg.OverlayStyle != config.OverlayStyleTerminal {
+					t.Errorf("cfg.OverlayStyle = %q, want %q", cfg.OverlayStyle, config.OverlayStyleTerminal)
+				}
+			},
+		},
+		{
 			name:     "overlay_style: glass present",
 			yamlBody: "hotkey: Ctrl+Shift+Q\noverlay_style: glass\n",
 			validateResp: func(t *testing.T, cfg config.Config, created bool, err error) {
@@ -427,7 +442,7 @@ func TestLoader_Load_OverlayStyle(t *testing.T) {
 				if verr := config.ValidateOverlayStyle("neon"); verr == nil {
 					t.Errorf("ValidateOverlayStyle(%q) = nil, want non-nil", "neon")
 				}
-				for _, ok := range []string{"", config.OverlayStyleBlack, config.OverlayStyleMatrix, config.OverlayStyleGlass, config.OverlayStyleNone} {
+				for _, ok := range []string{"", config.OverlayStyleBlack, config.OverlayStyleMatrix, config.OverlayStyleTerminal, config.OverlayStyleGlass, config.OverlayStyleNone} {
 					if verr := config.ValidateOverlayStyle(ok); verr != nil {
 						t.Errorf("ValidateOverlayStyle(%q) = %v, want nil", ok, verr)
 					}
@@ -447,6 +462,43 @@ func TestLoader_Load_OverlayStyle(t *testing.T) {
 			cfg, created, err := td.loader.Load()
 			tt.validateResp(t, cfg, created, err)
 		})
+	}
+}
+
+// ValidateOverlayStyle is the value gate main.go calls before any window is
+// created. Every documented style (incl. "" => black and the new "terminal")
+// must be accepted; an unknown value must error with a message naming the FULL
+// valid set — terminal included — so the stderr template stays truthful.
+func TestValidateOverlayStyle(t *testing.T) {
+	valid := []string{
+		"",
+		config.OverlayStyleBlack,
+		config.OverlayStyleMatrix,
+		config.OverlayStyleTerminal,
+		config.OverlayStyleGlass,
+		config.OverlayStyleNone,
+	}
+	for _, s := range valid {
+		if err := config.ValidateOverlayStyle(s); err != nil {
+			t.Errorf("ValidateOverlayStyle(%q) = %v, want nil", s, err)
+		}
+	}
+
+	// terminal is explicitly a valid style (constant value round-trips).
+	if config.OverlayStyleTerminal != "terminal" {
+		t.Errorf("OverlayStyleTerminal = %q, want %q", config.OverlayStyleTerminal, "terminal")
+	}
+
+	// An unknown value errors and the message must name the full valid set,
+	// including the newly-added terminal, so main.go's stderr stays accurate.
+	err := config.ValidateOverlayStyle("neon")
+	if err == nil {
+		t.Fatalf("ValidateOverlayStyle(%q) = nil, want error", "neon")
+	}
+	for _, want := range []string{"black", "matrix", "terminal", "glass", "none"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("error %q missing valid style %q", err.Error(), want)
+		}
 	}
 }
 

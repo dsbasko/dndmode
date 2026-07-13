@@ -199,17 +199,17 @@ filesystem, git, or system data is ever read or shown. No input handling is adde
 - Modify: `internal/config/config.go`
 - Modify: `internal/config/config_test.go`
 
-- [ ] add `OverlayStyleTerminal = "terminal"` constant with a doc comment next to `OverlayStyleMatrix`
-- [ ] add `OverlayStyleTerminal` to the accepted `case` in `ValidateOverlayStyle` (~line 144)
-- [ ] update the `ValidateOverlayStyle` error text to `(valid: black, matrix, terminal, glass, none)` (~line 147)
-- [ ] **[review]** update the `ValidateOverlayStyle` **doc comment** enumeration (`config.go:136-137`: "accepts …, \"black\", \"matrix\", \"glass\" and \"none\"") to include `terminal`
-- [ ] **[review]** update the `GlassBlur` field doc (`config.go:79`: "ignored for black/matrix/none") → `black/matrix/terminal/none`
-- [ ] extend `defaultConfigTemplate` `overlay_style` docs with a `terminal :` line describing the scrolling-source look (cosmetic, opaque, every guarantee identical to black)
-- [ ] update the `OverlayStyle` struct-field doc comment (~line 71) to list `terminal` among valid values
-- [ ] write test: `ValidateOverlayStyle("terminal")` returns nil (add to the existing table)
-- [ ] **[review]** add `OverlayStyleTerminal` to the "all valid styles accepted" loop invariant in `config_test.go:430` (the `[]string{"", OverlayStyleBlack, OverlayStyleMatrix, OverlayStyleGlass, OverlayStyleNone}` slice in the `neon` case) — else `terminal` stays under-tested even with the standalone case
-- [ ] write test: an unknown style still errors and the message names the full valid set incl. `terminal`
-- [ ] run `go test ./internal/config/...` — must pass before next task
+- [x] add `OverlayStyleTerminal = "terminal"` constant with a doc comment next to `OverlayStyleMatrix`
+- [x] add `OverlayStyleTerminal` to the accepted `case` in `ValidateOverlayStyle` (~line 144)
+- [x] update the `ValidateOverlayStyle` error text to `(valid: black, matrix, terminal, glass, none)` (~line 147)
+- [x] **[review]** update the `ValidateOverlayStyle` **doc comment** enumeration (`config.go:136-137`: "accepts …, \"black\", \"matrix\", \"glass\" and \"none\"") to include `terminal`
+- [x] **[review]** update the `GlassBlur` field doc (`config.go:79`: "ignored for black/matrix/none") → `black/matrix/terminal/none`
+- [x] extend `defaultConfigTemplate` `overlay_style` docs with a `terminal :` line describing the scrolling-source look (cosmetic, opaque, every guarantee identical to black)
+- [x] update the `OverlayStyle` struct-field doc comment (~line 71) to list `terminal` among valid values
+- [x] write test: `ValidateOverlayStyle("terminal")` returns nil (add to the existing table)
+- [x] **[review]** add `OverlayStyleTerminal` to the "all valid styles accepted" loop invariant in `config_test.go:430` (the `[]string{"", OverlayStyleBlack, OverlayStyleMatrix, OverlayStyleGlass, OverlayStyleNone}` slice in the `neon` case) — else `terminal` stays under-tested even with the standalone case
+- [x] write test: an unknown style still errors and the message names the full valid set incl. `terminal`
+- [x] run `go test ./internal/config/...` — must pass before next task
 
 ### Task 2: TerminalView skeleton + lifecycle (Obj-C)
 
