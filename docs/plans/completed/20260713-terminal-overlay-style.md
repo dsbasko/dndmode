@@ -298,11 +298,11 @@ filesystem, git, or system data is ever read or shown. No input handling is adde
 - [x] confirm no `.gitignore`-matched or restricted paths (`CLAUDE.md`, `.claude/`, `.planning/`) are touched by this change — `git diff --name-only main...HEAD` touches only `cmd/dndmode/main.go`, `docs/plans/…`, `internal/config/*`, and `internal/macos/cocoa/*`; none of `CLAUDE.md`/`.claude/`/`.planning/`
 
 ### Task 9: [Final] Update documentation
-- [ ] add a `terminal` row to the README "Overlay styles" table (Look: green-tinted scrolling source; Bleeds through: No; Input blocked: Yes) and a short paragraph
-- [ ] **[review]** add `terminal` to the two OTHER style enumerations in README that will otherwise go stale: the `--style` flag values table (`README.md:197`) and the inline config.yml example comment (`README.md:232`, `# Overlay look: black (default) | matrix | glass | none`)
-- [ ] **[review, optional]** in "Known limitations" (`README.md:467-468`) the opaque alternatives to glass are listed as "Use `black` or `matrix`" — add `terminal` for completeness
-- [ ] update `CLAUDE.md` only if a genuinely new pattern emerged (likely not — `terminal` follows the `matrix` template) — otherwise skip
-- [ ] move this plan to `docs/plans/completed/`
+- [x] add a `terminal` row to the README "Overlay styles" table (Bleeds through: No; Input blocked: Yes) and a short paragraph — described accurately as syntax-highlighted scrolling source over the opaque black shield (the palette is a multi-color dark editor theme with a pale-green caret, not a flat green tint)
+- [x] **[review]** add `terminal` to the two OTHER style enumerations in README that will otherwise go stale: the `--style` flag values table (`README.md:197`) and the inline config.yml example comment (`README.md:232`, `# Overlay look: black (default) | matrix | glass | none`)
+- [x] **[review, optional]** in "Known limitations" (`README.md:467-468`) the opaque alternatives to glass are listed as "Use `black` or `matrix`" — added `terminal` for completeness
+- [x] update `CLAUDE.md` only if a genuinely new pattern emerged — skipped: `terminal` follows the `matrix` template exactly, no new pattern (also a commit-restricted path per project rules)
+- [x] move this plan to `docs/plans/completed/`
 
 ## Post-Completion
 *Items requiring manual intervention or external systems — no checkboxes, informational only*
