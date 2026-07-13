@@ -245,14 +245,14 @@ filesystem, git, or system data is ever read or shown. No input handling is adde
 - Modify: `internal/macos/cocoa/terminalview_darwin.m`
 - (optional test shim) Modify: `internal/macos/cocoa/terminalview_darwin.m`; Create: `internal/macos/cocoa/terminalview_darwin.go`, `internal/macos/cocoa/terminalview_test.go`
 
-- [ ] add the `static const` palette table + token-class enum
-- [ ] add the small static keyword set (Go + C)
-- [ ] implement `tokenizeLine:` → colored segments `{start, len, class}`, called once when a line enters the buffer (not per frame)
-- [ ] **[review]** wire `tokenizeLine:` into BOTH entry paths so no line is ever drawn untokenized: (a) the SCROLL branch of `step:` (Task 3) when a fresh corpus line enters the bottom slot, and (b) the initial buffer fill during `rebuild` (Task 3) — Task 3 places the RAW corpus line, Task 4 attaches the tokenized segments at both sites
-- [ ] rewrite `drawRect:`: opaque-black fill, then per buffered line draw its colored segments (bottom line clipped to `visibleChars`), then the blinking caret `▊`
-- [ ] tests: rendering not unit-testable (see Task 2 rationale); visual correctness verified in the Post-Completion run; smoke test proves no crash
-- [ ] **[review, recommended]** `tokenizeLine:` is the ONE piece of pure, testable logic here (string → `{start,len,class}` segments, where off-by-one boundary bugs live). Follow the existing C-shim → Go-wrapper test pattern (`cocoa_first_attached_display_id` at `window_darwin.m:372` + `firstAttachedDisplayIDForTest` at `window_darwin.go:107`): export a `terminal_tokenize_for_test` shim, wrap it in `terminalview_darwin.go`, and table-test keyword/string/comment/number/ident classification in `terminalview_test.go`. Skip only if the shim proves disproportionate — correctness here is cosmetic (a wrong color is invisible harm), so it is defensible to omit, matching the `matrix` precedent
-- [ ] run `go build ./...` and `go vet ./...` (and `go test ./internal/macos/cocoa/...` if the tokenizer test was added) — must pass before next task
+- [x] add the `static const` palette table + token-class enum
+- [x] add the small static keyword set (Go + C)
+- [x] implement `tokenizeLine:` → colored segments `{start, len, class}`, called once when a line enters the buffer (not per frame) — implemented as the pure C `term_tokenize()` (reusable by the test shim) invoked from `loadLine:`
+- [x] **[review]** wire `tokenizeLine:` into BOTH entry paths so no line is ever drawn untokenized: (a) the SCROLL branch of `step:` (Task 3) when a fresh corpus line enters the bottom slot, and (b) the initial buffer fill during `rebuild` (Task 3) — Task 3 places the RAW corpus line, Task 4 attaches the tokenized segments at both sites — done via the single `loadLine:` used by both `rebuildBuffer` and `scrollUp`; segments freed on scroll-off / rebuild / dealloc (no leak, no double-free through the shift-aliasing)
+- [x] rewrite `drawRect:`: opaque-black fill, then per buffered line draw its colored segments (bottom line clipped to `visibleChars`), then the blinking caret `▊`
+- [x] tests: rendering not unit-testable (see Task 2 rationale); visual correctness verified in the Post-Completion run; smoke test proves no crash
+- [x] **[review, recommended]** `tokenizeLine:` is the ONE piece of pure, testable logic here (string → `{start,len,class}` segments, where off-by-one boundary bugs live). Follow the existing C-shim → Go-wrapper test pattern (`cocoa_first_attached_display_id` at `window_darwin.m:372` + `firstAttachedDisplayIDForTest` at `window_darwin.go:107`): export a `terminal_tokenize_for_test` shim, wrap it in `terminalview_darwin.go`, and table-test keyword/string/comment/number/ident classification in `terminalview_test.go`. Skip only if the shim proves disproportionate — correctness here is cosmetic (a wrong color is invisible harm), so it is defensible to omit, matching the `matrix` precedent — added `terminal_tokenize_for_test` shim + `terminalview_darwin.go` wrapper + `terminalview_test.go` (classification + gap-free tiling coverage)
+- [x] run `go build ./...` and `go vet ./...` (and `go test ./internal/macos/cocoa/...` if the tokenizer test was added) — must pass before next task
 
 ### Task 5: Wire `terminal` into the window content-view dispatch (Obj-C)
 

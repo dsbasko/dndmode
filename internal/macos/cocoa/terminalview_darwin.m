@@ -135,11 +135,154 @@ static const char *kCorpus[] = {
 };
 static const NSInteger kTermCorpusCount = (NSInteger)(sizeof(kCorpus) / sizeof(kCorpus[0]));
 
-// One visible line: a RAW pointer into the static corpus (no ownership) plus its
-// cached byte length. Task 4 extends this record with tokenized colored segments.
+// Caret blink cadence: ~0.5 s on / 0.5 s off at 30 FPS.
+static const NSInteger kTermCaretBlinkFrames = 15;
+
+// Token classes for light syntax highlighting. The order MUST stay in sync with
+// kTermPalette below AND the termTokClass constants in terminalview_darwin.go
+// (the Go tokenizer unit test asserts against these integer values).
+typedef enum {
+    TermClassIdent = 0, // identifiers / anything word-like that is not a keyword
+    TermClassKeyword,   // Go + C keywords (kTermKeywords)
+    TermClassString,    // "..." double-quoted literals
+    TermClassComment,   // // to end of line
+    TermClassNumber,    // leading-digit runs
+    TermClassPunct,     // operators, brackets, whitespace
+} TermClass;
+static const NSInteger kTermClassCount = 6;
+
+// Restrained dark-editor palette (sRGB), indexed by TermClass. Hardcoded in v1
+// (no config knobs), mirroring matrix; trivially promotable to config later.
+typedef struct { CGFloat r, g, b; } TermRGB;
+static const TermRGB kTermPalette[] = {
+    { 0.80, 0.82, 0.85 }, // ident   — soft off-white
+    { 0.65, 0.55, 0.95 }, // keyword — violet
+    { 0.45, 0.80, 0.45 }, // string  — green
+    { 0.40, 0.42, 0.45 }, // comment — dim gray
+    { 0.90, 0.65, 0.35 }, // number  — amber
+    { 0.60, 0.62, 0.65 }, // punct   — muted gray
+};
+static const TermRGB  kTermCaretColor     = { 0.90, 1.00, 0.90 }; // pale-green cursor
+static const unichar  kTermCaretCodepoint = 0x2588;              // full block glyph
+
+// Small static Go + C keyword set: an identifier run matching one of these is
+// promoted from TermClassIdent to TermClassKeyword.
+static const char *kTermKeywords[] = {
+    "func", "return", "if", "else", "for", "range", "var", "const", "type",
+    "struct", "import", "package", "switch", "case", "default", "break",
+    "continue", "go", "defer", "chan", "map", "interface", "nil", "true",
+    "false", "int", "char", "void", "static", "sizeof", "while",
+};
+static const NSInteger kTermKeywordCount =
+    (NSInteger)(sizeof(kTermKeywords) / sizeof(kTermKeywords[0]));
+
+// One tokenized run of a source line: [start, start+length) painted in the color
+// of `cls`. Segments are produced once, when a line enters the visible buffer.
 typedef struct {
-    const char *text;   // -> kCorpus[i]; static storage, never freed
-    NSInteger   length; // strlen(text), cached on load
+    NSInteger start;  // byte offset into the line text (ASCII => char offset)
+    NSInteger length; // run length in bytes/chars
+    TermClass cls;    // color class -> kTermPalette
+} TermSeg;
+
+// --- Lightweight ASCII tokenizer: source line -> colored segments -----------
+
+static BOOL term_is_ident_start(char c) {
+    return (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || c == '_';
+}
+static BOOL term_is_digit(char c) { return c >= '0' && c <= '9'; }
+static BOOL term_is_ident_char(char c) {
+    return term_is_ident_start(c) || term_is_digit(c);
+}
+
+// term_is_keyword reports whether the run text[start .. start+len) equals one of
+// the static Go/C keywords — exact length match, so no null terminator at the
+// run boundary is needed (the run is a substring of a longer C string).
+static BOOL term_is_keyword(const char *text, NSInteger start, NSInteger len) {
+    for (NSInteger i = 0; i < kTermKeywordCount; i++) {
+        const char *kw = kTermKeywords[i];
+        if ((NSInteger)strlen(kw) == len &&
+            strncmp(text + start, kw, (size_t)len) == 0) {
+            return YES;
+        }
+    }
+    return NO;
+}
+
+// term_tokenize splits an ASCII source line into colored segments. Called ONCE
+// per line as it enters the visible buffer (never per frame). Returns a malloc'd
+// TermSeg array (caller owns; free when the line scrolls off) and writes the
+// segment count to *outCount. len<=0 -> (NULL, 0). It allocates `len` segments up
+// front: every branch consumes >=1 char and emits <=1 segment, so count <= len.
+//
+// Rules (over ASCII): `//` -> the rest of the line is comment; `"` -> up to the
+// closing quote is string (backslash escapes skipped); a leading digit -> number;
+// an ident run is promoted to keyword if in kTermKeywords, else ident; any other
+// run (operators, brackets, whitespace) -> punct.
+static TermSeg *term_tokenize(const char *text, NSInteger len, NSInteger *outCount) {
+    if (text == NULL || len <= 0) {
+        if (outCount) { *outCount = 0; }
+        return NULL;
+    }
+    TermSeg *segs = (TermSeg *)calloc((size_t)len, sizeof(TermSeg));
+    NSInteger count = 0;
+    NSInteger i = 0;
+    while (i < len) {
+        char c = text[i];
+
+        if (c == '/' && i + 1 < len && text[i + 1] == '/') {
+            segs[count++] = (TermSeg){ i, len - i, TermClassComment };
+            break; // comment runs to the end of the line
+        }
+        if (c == '"') {
+            NSInteger j = i + 1;
+            while (j < len && text[j] != '"') {
+                if (text[j] == '\\' && j + 1 < len) { j++; } // skip an escaped char
+                j++;
+            }
+            if (j < len) { j++; } // include the closing quote
+            segs[count++] = (TermSeg){ i, j - i, TermClassString };
+            i = j;
+            continue;
+        }
+        if (term_is_digit(c)) {
+            NSInteger j = i + 1;
+            while (j < len && (term_is_ident_char(text[j]) || text[j] == '.')) { j++; }
+            segs[count++] = (TermSeg){ i, j - i, TermClassNumber };
+            i = j;
+            continue;
+        }
+        if (term_is_ident_start(c)) {
+            NSInteger j = i + 1;
+            while (j < len && term_is_ident_char(text[j])) { j++; }
+            TermClass cls = term_is_keyword(text, i, j - i) ? TermClassKeyword
+                                                            : TermClassIdent;
+            segs[count++] = (TermSeg){ i, j - i, cls };
+            i = j;
+            continue;
+        }
+        // Operators / brackets / whitespace: coalesce until the next token start.
+        NSInteger j = i + 1;
+        while (j < len) {
+            char d = text[j];
+            if (term_is_ident_start(d) || term_is_digit(d) || d == '"') { break; }
+            if (d == '/' && j + 1 < len && text[j + 1] == '/') { break; }
+            j++;
+        }
+        segs[count++] = (TermSeg){ i, j - i, TermClassPunct };
+        i = j;
+    }
+    if (outCount) { *outCount = count; }
+    return segs;
+}
+
+// One visible line: a RAW pointer into the static corpus (no ownership) plus its
+// cached byte length and its tokenized colored segments (heap-owned; freed when
+// the line scrolls off the top or the buffer is rebuilt / deallocated).
+typedef struct {
+    const char *text;     // -> kCorpus[i]; static storage, never freed
+    NSInteger   length;   // strlen(text), cached on load
+    TermSeg    *segs;     // malloc'd tokenized segments (owned) — NULL for blank lines
+    NSInteger   segCount; // number of segments in segs
 } TermLine;
 
 // Typing state machine for the bottom (active) line.
@@ -161,7 +304,10 @@ typedef enum {
     CGFloat    _typeSpeed;    // current bottom line's typing speed (chars/frame)
     TermPhase  _phase;        // TYPING / PAUSE / SCROLL
     NSInteger  _pauseFrames;  // remaining PAUSE frames (counts down)
-    NSInteger  _blink;        // caret blink phase counter (drawn in Task 4)
+    NSInteger  _blink;        // caret blink phase counter (~0.5 s on/off at 30 FPS)
+    NSArray<NSDictionary *> *_attrs;  // per-TermClass text attributes (font + color)
+    NSDictionary *_caretAttrs;        // caret glyph attributes (font + caret color)
+    NSString  *_caretGlyph;           // cached block-cursor glyph (kTermCaretCodepoint)
 }
 
 - (instancetype)initWithFrame:(NSRect)frameRect {
@@ -170,6 +316,7 @@ typedef enum {
         self.wantsLayer = YES;
         self.layer.backgroundColor = [[NSColor blackColor] CGColor]; // opaque #000000 backing
         [self buildFont];
+        [self buildAttributes];
         [self rebuildBuffer];
     }
     return self;
@@ -182,6 +329,36 @@ typedef enum {
         f = [NSFont fontWithName:@"Menlo" size:kTermFontSize];
     }
     _font = f;
+}
+
+// Build the per-TermClass drawing attributes (font + palette color) once, so
+// drawRect: paints pre-colored segments without allocating NSColor/NSDictionary
+// per frame. Indexed by (NSUInteger)TermClass. Also caches the caret attributes
+// and the block-cursor glyph (built from a unichar so the .m source stays ASCII).
+- (void)buildAttributes {
+    NSMutableArray<NSDictionary *> *a =
+        [NSMutableArray arrayWithCapacity:(NSUInteger)kTermClassCount];
+    for (NSInteger i = 0; i < kTermClassCount; i++) {
+        TermRGB c = kTermPalette[i];
+        [a addObject:@{
+            NSFontAttributeName: _font,
+            NSForegroundColorAttributeName:
+                [NSColor colorWithSRGBRed:c.r green:c.g blue:c.b alpha:1.0],
+        }];
+    }
+    _attrs = [a copy];
+
+    _caretAttrs = @{
+        NSFontAttributeName: _font,
+        NSForegroundColorAttributeName:
+            [NSColor colorWithSRGBRed:kTermCaretColor.r
+                                green:kTermCaretColor.g
+                                 blue:kTermCaretColor.b
+                                alpha:1.0],
+    };
+
+    unichar u = kTermCaretCodepoint;
+    _caretGlyph = [NSString stringWithCharacters:&u length:1];
 }
 
 - (BOOL)isOpaque  { return YES; }
@@ -201,19 +378,31 @@ typedef enum {
            (NSInteger)arc4random_uniform((uint32_t)kTermPauseFramesJitter + 1);
 }
 
-// loadLine fills a visible-line slot with a RAW corpus line. The text pointer aims
-// into the static kCorpus (no ownership, never freed). Centralizing corpus loading
-// here means Task 4 attaches tokenized segments in ONE place, covering BOTH entry
-// paths (the initial rebuildBuffer fill and the SCROLL branch of step:).
+// loadLine fills a visible-line slot with a corpus line: the text pointer aims
+// into the static kCorpus (no ownership, never freed) and the line is tokenized
+// ONCE, here, into heap-owned colored segments. Centralizing load here covers
+// BOTH entry paths (the initial rebuildBuffer fill and the SCROLL branch of
+// step:) so no line is ever drawn untokenized.
+//
+// It does NOT free any prior line->segs: the only caller that reuses a non-fresh
+// slot is scrollUp, which frees the departing top line's segments before the
+// shift, after which the bottom slot merely aliases the line below it (whose
+// segments stay owned by that lower slot) — freeing here would double-free.
 - (void)loadLine:(TermLine *)line fromCorpus:(NSInteger)index {
     const char *text = kCorpus[index];
-    line->text   = text;
-    line->length = (NSInteger)strlen(text);
+    line->text     = text;
+    line->length   = (NSInteger)strlen(text);
+    line->segs     = term_tokenize(text, line->length, &line->segCount);
 }
 
 - (void)rebuildBuffer {
     NSRect b = [self bounds];
 
+    if (_lines != NULL) {
+        for (NSInteger i = 0; i < _lineCount; i++) {
+            free(_lines[i].segs); // release each visible line's tokenized segments
+        }
+    }
     free(_lines);
     _lines = NULL;
     _lineCount = 0;
@@ -257,10 +446,13 @@ typedef enum {
 
 // Jump-scroll the buffer up by one line: the top line falls off, every other line
 // shifts up, and the next corpus line drops into the freed bottom slot and starts
-// retyping from empty. (Task 4 frees the top line's segments HERE, before the
-// shift, to avoid leaking them; the raw-pointer TermLine of Task 3 owns nothing.)
+// retyping from empty. The departing top line's tokenized segments are freed HERE,
+// before the shift, so they never leak; loadLine then tokenizes the fresh bottom
+// line. (After the shift the bottom slot briefly aliases the line below it, which
+// is why loadLine must NOT free the slot's prior segments — see loadLine.)
 - (void)scrollUp {
     if (_lines == NULL || _lineCount <= 0) { return; }
+    free(_lines[0].segs); // top line leaves the buffer — release its segments
     for (NSInteger i = 0; i < _lineCount - 1; i++) {
         _lines[i] = _lines[i + 1];
     }
@@ -274,7 +466,7 @@ typedef enum {
 
 - (void)step:(NSTimer *)t {
     (void)t;
-    _blink++; // caret blink phase (rendered in Task 4)
+    _blink++; // caret blink phase (rendered by drawRect:)
 
     if (_lineCount > 0) {
         switch (_phase) {
@@ -303,12 +495,62 @@ typedef enum {
     [self setNeedsDisplay:YES];
 }
 
-// --- Drawing: placeholder opaque-black fill (full source render lands in Task 4) ---
+// --- Drawing: opaque-black base + pre-colored segments + blinking caret ---
+
+// Draw one tokenized segment of a visible line at row `row`. For the bottom
+// (typing) line the caller passes maxChars = revealed char count so the segment
+// is clipped to what has been "typed"; pass maxChars < 0 to draw it in full.
+// x = start*cellW relies on the monospaced advance == _cellW, so consecutive
+// segments align into a fixed grid; overlong lines run past the right edge and
+// are bounds-clipped (no soft-wrap in v1).
+- (void)drawSegment:(TermSeg)seg
+               text:(const char *)text
+                row:(NSInteger)row
+           maxChars:(NSInteger)maxChars {
+    NSInteger drawLen = seg.length;
+    if (maxChars >= 0) {
+        if (seg.start >= maxChars) { return; }            // not yet revealed
+        if (seg.start + drawLen > maxChars) {
+            drawLen = maxChars - seg.start;               // partially revealed
+        }
+    }
+    if (drawLen <= 0) { return; }
+
+    NSString *s = [[NSString alloc] initWithBytes:(text + seg.start)
+                                           length:(NSUInteger)drawLen
+                                         encoding:NSUTF8StringEncoding];
+    if (s == nil) { return; }
+
+    CGFloat x = (CGFloat)seg.start * _cellW;
+    CGFloat y = (CGFloat)row * _cellH;
+    [s drawAtPoint:NSMakePoint(x, y)
+        withAttributes:_attrs[(NSUInteger)seg.cls]];
+}
 
 - (void)drawRect:(NSRect)dirtyRect {
     (void)dirtyRect;
     [[NSColor blackColor] setFill]; // pure #000000, fully opaque
     NSRectFill([self bounds]);
+
+    if (_lines == NULL || _lineCount <= 0) { return; }
+
+    NSInteger bottom       = _lineCount - 1;
+    NSInteger visibleCount = (NSInteger)floor(_visibleChars); // typed chars on bottom
+
+    for (NSInteger row = 0; row < _lineCount; row++) {
+        TermLine line = _lines[row];
+        NSInteger maxChars = (row == bottom) ? visibleCount : -1; // clip the typing line
+        for (NSInteger s = 0; s < line.segCount; s++) {
+            [self drawSegment:line.segs[s] text:line.text row:row maxChars:maxChars];
+        }
+    }
+
+    // Blinking block caret at the bottom line's typing head (~0.5 s on/off).
+    if ((_blink / kTermCaretBlinkFrames) % 2 == 0) {
+        CGFloat x = (CGFloat)visibleCount * _cellW;
+        CGFloat y = (CGFloat)bottom * _cellH;
+        [_caretGlyph drawAtPoint:NSMakePoint(x, y) withAttributes:_caretAttrs];
+    }
 }
 
 // --- Lifecycle: start/stop the FPS-capped timer with window attachment ---
@@ -348,9 +590,43 @@ typedef enum {
 
 - (void)dealloc {
     [self stopTimer];
+    if (_lines != NULL) {
+        for (NSInteger i = 0; i < _lineCount; i++) {
+            free(_lines[i].segs); // release each visible line's tokenized segments
+        }
+    }
     free(_lines);
     _lines = NULL;
-    // ARC handles _font / _timer object refs.
+    // ARC handles _font / _attrs / _caretAttrs / _caretGlyph / _timer object refs.
 }
 
 @end
+
+// --- Test-only shim: expose the pure tokenizer to Go unit tests -------------
+//
+// term_tokenize is the ONE piece of pure, testable logic in this view (a source
+// string -> {start,len,class} segments, where off-by-one boundary bugs live).
+// cgo cannot call a static C function or an ObjC method directly from a _test.go
+// file (Go toolchain limitation), so this extern shim wraps it: it tokenizes
+// `line`, writes up to `maxSegs` segments into the caller-provided
+// outStart/outLen/outClass arrays, and returns the segment count (or -1 if
+// maxSegs was too small to hold them). Mirrors the cocoa_first_attached_display_id
+// test-shim pattern in window_darwin.m. Its Go wrapper is in terminalview_darwin.go.
+int terminal_tokenize_for_test(const char *line, int maxSegs,
+                               int *outStart, int *outLen, int *outClass) {
+    if (line == NULL) { return 0; }
+    NSInteger len   = (NSInteger)strlen(line);
+    NSInteger count = 0;
+    TermSeg  *segs  = term_tokenize(line, len, &count);
+    if (count > (NSInteger)maxSegs) {
+        free(segs);
+        return -1;
+    }
+    for (NSInteger i = 0; i < count; i++) {
+        if (outStart) { outStart[i] = (int)segs[i].start; }
+        if (outLen)   { outLen[i]   = (int)segs[i].length; }
+        if (outClass) { outClass[i] = (int)segs[i].cls; }
+    }
+    free(segs);
+    return (int)count;
+}
