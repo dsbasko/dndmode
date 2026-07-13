@@ -115,6 +115,7 @@ func Test_parseStyleFlag(t *testing.T) {
 		in       string
 		wantBase string
 		wantBlur *float64 // nil = expect no override
+		wantLang string   // "" = expect no language
 		wantErr  bool
 	}{
 		{name: "bare glass → no override", in: "glass", wantBase: "glass", wantBlur: nil},
@@ -132,13 +133,22 @@ func Test_parseStyleFlag(t *testing.T) {
 		{name: "negative radius rejected", in: "glass:-4", wantErr: true},
 		{name: "over-max radius rejected", in: "glass:100000", wantErr: true},
 		{name: "double colon rejected", in: "glass:16:9", wantErr: true},
+		{name: "bare terminal → no language", in: "terminal", wantBase: "terminal", wantLang: ""},
+		{name: "terminal:go", in: "terminal:go", wantBase: "terminal", wantLang: "go"},
+		{name: "terminal:python", in: "terminal:python", wantBase: "terminal", wantLang: "python"},
+		{name: "terminal:typescript", in: "terminal:typescript", wantBase: "terminal", wantLang: "typescript"},
+		{name: "terminal:rust", in: "terminal:rust", wantBase: "terminal", wantLang: "rust"},
+		{name: "terminal language with spaces", in: "terminal: rust ", wantBase: "terminal", wantLang: "rust"},
+		{name: "terminal empty suffix → default", in: "terminal:", wantBase: "terminal", wantLang: ""},
+		{name: "unknown terminal language rejected", in: "terminal:ruby", wantErr: true},
+		{name: "terminal double colon rejected", in: "terminal:go:extra", wantErr: true},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 
-			base, blur, err := parseStyleFlag(tt.in)
+			base, blur, lang, err := parseStyleFlag(tt.in)
 			if tt.wantErr {
 				if err == nil {
 					t.Fatalf("parseStyleFlag(%q) err = nil, want error", tt.in)
@@ -150,6 +160,9 @@ func Test_parseStyleFlag(t *testing.T) {
 			}
 			if base != tt.wantBase {
 				t.Errorf("parseStyleFlag(%q) base = %q, want %q", tt.in, base, tt.wantBase)
+			}
+			if lang != tt.wantLang {
+				t.Errorf("parseStyleFlag(%q) lang = %q, want %q", tt.in, lang, tt.wantLang)
 			}
 			switch {
 			case tt.wantBlur == nil && blur != nil:

@@ -46,7 +46,7 @@ func TestSmoke_Matrix_CreateClose(t *testing.T) {
 		}
 	}()
 
-	w, err := createOverlayWindowStyled(id, "matrix", 0)
+	w, err := createOverlayWindowStyled(id, "matrix", 0, "")
 	if err != nil {
 		t.Fatalf("createOverlayWindowStyled(%d, matrix): %v", id, err)
 	}

@@ -51,10 +51,11 @@ func (cgoScreenEnumerator) Signature() uint64   { return screensGeometrySignatur
 type cgoWindowFactory struct {
 	style     string
 	glassBlur float64 // CIGaussianBlur radius (points) for glass; ignored otherwise
+	language  string  // source language for terminal (go|python|typescript|rust); ignored otherwise
 }
 
 func (f cgoWindowFactory) Create(displayID uint32) (unsafe.Pointer, error) {
-	return createOverlayWindowStyled(displayID, f.style, f.glassBlur)
+	return createOverlayWindowStyled(displayID, f.style, f.glassBlur, f.language)
 }
 func (cgoWindowFactory) Close(w unsafe.Pointer) { closeOverlayWindow(w) }
 
@@ -173,15 +174,18 @@ type Controller struct {
 // passes the NormalizeOverlayStyle'd value from config. glassBlur is the
 // CIGaussianBlur radius (points) for the glass style (resolved by main.go from
 // config glass_blur / the --style glass:N flag); it is ignored for every other
-// style. Both are threaded into the cgoWindowFactory so every per-display window
-// is created with them, WITHOUT widening the windowFactory interface.
-func NewController(style string, glassBlur float64, log *slog.Logger) *Controller {
+// style. language is the source language for the terminal style (go|python|
+// typescript|rust, resolved by main.go from the --style terminal:<lang> suffix);
+// ignored for every other style. All are threaded into the cgoWindowFactory so
+// every per-display window is created with them, WITHOUT widening the
+// windowFactory interface.
+func NewController(style string, glassBlur float64, language string, log *slog.Logger) *Controller {
 	if log == nil {
 		log = slog.Default()
 	}
 	return newControllerWithDeps(log,
 		cgoScreenEnumerator{},
-		cgoWindowFactory{style: style, glassBlur: glassBlur},
+		cgoWindowFactory{style: style, glassBlur: glassBlur, language: language},
 		cgoObserverRegistrar{},
 		cgoMainDispatcher{},
 		cgoCursorHider{},

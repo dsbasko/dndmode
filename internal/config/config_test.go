@@ -327,6 +327,42 @@ func TestLoader_Load_PrettyErrorOnSyntaxError(t *testing.T) {
 	}
 }
 
+// TestValidateTerminalLanguage pins the --style terminal:<lang> gate: the four
+// supported languages and "" (default) are accepted; anything else (including
+// case variants and aliases) is rejected.
+func TestValidateTerminalLanguage(t *testing.T) {
+	t.Parallel()
+	for _, s := range []string{
+		"", config.TerminalLangGo, config.TerminalLangPython,
+		config.TerminalLangTypeScript, config.TerminalLangRust,
+	} {
+		if err := config.ValidateTerminalLanguage(s); err != nil {
+			t.Errorf("ValidateTerminalLanguage(%q) = %v, want nil", s, err)
+		}
+	}
+	for _, s := range []string{"ruby", "golang", "py", "ts", "Go", "PYTHON", "c++"} {
+		if err := config.ValidateTerminalLanguage(s); err == nil {
+			t.Errorf("ValidateTerminalLanguage(%q) = nil, want error", s)
+		}
+	}
+}
+
+// TestNormalizeTerminalLanguage pins the ""=>go default and pass-through for the
+// explicit languages (mirrors NormalizeOverlayStyle's empty=>black rule).
+func TestNormalizeTerminalLanguage(t *testing.T) {
+	t.Parallel()
+	if got := config.NormalizeTerminalLanguage(""); got != config.TerminalLangGo {
+		t.Errorf("NormalizeTerminalLanguage(%q) = %q, want %q", "", got, config.TerminalLangGo)
+	}
+	for _, s := range []string{
+		config.TerminalLangPython, config.TerminalLangRust, config.TerminalLangTypeScript,
+	} {
+		if got := config.NormalizeTerminalLanguage(s); got != s {
+			t.Errorf("NormalizeTerminalLanguage(%q) = %q, want unchanged", s, got)
+		}
+	}
+}
+
 // QUICK-gh8 — overlay_style is an optional string field. yaml.Strict() rejects
 // unknown KEYS but does NOT validate VALUES, so a recognised key with any value
 // parses cleanly; value validation is the caller's job (main.go via
@@ -545,6 +581,71 @@ func TestLoader_Load_GlassBlur(t *testing.T) {
 				}
 				if got := config.NormalizeGlassBlur(cfg.GlassBlur); got != config.DefaultGlassBlur {
 					t.Errorf("NormalizeGlassBlur(nil) = %g, want %g", got, config.DefaultGlassBlur)
+				}
+			},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			td := newTestDeps(t)
+			if err := os.MkdirAll(filepath.Dir(td.path), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(td.path, []byte(tt.yamlBody), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			cfg, _, err := td.loader.Load()
+			if err != nil {
+				t.Fatalf("Load: %v", err)
+			}
+			tt.validate(t, cfg)
+		})
+	}
+}
+
+// terminal_language is an optional string. An ABSENT/empty key yields "" (=>
+// NormalizeTerminalLanguage go); a present value round-trips. yaml.Strict()
+// accepts the known key; ValidateTerminalLanguage is the value gate (a junk value
+// still Load()s, mirroring overlay_style / glass_blur).
+func TestLoader_Load_TerminalLanguage(t *testing.T) {
+	tests := []struct {
+		name     string
+		yamlBody string
+		validate func(t *testing.T, cfg config.Config)
+	}{
+		{
+			name:     "terminal_language: rust present",
+			yamlBody: "hotkey: Ctrl+Shift+Q\nterminal_language: rust\n",
+			validate: func(t *testing.T, cfg config.Config) {
+				if cfg.TerminalLanguage != config.TerminalLangRust {
+					t.Errorf("TerminalLanguage = %q, want %q", cfg.TerminalLanguage, config.TerminalLangRust)
+				}
+				if got := config.NormalizeTerminalLanguage(cfg.TerminalLanguage); got != config.TerminalLangRust {
+					t.Errorf("NormalizeTerminalLanguage = %q, want rust", got)
+				}
+			},
+		},
+		{
+			name:     "terminal_language absent → empty → go default",
+			yamlBody: "hotkey: Ctrl+Shift+Q\n",
+			validate: func(t *testing.T, cfg config.Config) {
+				if cfg.TerminalLanguage != "" {
+					t.Errorf("TerminalLanguage = %q, want empty (absent key)", cfg.TerminalLanguage)
+				}
+				if got := config.NormalizeTerminalLanguage(cfg.TerminalLanguage); got != config.TerminalLangGo {
+					t.Errorf("NormalizeTerminalLanguage(%q) = %q, want go", "", got)
+				}
+			},
+		},
+		{
+			name:     "terminal_language junk still Loads (ValidateTerminalLanguage is the gate)",
+			yamlBody: "hotkey: Ctrl+Shift+Q\nterminal_language: ruby\n",
+			validate: func(t *testing.T, cfg config.Config) {
+				if cfg.TerminalLanguage != "ruby" {
+					t.Errorf("TerminalLanguage = %q, want ruby (value not gated by Load)", cfg.TerminalLanguage)
+				}
+				if err := config.ValidateTerminalLanguage(cfg.TerminalLanguage); err == nil {
+					t.Errorf("ValidateTerminalLanguage(ruby) = nil, want error")
 				}
 			},
 		},
