@@ -273,11 +273,11 @@ filesystem, git, or system data is ever read or shown. No input handling is adde
 - Modify: `cmd/dndmode/main.go`
 - Modify: `internal/macos/cocoa/controller_darwin.go`
 
-- [ ] update the `--style` flag usage string in `main.go` to `(black|matrix|terminal|glass|none)`
-- [ ] update the invalid-`overlay_style` stderr template in `main.go` to list `terminal` in the valid set
-- [ ] update the `cgoWindowFactory` (`controller_darwin.go:47`) and `NewController` (`:172`) doc comments to include `terminal`. **[review]** note `:47` currently reads only `black|matrix` (already missing `glass`) — write the FULL set `black|matrix|glass|terminal`, don't just append to the incomplete list. A literal `black|matrix|glass` grep will miss `:47`, so edit by symbol name, not grep
-- [ ] verify no other hardcoded style whitelist exists in `main.go`/`acceptance_test.go` (grep `black.*matrix.*glass`); update if found (review confirmed `acceptance_test.go` has no exhaustive style list — no `terminal` acceptance test needed, matching `matrix`)
-- [ ] run `go build ./...` and `go test ./cmd/...` — must pass before next task
+- [x] update the `--style` flag usage string in `main.go` to `(black|matrix|terminal|glass|none)`
+- [x] update the invalid-`overlay_style` stderr template in `main.go` to list `terminal` in the valid set
+- [x] update the `cgoWindowFactory` (`controller_darwin.go:47`) and `NewController` (`:172`) doc comments to include `terminal`. **[review]** note `:47` currently reads only `black|matrix` (already missing `glass`) — write the FULL set `black|matrix|glass|terminal`, don't just append to the incomplete list. A literal `black|matrix|glass` grep will miss `:47`, so edit by symbol name, not grep
+- [x] verify no other hardcoded style whitelist exists in `main.go`/`acceptance_test.go` (grep `black.*matrix.*glass`); update if found (review confirmed `acceptance_test.go` has no exhaustive style list — no `terminal` acceptance test needed, matching `matrix`)
+- [x] run `go build ./...` and `go test ./cmd/...` — must pass before next task
 
 ### Task 7: Terminal smoke test (create/tick/close)
 

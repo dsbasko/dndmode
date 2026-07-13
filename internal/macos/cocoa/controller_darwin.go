@@ -44,7 +44,7 @@ func (cgoScreenEnumerator) Signature() uint64   { return screensGeometrySignatur
 
 // cgoWindowFactory is the production implementation backed by
 // cocoa_create_overlay_window / cocoa_close_overlay_window (window_darwin.m).
-// The style field (black|matrix, already NormalizeOverlayStyle'd by main.go) is
+// The style field (black|matrix|glass|terminal, already NormalizeOverlayStyle'd by main.go) is
 // threaded into every Create — this keeps the style out of the windowFactory
 // interface (Create(displayID uint32)), so the test fake and
 // newControllerWithDeps signature are untouched (QUICK-gh8).
@@ -169,7 +169,7 @@ type Controller struct {
 // 31-35). The returned Controller has registered its onScreensChanged
 // callback with the package-level activeOnScreensChanged registry.
 //
-// style selects the overlay look (black|matrix|glass, QUICK-gh8); the caller
+// style selects the overlay look (black|matrix|glass|terminal, QUICK-gh8); the caller
 // passes the NormalizeOverlayStyle'd value from config. glassBlur is the
 // CIGaussianBlur radius (points) for the glass style (resolved by main.go from
 // config glass_blur / the --style glass:N flag); it is ignored for every other
