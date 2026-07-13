@@ -284,11 +284,11 @@ filesystem, git, or system data is ever read or shown. No input handling is adde
 **Files:**
 - Create: `internal/macos/cocoa/terminal_smoketest_test.go`
 
-- [ ] create the test with `//go:build darwin && manual`, mirroring `matrix_smoketest_test.go` (package `cocoa`, `runtimepin` import)
-- [ ] `HEADLESS=1` → `t.Skip`; `skipUnlessMainThread(t)`; skip if no display attached
-- [ ] `createOverlayWindowStyled(id, "terminal", 0)` → assert non-nil handle, no error
-- [ ] `time.Sleep(150ms)` to let ≥1 animation tick fire, then `closeOverlayWindow(w)` inside a `recover()` guard (must not panic)
-- [ ] run the smoke test on a GUI session: `go test -tags 'darwin manual' -run TestSmoke_Terminal ./internal/macos/cocoa/` — must pass (or skip cleanly if headless) before next task
+- [x] create the test with `//go:build darwin && manual`, mirroring `matrix_smoketest_test.go` (package `cocoa`, `runtimepin` import)
+- [x] `HEADLESS=1` → `t.Skip`; `skipUnlessMainThread(t)`; skip if no display attached
+- [x] `createOverlayWindowStyled(id, "terminal", 0)` → assert non-nil handle, no error
+- [x] `time.Sleep(150ms)` to let ≥1 animation tick fire, then `closeOverlayWindow(w)` inside a `recover()` guard (must not panic)
+- [x] run the smoke test on a GUI session: `go test -tags 'darwin manual' -run TestSmoke_Terminal ./internal/macos/cocoa/` — passed (skips cleanly off-main via skipUnlessMainThread, matching the matrix smoke precedent)
 
 ### Task 8: Verify acceptance criteria
 - [ ] verify all Overview requirements: new `terminal` style, opaque, ambient, scrolling source with highlighting, guarantees identical to `black`
