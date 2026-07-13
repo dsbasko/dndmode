@@ -76,12 +76,40 @@ func TestTerminalView_Tokenize_Classification(t *testing.T) {
 			},
 		},
 		{
+			name: "empty string literal is one segment",
+			line: `""`,
+			want: []termSegment{
+				{start: 0, length: 2, cls: termClassString},
+			},
+		},
+		{
+			name: "escaped quote stays inside the string",
+			line: `"a\"b"`,
+			want: []termSegment{
+				{start: 0, length: 6, cls: termClassString}, // escaped \" is not the terminator
+			},
+		},
+		{
+			name: "unterminated string runs to end of line",
+			line: `"abc`,
+			want: []termSegment{
+				{start: 0, length: 4, cls: termClassString}, // no closing quote → to EOL
+			},
+		},
+		{
 			name: "line comment swallows the rest",
 			line: "x // note",
 			want: []termSegment{
 				{start: 0, length: 1, cls: termClassIdent},   // x
 				{start: 1, length: 1, cls: termClassPunct},   // space (stops before //)
 				{start: 2, length: 7, cls: termClassComment}, // // note
+			},
+		},
+		{
+			name: "comment at column zero is one comment segment",
+			line: "// foo",
+			want: []termSegment{
+				{start: 0, length: 6, cls: termClassComment},
 			},
 		},
 		{
@@ -117,9 +145,9 @@ func TestTerminalView_Tokenize_Classification(t *testing.T) {
 
 // TestTerminalView_Tokenize_Coverage confirms every produced segment tiles the
 // input exactly: segments are contiguous, non-overlapping, start at 0, and cover
-// the whole line (except a trailing line comment, which term_tokenize emits as a
-// single segment spanning to end-of-line). This guards the invariant drawRect:
-// relies on — that x = start*cellW lays segments into one gap-free grid.
+// the whole line — a trailing line comment is no exception, since term_tokenize
+// emits it as a single segment spanning to end-of-line. This guards the invariant
+// drawRect: relies on — that x = start*cellW lays segments into one gap-free grid.
 func TestTerminalView_Tokenize_Coverage(t *testing.T) {
 	lines := []string{
 		"package dndmode",

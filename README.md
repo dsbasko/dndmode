@@ -194,7 +194,7 @@ when omitted.
 
 | Flag | Values | Default | Effect |
 | --- | --- | --- | --- |
-| `--style` | `black` \| `matrix` \| `glass` \| `none` | config | Overlay look for this run; wins over `overlay_style`. |
+| `--style` | `black` \| `matrix` \| `terminal` \| `glass` \| `none` | config | Overlay look for this run; wins over `overlay_style`. |
 | `--mute` | `true` \| `false` | config | Mute system audio for this run. |
 | `--focus` | `true` \| `false` | config | Toggle Do Not Disturb for this run. |
 | `--timer` | Go duration (`30m`, `1h30m`, `90s`) | off | Auto-unlock after the duration, then exit `0`. |
@@ -229,7 +229,7 @@ commented at its default, so uncommenting a line only ever overrides.
 #       delete, forwarddelete, and punctuation ( - = [ ] ; ' , . / \ ` ).
 hotkey: Ctrl+Option+Cmd+X
 
-# Overlay look: black (default) | matrix | glass | none
+# Overlay look: black (default) | matrix | terminal | glass | none
 # overlay_style: black
 
 # false (default) keeps the display awake; true lets it idle-off while the
@@ -285,11 +285,22 @@ off (see [Known limitations](#known-limitations)).
 | --- | --- | --- | --- |
 | `black` | Opaque black shield (default). | No | Yes |
 | `matrix` | Green digital rain over an opaque black shield. Cosmetic. | No | Yes |
+| `terminal` | Syntax-highlighted source code that types itself out and scrolls up, over an opaque black shield. Cosmetic. | No | Yes |
 | `glass` | Frosted `NSVisualEffectView`; the blurred desktop shows through. | Yes, by design | Yes |
 | `none` | No overlay. Awake-only mode - see below. | n/a | No |
 
 `glass` is the only style that is not opaque. It trades the no-bleed-through
 guarantee for the look; input is still fully blocked underneath.
+
+**`terminal`.** A second animated style for anyone who finds `matrix` too loud. It
+renders a scrolling stream of fake source code - lines type out one character at a
+time behind a blinking caret, then jump-scroll up as new lines arrive, with light
+syntax highlighting over a dark editor palette. Like `matrix`, it is a purely
+cosmetic content swap on top of the same opaque black shield, so every blocking
+guarantee (no bleed-through, HID input lock, shield window level) is identical to
+`black`. The scrolling text is fully synthetic and compiled in - no real file,
+project, or system data is ever read or shown - and the animation is ambient: it
+never reacts to input, so it leaks no signal that keystrokes are being intercepted.
 
 **Awake-only mode (`none`).** `overlay_style: none` (or `dndmode --style none`) turns
 dndmode into a thin [`caffeinate(8)`](https://ss64.com/mac/caffeinate.html) wrapper.
@@ -464,8 +475,8 @@ internal/supervisor/  single-point shutdown fan-in
 - **No prior-Focus restore.** With `focus: true`, dndmode turns Focus off on exit
   rather than restoring whatever you had before. Audio, by contrast, is restored:
   a session that finds audio already muted leaves it muted.
-- **`glass` bleeds through.** It shows a blurred desktop on purpose. Use `black` or
-  `matrix` if you need the desktop fully hidden.
+- **`glass` bleeds through.** It shows a blurred desktop on purpose. Use `black`,
+  `matrix`, or `terminal` if you need the desktop fully hidden.
 - **Foreground only.** No daemon or launchd mode. The terminal that launched dndmode
   must stay open.
 - **One instance at a time.** A second dndmode exits `5` with instructions.

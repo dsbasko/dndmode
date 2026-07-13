@@ -149,7 +149,6 @@ typedef enum {
     TermClassNumber,    // leading-digit runs
     TermClassPunct,     // operators, brackets, whitespace
 } TermClass;
-static const NSInteger kTermClassCount = 6;
 
 // Restrained dark-editor palette (sRGB), indexed by TermClass. Hardcoded in v1
 // (no config knobs), mirroring matrix; trivially promotable to config later.
@@ -162,6 +161,12 @@ static const TermRGB kTermPalette[] = {
     { 0.90, 0.65, 0.35 }, // number  — amber
     { 0.60, 0.62, 0.65 }, // punct   — muted gray
 };
+// Class count = palette size (single source of truth, mirroring kTermKeywordCount
+// below). buildAttributes loops this many times indexing kTermPalette, so deriving
+// it here — instead of a hardcoded literal — keeps that loop in-bounds if a class
+// or a palette entry is ever added or removed.
+static const NSInteger kTermClassCount =
+    (NSInteger)(sizeof(kTermPalette) / sizeof(kTermPalette[0]));
 static const TermRGB  kTermCaretColor     = { 0.90, 1.00, 0.90 }; // pale-green cursor
 static const unichar  kTermCaretCodepoint = 0x2588;              // full block glyph
 
