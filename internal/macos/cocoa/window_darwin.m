@@ -9,6 +9,7 @@
 #import <string.h>
 #import "matrixview_darwin.h"  // @interface MatrixView (cgo compiles each .m as a separate TU, so a bare @class forward decl is not enough)
 #import "terminalview_darwin.h"  // @interface TerminalView (same separate-TU rule as MatrixView above)
+#import "dvdview_darwin.h"  // @interface DVDView (same separate-TU rule as MatrixView above)
 
 // kGlassBlurRadius is the Gaussian blur radius (in points) for the "glass" style.
 // The overlay grabs a ONE-SHOT screenshot of the desktop (ScreenCaptureKit) and
@@ -143,12 +144,14 @@ static NSImage *captureBlurredDesktopImage(uint32_t displayID, NSScreen *target,
 // MatrixView over an opaque black base; "terminal" installs an animated
 // TerminalView (scrolling syntax-highlighted source) over the same opaque black
 // base — the `language` arg (go/python/typescript/rust; NULL => go) selects the
-// corpus + highlighting; "glass" (QUICK-glass) shows a STATIC,
+// corpus + highlighting; "dvd" installs a DVDView (a "DVD VIDEO" logo bouncing
+// edge-to-edge, recoloring on each bounce) over the same opaque black base;
+// "glass" (QUICK-glass) shows a STATIC,
 // tunable-radius CIGaussianBlur of a one-shot ScreenCaptureKit screenshot of the
 // desktop (frosted glass — the ONLY non-opaque style; falls back to
 // NSVisualEffectView frost if Screen Recording is not granted or the capture
 // fails); for "black", NULL, or anything else the plain
-// opaque-black path is untouched. black + matrix + terminal keep setOpaque:YES
+// opaque-black path is untouched. black + matrix + terminal + dvd keep setOpaque:YES
 // (T-gh8-03 no bleed-through); glass deliberately relaxes that for the look while
 // input stays blocked.
 //
@@ -299,6 +302,15 @@ void* cocoa_create_overlay_window(uint32_t displayID, const char* style,
                                                           language:language];
             [tv setAutoresizingMask:(NSViewWidthSizable | NSViewHeightSizable)];
             [w setContentView:tv];
+        // dvd swaps in a bouncing "DVD VIDEO" logo contentView over the SAME
+        // opaque black base (opaque DVDView layer on top, never transparent) —
+        // same T-gh8-03 no-bleed-through guarantee as matrix/terminal. One DVDView
+        // per display, so each screen's logo bounces independently. DVDView's
+        // @interface comes from dvdview_darwin.h.
+        } else if (style != NULL && strcmp(style, "dvd") == 0) {
+            DVDView *dv = [[DVDView alloc] initWithFrame:[[w contentView] bounds]];
+            [dv setAutoresizingMask:(NSViewWidthSizable | NSViewHeightSizable)];
+            [w setContentView:dv];
         }
     }
 
