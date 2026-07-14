@@ -194,7 +194,7 @@ when omitted.
 
 | Flag | Values | Default | Effect |
 | --- | --- | --- | --- |
-| `--style` | `black` \| `matrix` \| `terminal`[`:go`\|`python`\|`typescript`\|`rust`] \| `glass`[`:radius`] \| `none` | config | Overlay look for this run; wins over `overlay_style`. `terminal:<lang>` picks the source language (default `go`). |
+| `--style` | `black` \| `matrix` \| `terminal`[`:go`\|`python`\|`typescript`\|`rust`] \| `dvd` \| `glass`[`:radius`] \| `none` | config | Overlay look for this run; wins over `overlay_style`. `terminal:<lang>` picks the source language (default `go`). |
 | `--mute` | `true` \| `false` | config | Mute system audio for this run. |
 | `--focus` | `true` \| `false` | config | Toggle Do Not Disturb for this run. |
 | `--timer` | Go duration (`30m`, `1h30m`, `90s`) | off | Auto-unlock after the duration, then exit `0`. |
@@ -229,7 +229,7 @@ commented at its default, so uncommenting a line only ever overrides.
 #       delete, forwarddelete, and punctuation ( - = [ ] ; ' , . / \ ` ).
 hotkey: Ctrl+Option+Cmd+X
 
-# Overlay look: black (default) | matrix | terminal | glass | none
+# Overlay look: black (default) | matrix | terminal | dvd | glass | none
 # overlay_style: black
 
 # Language for overlay_style 'terminal': go (default) | python | typescript | rust.
@@ -290,6 +290,7 @@ off (see [Known limitations](#known-limitations)).
 | `black` | Opaque black shield (default). | No | Yes |
 | `matrix` | Green digital rain over an opaque black shield. Cosmetic. | No | Yes |
 | `terminal` | Syntax-highlighted source code that types itself out and scrolls up, over an opaque black shield. Cosmetic. | No | Yes |
+| `dvd` | A "DVD VIDEO" logo bounces around an opaque black shield, changing color on every edge hit. Cosmetic. | No | Yes |
 | `glass` | Frosted `NSVisualEffectView`; the blurred desktop shows through. | Yes, by design | Yes |
 | `none` | No overlay. Awake-only mode - see below. | n/a | No |
 
@@ -321,6 +322,19 @@ dndmode --style terminal:python
 dndmode --style terminal:typescript
 dndmode --style terminal:rust
 ```
+
+**`dvd`.** The old-DVD-player screensaver: the DVD-VIDEO logo drifts diagonally
+across the shield, bounces off every edge, and cycles to the next color in a neon
+palette on each bounce - and when it lands exactly in a corner it flashes white for
+a moment (the payoff everyone waited for). The logo itself is the real mark,
+compiled into the binary as a monochrome mask (no runtime file, no network) and
+recolored on the fly, so it is a faithful silhouette rather than a hand-drawn
+lookalike. Like `matrix` and `terminal` it is a purely cosmetic content swap on top
+of the same opaque black shield, so every blocking guarantee (no bleed-through, HID
+input lock, shield window level) is identical to `black`, and the animation is
+ambient - it never reacts to input. Each display gets its own logo bouncing on its
+own path. There are no knobs; it is just `dndmode --style dvd` (or
+`overlay_style: dvd`).
 
 **Awake-only mode (`none`).** `overlay_style: none` (or `dndmode --style none`) turns
 dndmode into a thin [`caffeinate(8)`](https://ss64.com/mac/caffeinate.html) wrapper.

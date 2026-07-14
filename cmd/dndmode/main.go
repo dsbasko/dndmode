@@ -304,7 +304,7 @@ func run() int {
 	// for a single run without editing ~/.config/dndmode/config.yml. Empty (the
 	// default) means "use whatever the config says". Validated at Step 5b.1 with
 	// the same ValidateOverlayStyle gate as the config value.
-	styleFlag := flag.String("style", "", "override overlay_style for this run (black|matrix|terminal[:go|python|typescript|rust]|glass[:radius]|none); empty = use config")
+	styleFlag := flag.String("style", "", "override overlay_style for this run (black|matrix|terminal[:go|python|typescript|rust]|dvd|glass[:radius]|none); empty = use config")
 	// --mute / --focus override the config keys for a single run (same
 	// precedence as --style: non-empty WINS over YAML, empty = use config).
 	// Tri-state strings ("" | "true" | "false") rather than flag.Bool because a
@@ -407,7 +407,7 @@ func run() int {
 		if styleSource == "flag" {
 			_, _ = fmt.Fprintf(errW, "dndmode: invalid --style %q: %v.\n", overlayStyle, err)
 		} else {
-			_, _ = fmt.Fprintf(errW, "dndmode: invalid overlay_style %q: %v. Fix overlay_style in ~/.config/dndmode/config.yml (valid: black, matrix, terminal, glass, none).\n", overlayStyle, err)
+			_, _ = fmt.Fprintf(errW, "dndmode: invalid overlay_style %q: %v. Fix overlay_style in ~/.config/dndmode/config.yml (valid: black, matrix, terminal, dvd, glass, none).\n", overlayStyle, err)
 		}
 		return exitConfigErr
 	}
