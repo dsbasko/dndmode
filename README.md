@@ -190,8 +190,11 @@ ad-hoc signed locally), so none require an Apple Developer ID.
 ## First-run setup
 
 1. Install dndmode (see [Install](#install)).
-2. Run `dndmode`. It prompts for Accessibility. Click **Open System Settings** and
-   enable dndmode under **Privacy & Security → Accessibility**.
+2. Run `dndmode`. This first launch writes the default config to
+   `~/.config/dndmode/config.yml` (the file does not exist until dndmode runs -
+   `dndmode --help` only prints usage and creates nothing), then prompts for
+   Accessibility. Click **Open System Settings** and enable dndmode under
+   **Privacy & Security → Accessibility**.
 3. It then waits for Input Monitoring. Enable dndmode under
    **Privacy & Security → Input Monitoring**. There is no system prompt for this one -
    dndmode opens the pane, and the run continues once you flip the switch.
@@ -202,6 +205,12 @@ ad-hoc signed locally), so none require an Apple Developer ID.
    default `focus: false` you can skip this entirely.
 5. Run `dndmode` again. With `--debug` you will see `dndmode: active. press Ctrl-C.`.
    The default hotkey `Ctrl+Option+Cmd+X` ends the lock.
+
+> **Change your hotkey before you rely on it.** The generated config ships with
+> the well-known default `Ctrl+Option+Cmd+X`. Anyone who knows that default can
+> unlock the shield, so open `~/.config/dndmode/config.yml` and set `hotkey` to a
+> private combination first (grammar and key list are in
+> [Configuration](#configuration)).
 
 ## Usage
 
@@ -243,47 +252,110 @@ A few notes on behavior:
 
 The config file lives at `~/.config/dndmode/config.yml` and is created with defaults
 on first run. Only `hotkey` is written as an active key; every other setting is shown
-commented at its default, so uncommenting a line only ever overrides.
+commented at its default, so uncommenting a line only ever overrides. The default
+`hotkey` is `Ctrl+Option+Cmd+X` — change it to a private combination, since it is the
+only secret that ends a locked session.
 
 ```yaml
-# ~/.config/dndmode/config.yml
+# dndmode configuration
+# Location: ~/.config/dndmode/config.yml  (auto-created on first run)
+#
+# Every field except 'hotkey' is OPTIONAL. Uncomment a line and change its
+# value to override the default shown next to it. Unknown keys are REJECTED
+# (strict parsing): a typo aborts startup with an error pointing at the line.
+# Most fields also have a per-run CLI flag that overrides the file for that
+# launch only.
 
-# Unlock hotkey. Requires at least one modifier plus one key.
-# Modifiers: ctrl, option, cmd, shift, fn.
-# Keys: a-z, 0-9, f1-f12, arrows, space, return/enter, tab, escape/esc,
-#       delete, forwarddelete, and punctuation ( - = [ ] ; ' , . / \ ` ).
+# --- hotkey (REQUIRED) -------------------------------------------------------
+# Key combination that unlocks and exits the locked state.
+# Grammar: "<mod>+<mod>+...+<key>" — one or more modifiers plus exactly one key.
+#   Modifiers (case-insensitive): ctrl, option, cmd, shift, fn
+#   Keys: a-z, 0-9, f1-f12, space, return (alias enter), tab, escape (alias
+#         esc), delete, forwarddelete, left, right, up, down,
+#         and the punctuation - = [ ] ; ' , . / \ backtick
+# Matched by PHYSICAL key position, so RU / AZERTY layouts behave identically.
+# Modifier-only combinations are rejected (you must include one real key).
 hotkey: Ctrl+Option+Cmd+X
 
-# Overlay look: black (default) | matrix | terminal | dvd | glass | none
+# --- overlay_style -----------------------------------------------------------
+# Look of the full-screen shield that covers every attached display.
+#   black  : opaque black shield (default). Nothing bleeds through.
+#   matrix : animated green "digital rain" over the black shield (cosmetic
+#            only; every blocking guarantee is identical to black).
+#   terminal : scrolling stream of syntax-highlighted pseudo-source that types
+#            itself out behind a blinking caret over the black shield (cosmetic
+#            only; opaque, every blocking guarantee is identical to black).
+#            Language is set by terminal_language below (default go); the
+#            --style terminal:<lang> flag overrides it for a single run.
+#   dvd    : a "DVD VIDEO" logo bounces around the black shield, changing color
+#            on every edge hit (the old-DVD-player screensaver). Cosmetic only;
+#            opaque, every blocking guarantee is identical to black.
+#   glass  : TRANSPARENT frosted glass — the blurred desktop shows through.
+#            Trades the no-bleed-through guarantee for the look; keyboard and
+#            trackpad are still fully blocked. Blur strength = glass_blur below.
+#            Captures + blurs the desktop, so it needs the Screen Recording
+#            permission; without it, falls back to a plain system frost.
+#   none   : awake-only mode. NO overlay, NO input blocking, NO Focus, NO audio
+#            mute — dndmode just holds the machine awake (like caffeinate).
+#            Needs no Accessibility permission; exit with Ctrl-C only (there is
+#            no hotkey because there is no event tap to observe it).
+# Per-run override: --style <value>. For glass the radius can be appended:
+#   --style glass:24 overrides glass_blur for this run only (--style glass uses
+#   the glass_blur value below, or its default).
 # overlay_style: black
 
-# Language for overlay_style 'terminal': go (default) | python | typescript | rust.
-# Overridden per-run by --style terminal:<lang>.
+# --- glass_blur --------------------------------------------------------------
+# Blur radius (in points) for overlay_style 'glass' — how strongly the desktop
+# behind the shield is blurred. Only used by 'glass'; ignored otherwise.
+#   Lower  (~8)  : sharper — more detail, text starts to become legible.
+#   Default (16) : shapes recognizable, text unreadable.
+#   Higher (~30) : everything dissolves into a smooth frost.
+# Per-run override: the --style glass:<radius> flag (e.g. --style glass:24).
+# glass_blur: 16
+
+# --- terminal_language -------------------------------------------------------
+# Source language rendered by overlay_style 'terminal': go (default), python,
+# typescript or rust. Each has its own compiled-in corpus + syntax highlighting.
+# Only used by 'terminal'; ignored otherwise.
+# Per-run override: the --style terminal:<lang> flag (e.g. --style terminal:rust).
 # terminal_language: go
 
-# false (default) keeps the display awake; true lets it idle-off while the
-# system stays awake. Note the inverted sense of the name.
+# --- allow_display_sleep -----------------------------------------------------
+# INVERTED toggle controlling the DISPLAY (the system stays awake either way).
+#   false : keep the display awake too (default).
+#   true  : let the display dim / sleep while background work keeps running —
+#           saves the panel when you only need the machine, not the screen.
 # allow_display_sleep: false
 
-# Mute system audio for the session and restore it on exit (default true).
+# --- mute --------------------------------------------------------------------
+# System audio muting for the session.
+#   true  : mute on start, restore the prior volume on exit (default). Audio
+#           already muted before start is left muted — the session never
+#           unmutes what it did not mute.
+#   false : leave the volume untouched.
+# Ignored entirely in overlay_style 'none'. Per-run override: --mute=true|false
 # mute: true
 
-# Toggle Do Not Disturb via the dndmode-on / dndmode-off Shortcuts (default
-# false). Enabling it syncs DND to your other Apple devices over iCloud.
+# --- focus -------------------------------------------------------------------
+# Do Not Disturb Focus (opt-in).
+#   false : leave Focus untouched (default).
+#   true  : toggle the 'dndmode-on' / 'dndmode-off' Shortcuts, which sync DND
+#           across your Apple devices via iCloud. Those two Shortcuts must
+#           already exist (see README "First-run setup") or startup aborts with
+#           exit code 6.
+# Ignored entirely in overlay_style 'none'. Per-run override: --focus=true|false
 # focus: false
 
-# Print banners, diagnostics, and debug logs (default false = silent).
+# --- debug -------------------------------------------------------------------
+# Console output gate.
+#   false : SILENT (default). Nothing is printed to stdout / stderr; outcome is
+#           reported through the exit code only. This is a security default —
+#           in 'none' / 'glass' mode the terminal stays visible, so a startup
+#           banner would otherwise leak the unlock hotkey to a bystander.
+#   true  : un-silence the full startup / cleanup banners and debug logging.
+# Per-run equivalent: the --debug flag (either source enables output).
 # debug: false
 ```
-
-| Key | Type | Default | Meaning |
-| --- | --- | --- | --- |
-| `hotkey` | string | `Ctrl+Option+Cmd+X` | The combination that ends the lock. |
-| `overlay_style` | string | `black` | Shield look, or `none` for awake-only mode. |
-| `allow_display_sleep` | bool | `false` | `false` keeps the display awake; `true` lets it idle-off. |
-| `mute` | bool | `true` | Mute system audio for the session. |
-| `focus` | bool | `false` | Toggle Do Not Disturb via Shortcuts. |
-| `debug` | bool | `false` | Un-silence output. |
 
 The hotkey is matched by physical key position, so it behaves the same on a US,
 Russian, or AZERTY layout. Caps Lock and the numeric-keypad flag are ignored during
@@ -538,6 +610,12 @@ internal/supervisor/  single-point shutdown fan-in
   `matrix`, or `terminal` if you need the desktop fully hidden.
 - **Foreground only.** No daemon or launchd mode. The terminal that launched dndmode
   must stay open.
+- **Needs an active display.** dndmode shields the screens you can see; it does not
+  keep a MacBook running with the lid shut. With the lid closed and no external
+  monitor there is nothing to draw on, so startup aborts with exit `2` (`no displays
+  detected`). The awake-lock also does not defeat clamshell sleep - closing the lid
+  on battery still sleeps the Mac. Run it lid-open, or in clamshell with an external
+  display on AC power.
 - **One instance at a time.** A second dndmode exits `5` with instructions.
 - **Signing.** Recent macOS refuses unsigned binaries. `make build` applies ad-hoc
   codesigning; `go install` relies on Go's linker-signed signature, which launches
