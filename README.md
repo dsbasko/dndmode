@@ -22,6 +22,14 @@ dndmode            # lock now, run until the unlock hotkey
 dndmode --timer 1h # lock now, auto-unlock after an hour
 ```
 
+**Quick install** via the personal Homebrew tap (other methods and the permission
+notes are under [Install](#install)):
+
+```bash
+brew install dsbasko/tap/dndmode   # install
+brew upgrade dndmode               # update to the latest release
+```
+
 ---
 
 ## Contents
@@ -129,12 +137,28 @@ instance).
 
 ## Install
 
-Pick one install path and stay on it. Mixing `go install` and `make install`
-produces two separate binaries (`~/go/bin/dndmode` and `/usr/local/bin/dndmode`)
-with different code signatures, and macOS TCC treats them as different apps - each
-needs its own Accessibility and Input Monitoring grant.
+Pick one install path and stay on it. Mixing them (`brew`, `go install`,
+`make install`) produces separate binaries (`/opt/homebrew/bin/dndmode`,
+`~/go/bin/dndmode`, `/usr/local/bin/dndmode`) with different code signatures, and
+macOS TCC treats each as a different app - each needs its own Accessibility and
+Input Monitoring grant.
 
-**From source (recommended - stable permissions across upgrades):**
+**Homebrew (easiest):**
+
+```bash
+brew install dsbasko/tap/dndmode   # install
+brew upgrade dndmode               # update to the latest release
+```
+
+Installs from the personal tap
+[`dsbasko/homebrew-tap`](https://github.com/dsbasko/homebrew-tap) (not
+homebrew-core), building from source and re-applying the ad-hoc codesign identifier
+`com.dsbasko.dndmode`. Each `brew upgrade` rebuilds with a fresh cdhash, so macOS
+re-prompts for Accessibility and Input Monitoring after an upgrade (the formula says
+so in its caveats). If you want grants that survive upgrades, use the source build
+below.
+
+**From source (most stable permissions across upgrades):**
 
 ```bash
 git clone https://github.com/dsbasko/dndmode
@@ -160,7 +184,8 @@ on each upgrade. If that annoys you, run `make install` from a clone once and us
 stable `/usr/local/bin` copy. See [Troubleshooting](#tcc-permissions-lost-after-a-go-install-upgrade)
 for the mechanics.
 
-Homebrew is not supported yet - it needs an Apple Developer ID, which is deferred.
+All three paths build from source (there is no pre-signed bottle - the binary is
+ad-hoc signed locally), so none require an Apple Developer ID.
 
 ## First-run setup
 
