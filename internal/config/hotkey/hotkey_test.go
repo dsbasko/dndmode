@@ -4,6 +4,7 @@ package hotkey_test
 
 import (
 	"errors"
+	"strings"
 	"testing"
 
 	"github.com/dsbasko/dndmode/internal/config/hotkey"
@@ -294,4 +295,434 @@ func TestParse_Hotkey_KeyCodeResolution(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestParseStep_Hotkey_Success(t *testing.T) {
+	tests := []struct {
+		name         string
+		input        string
+		setupMocks   func(td *testDeps)
+		validateResp func(t *testing.T, got hotkey.Spec, err error)
+	}{
+		{
+			name:       "bare key without modifiers",
+			input:      "s",
+			setupMocks: func(td *testDeps) {},
+			validateResp: func(t *testing.T, got hotkey.Spec, err error) {
+				if err != nil {
+					t.Fatalf("unexpected error: %v", err)
+				}
+				want := hotkey.Spec{Modifiers: 0, KeyCode: 0x01} // kVK_ANSI_S
+				if got != want {
+					t.Errorf("ParseStep() = %+v, want %+v", got, want)
+				}
+			},
+		},
+		{
+			name:       "step with one modifier",
+			input:      "ctrl+s",
+			setupMocks: func(td *testDeps) {},
+			validateResp: func(t *testing.T, got hotkey.Spec, err error) {
+				if err != nil {
+					t.Fatalf("unexpected error: %v", err)
+				}
+				want := hotkey.Spec{Modifiers: hotkey.ModCtrl, KeyCode: 0x01}
+				if got != want {
+					t.Errorf("ParseStep() = %+v, want %+v", got, want)
+				}
+			},
+		},
+		{
+			name:       "step with several modifiers",
+			input:      "Ctrl+Option+Cmd+X",
+			setupMocks: func(td *testDeps) {},
+			validateResp: func(t *testing.T, got hotkey.Spec, err error) {
+				if err != nil {
+					t.Fatalf("unexpected error: %v", err)
+				}
+				want := hotkey.Spec{
+					Modifiers: hotkey.ModCtrl | hotkey.ModOption | hotkey.ModCmd,
+					KeyCode:   0x07, // kVK_ANSI_X
+				}
+				if got != want {
+					t.Errorf("ParseStep() = %+v, want %+v", got, want)
+				}
+			},
+		},
+		{
+			name:       "case-insensitive bare key",
+			input:      "S",
+			setupMocks: func(td *testDeps) {},
+			validateResp: func(t *testing.T, got hotkey.Spec, err error) {
+				if err != nil {
+					t.Fatalf("unexpected error: %v", err)
+				}
+				if got.KeyCode != 0x01 || got.Modifiers != 0 {
+					t.Errorf("ParseStep() = %+v, want {0 0x01}", got)
+				}
+			},
+		},
+		{
+			name:       "space key as a bare step",
+			input:      "space",
+			setupMocks: func(td *testDeps) {},
+			validateResp: func(t *testing.T, got hotkey.Spec, err error) {
+				if err != nil {
+					t.Fatalf("unexpected error: %v", err)
+				}
+				if got.KeyCode != 0x31 || got.Modifiers != 0 {
+					t.Errorf("ParseStep() = %+v, want {0 0x31}", got)
+				}
+			},
+		},
+		{
+			name:       "surrounding whitespace trimmed",
+			input:      "  ctrl+z  ",
+			setupMocks: func(td *testDeps) {},
+			validateResp: func(t *testing.T, got hotkey.Spec, err error) {
+				if err != nil {
+					t.Fatalf("unexpected error: %v", err)
+				}
+				want := hotkey.Spec{Modifiers: hotkey.ModCtrl, KeyCode: 0x06} // kVK_ANSI_Z
+				if got != want {
+					t.Errorf("ParseStep() = %+v, want %+v", got, want)
+				}
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			td := newTestDeps(t)
+			tt.setupMocks(td)
+			got, err := hotkey.ParseStep(tt.input)
+			tt.validateResp(t, got, err)
+		})
+	}
+}
+
+func TestParseStep_Hotkey_Errors(t *testing.T) {
+	tests := []struct {
+		name         string
+		input        string
+		setupMocks   func(td *testDeps)
+		validateResp func(t *testing.T, got hotkey.Spec, err error)
+	}{
+		{
+			name:       "empty string",
+			input:      "",
+			setupMocks: func(td *testDeps) {},
+			validateResp: func(t *testing.T, _ hotkey.Spec, err error) {
+				if !errors.Is(err, hotkey.ErrEmpty) {
+					t.Errorf("got %v, want errors.Is(err, ErrEmpty)", err)
+				}
+			},
+		},
+		{
+			name:       "whitespace only",
+			input:      " \t ",
+			setupMocks: func(td *testDeps) {},
+			validateResp: func(t *testing.T, _ hotkey.Spec, err error) {
+				if !errors.Is(err, hotkey.ErrEmpty) {
+					t.Errorf("got %v, want errors.Is(err, ErrEmpty)", err)
+				}
+			},
+		},
+		{
+			name:       "unknown token",
+			input:      "nonexistent",
+			setupMocks: func(td *testDeps) {},
+			validateResp: func(t *testing.T, _ hotkey.Spec, err error) {
+				if !errors.Is(err, hotkey.ErrUnknownToken) {
+					t.Errorf("got %v, want errors.Is(err, ErrUnknownToken)", err)
+				}
+			},
+		},
+		{
+			name:       "two non-modifier keys",
+			input:      "x+y",
+			setupMocks: func(td *testDeps) {},
+			validateResp: func(t *testing.T, _ hotkey.Spec, err error) {
+				if !errors.Is(err, hotkey.ErrInvalidHotkey) {
+					t.Errorf("got %v, want errors.Is(err, ErrInvalidHotkey)", err)
+				}
+			},
+		},
+		{
+			name:       "modifier-only step",
+			input:      "ctrl+cmd",
+			setupMocks: func(td *testDeps) {},
+			validateResp: func(t *testing.T, _ hotkey.Spec, err error) {
+				if !errors.Is(err, hotkey.ErrModifierOnly) {
+					t.Errorf("got %v, want errors.Is(err, ErrModifierOnly)", err)
+				}
+			},
+		},
+		{
+			name:       "duplicate modifier",
+			input:      "ctrl+ctrl+x",
+			setupMocks: func(td *testDeps) {},
+			validateResp: func(t *testing.T, _ hotkey.Spec, err error) {
+				if !errors.Is(err, hotkey.ErrDuplicateMod) {
+					t.Errorf("got %v, want errors.Is(err, ErrDuplicateMod)", err)
+				}
+			},
+		},
+		{
+			name:       "empty token between two pluses",
+			input:      "ctrl++x",
+			setupMocks: func(td *testDeps) {},
+			validateResp: func(t *testing.T, _ hotkey.Spec, err error) {
+				if !errors.Is(err, hotkey.ErrInvalidHotkey) {
+					t.Errorf("got %v, want errors.Is(err, ErrInvalidHotkey)", err)
+				}
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			td := newTestDeps(t)
+			tt.setupMocks(td)
+			got, err := hotkey.ParseStep(tt.input)
+			tt.validateResp(t, got, err)
+		})
+	}
+}
+
+// Parse is now ParseStep + "at least one modifier". That refactor moves the
+// bare-modifier input "ctrl" from ErrInvalidHotkey (it used to trip the
+// len(tokens) < 2 guard) to ErrModifierOnly, which is the more accurate
+// category. The change is deliberate — this test pins it.
+func TestParse_Hotkey_BareModifierIsModifierOnly(t *testing.T) {
+	td := newTestDeps(t)
+	_ = td
+
+	_, err := hotkey.Parse("ctrl")
+	if !errors.Is(err, hotkey.ErrModifierOnly) {
+		t.Errorf("Parse(%q) error = %v, want errors.Is(err, ErrModifierOnly)", "ctrl", err)
+	}
+	if errors.Is(err, hotkey.ErrInvalidHotkey) {
+		t.Errorf("Parse(%q) error = %v, must no longer be ErrInvalidHotkey", "ctrl", err)
+	}
+}
+
+func TestParseSequence_Hotkey_Success(t *testing.T) {
+	tests := []struct {
+		name         string
+		input        string
+		setupMocks   func(td *testDeps)
+		validateResp func(t *testing.T, got []hotkey.Spec, err error)
+	}{
+		{
+			name:       "passphrase style code",
+			input:      "s w o r d",
+			setupMocks: func(td *testDeps) {},
+			validateResp: func(t *testing.T, got []hotkey.Spec, err error) {
+				if err != nil {
+					t.Fatalf("unexpected error: %v", err)
+				}
+				want := []hotkey.Spec{
+					{KeyCode: 0x01}, // s
+					{KeyCode: 0x0D}, // w
+					{KeyCode: 0x1F}, // o
+					{KeyCode: 0x0F}, // r
+					{KeyCode: 0x02}, // d
+				}
+				assertSequence(t, got, want)
+			},
+		},
+		{
+			name:       "legacy hotkey is a code of length 1",
+			input:      "Ctrl+Option+Cmd+X",
+			setupMocks: func(td *testDeps) {},
+			validateResp: func(t *testing.T, got []hotkey.Spec, err error) {
+				if err != nil {
+					t.Fatalf("unexpected error: %v", err)
+				}
+				want := []hotkey.Spec{{
+					Modifiers: hotkey.ModCtrl | hotkey.ModOption | hotkey.ModCmd,
+					KeyCode:   0x07,
+				}}
+				assertSequence(t, got, want)
+			},
+		},
+		{
+			name:       "mixed bare and modified steps",
+			input:      "ctrl+s w cmd+z",
+			setupMocks: func(td *testDeps) {},
+			validateResp: func(t *testing.T, got []hotkey.Spec, err error) {
+				if err != nil {
+					t.Fatalf("unexpected error: %v", err)
+				}
+				want := []hotkey.Spec{
+					{Modifiers: hotkey.ModCtrl, KeyCode: 0x01},
+					{KeyCode: 0x0D},
+					{Modifiers: hotkey.ModCmd, KeyCode: 0x06},
+				}
+				assertSequence(t, got, want)
+			},
+		},
+		{
+			name:       "repeated leading and trailing whitespace collapses",
+			input:      "  \t s   w \t\t o  ",
+			setupMocks: func(td *testDeps) {},
+			validateResp: func(t *testing.T, got []hotkey.Spec, err error) {
+				if err != nil {
+					t.Fatalf("unexpected error: %v", err)
+				}
+				want := []hotkey.Spec{{KeyCode: 0x01}, {KeyCode: 0x0D}, {KeyCode: 0x1F}}
+				assertSequence(t, got, want)
+			},
+		},
+		{
+			name:       "space key named by token, not by separator",
+			input:      "s space w",
+			setupMocks: func(td *testDeps) {},
+			validateResp: func(t *testing.T, got []hotkey.Spec, err error) {
+				if err != nil {
+					t.Fatalf("unexpected error: %v", err)
+				}
+				want := []hotkey.Spec{{KeyCode: 0x01}, {KeyCode: 0x31}, {KeyCode: 0x0D}}
+				assertSequence(t, got, want)
+			},
+		},
+		{
+			name:       "self-overlapping code is accepted verbatim",
+			input:      "a b a b",
+			setupMocks: func(td *testDeps) {},
+			validateResp: func(t *testing.T, got []hotkey.Spec, err error) {
+				if err != nil {
+					t.Fatalf("unexpected error: %v", err)
+				}
+				want := []hotkey.Spec{
+					{KeyCode: 0x00}, {KeyCode: 0x0B}, {KeyCode: 0x00}, {KeyCode: 0x0B},
+				}
+				assertSequence(t, got, want)
+			},
+		},
+		{
+			name:       "MaxSteps steps accepted",
+			input:      repeatSteps("a", hotkey.MaxSteps),
+			setupMocks: func(td *testDeps) {},
+			validateResp: func(t *testing.T, got []hotkey.Spec, err error) {
+				if err != nil {
+					t.Fatalf("unexpected error: %v", err)
+				}
+				if len(got) != hotkey.MaxSteps {
+					t.Errorf("len = %d, want %d", len(got), hotkey.MaxSteps)
+				}
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			td := newTestDeps(t)
+			tt.setupMocks(td)
+			got, err := hotkey.ParseSequence(tt.input)
+			tt.validateResp(t, got, err)
+		})
+	}
+}
+
+func TestParseSequence_Hotkey_Errors(t *testing.T) {
+	tests := []struct {
+		name         string
+		input        string
+		setupMocks   func(td *testDeps)
+		validateResp func(t *testing.T, got []hotkey.Spec, err error)
+	}{
+		{
+			name:       "empty string",
+			input:      "",
+			setupMocks: func(td *testDeps) {},
+			validateResp: func(t *testing.T, got []hotkey.Spec, err error) {
+				if !errors.Is(err, hotkey.ErrEmpty) {
+					t.Errorf("got %v, want errors.Is(err, ErrEmpty)", err)
+				}
+				if got != nil {
+					t.Errorf("steps = %v, want nil on error", got)
+				}
+			},
+		},
+		{
+			name:       "whitespace only",
+			input:      "  \t\n ",
+			setupMocks: func(td *testDeps) {},
+			validateResp: func(t *testing.T, _ []hotkey.Spec, err error) {
+				if !errors.Is(err, hotkey.ErrEmpty) {
+					t.Errorf("got %v, want errors.Is(err, ErrEmpty)", err)
+				}
+			},
+		},
+		{
+			name:       "unknown token in the middle reports its position",
+			input:      "s w nonexistent d",
+			setupMocks: func(td *testDeps) {},
+			validateResp: func(t *testing.T, _ []hotkey.Spec, err error) {
+				if !errors.Is(err, hotkey.ErrUnknownToken) {
+					t.Fatalf("got %v, want errors.Is(err, ErrUnknownToken)", err)
+				}
+				if !strings.Contains(err.Error(), "step 3") {
+					t.Errorf("error %q must name the failing step position (step 3)", err)
+				}
+			},
+		},
+		{
+			name:       "modifier-only step in the middle",
+			input:      "s ctrl d",
+			setupMocks: func(td *testDeps) {},
+			validateResp: func(t *testing.T, _ []hotkey.Spec, err error) {
+				if !errors.Is(err, hotkey.ErrModifierOnly) {
+					t.Fatalf("got %v, want errors.Is(err, ErrModifierOnly)", err)
+				}
+				if !strings.Contains(err.Error(), "step 2") {
+					t.Errorf("error %q must name the failing step position (step 2)", err)
+				}
+			},
+		},
+		{
+			name:       "MaxSteps+1 steps rejected",
+			input:      repeatSteps("a", hotkey.MaxSteps+1),
+			setupMocks: func(td *testDeps) {},
+			validateResp: func(t *testing.T, got []hotkey.Spec, err error) {
+				if !errors.Is(err, hotkey.ErrTooManySteps) {
+					t.Errorf("got %v, want errors.Is(err, ErrTooManySteps)", err)
+				}
+				if got != nil {
+					t.Errorf("steps = %v, want nil on error", got)
+				}
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			td := newTestDeps(t)
+			tt.setupMocks(td)
+			got, err := hotkey.ParseSequence(tt.input)
+			tt.validateResp(t, got, err)
+		})
+	}
+}
+
+func assertSequence(t *testing.T, got, want []hotkey.Spec) {
+	t.Helper()
+	if len(got) != len(want) {
+		t.Fatalf("len = %d, want %d (got %+v)", len(got), len(want), got)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Errorf("step %d = %+v, want %+v", i+1, got[i], want[i])
+		}
+	}
+}
+
+func repeatSteps(step string, n int) string {
+	parts := make([]string, n)
+	for i := range parts {
+		parts[i] = step
+	}
+	return strings.Join(parts, " ")
 }

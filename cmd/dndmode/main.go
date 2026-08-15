@@ -461,9 +461,10 @@ func run() int {
 		_, _ = fmt.Fprintf(outW, "dndmode: created default config at %s\n", cfgPath)
 	}
 	_, _ = fmt.Fprintf(outW, "dndmode: config=%s hotkey=%s overlay_style=%s (%s)\n", cfgPath, cfg.Hotkey, overlayStyle, styleSource)
-	if overlayStyle == config.OverlayStyleGlass {
+	switch overlayStyle {
+	case config.OverlayStyleGlass:
 		_, _ = fmt.Fprintf(outW, "dndmode: glass_blur=%g\n", glassBlur)
-	} else if overlayStyle == config.OverlayStyleTerminal {
+	case config.OverlayStyleTerminal:
 		_, _ = fmt.Fprintf(outW, "dndmode: terminal_language=%s\n", terminalLanguage)
 	}
 	if timerDur > 0 {

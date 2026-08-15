@@ -1,9 +1,24 @@
 //go:build darwin
 
-// Package hotkey parses macOS hotkey strings into a Spec (modifier mask +
-// virtual keyCode). The grammar is "<modifier>(+<modifier>)*+<key>" with
-// canonical modifier tokens: ctrl, option, cmd, shift, fn (case-insensitive,
-// no aliases in v1 — see the design notes discretion).
+// Package hotkey parses macOS unlock codes into a sequence of Specs
+// (modifier mask + virtual keyCode per step).
+//
+// A single step has the grammar "(<modifier>+)*<key>" with canonical modifier
+// tokens: ctrl, option, cmd, shift, fn (case-insensitive, no aliases in v1 —
+// see the design notes discretion). Modifiers are optional inside a step, so
+// both "s" and "ctrl+s" are valid steps.
+//
+// An unlock code is a whitespace-separated sequence of at most MaxSteps steps:
+//
+//	s w o r d f i s h
+//	ctrl+s w cmd+z
+//	Ctrl+Option+Cmd+X        // legacy single-combination hotkey = code of length 1
+//
+// A physical space is only a separator; the space key itself is named by the
+// token "space", so the two never collide.
+//
+// Parse is the legacy single-combination entry point (the deprecated `hotkey`
+// config key): it is ParseStep plus the requirement of at least one modifier.
 //
 // Matching is by physical key position (kVK_* virtual keyCode), not by
 // character — so RU/AZERTY layouts produce the same keyCode for the same
@@ -28,7 +43,16 @@ const (
 	ModFn     ModFlag = 0x800000 // kCGEventFlagMaskSecondaryFn
 )
 
-// Spec represents a parsed hotkey: a set of modifiers + exactly one key.
+// MaxSteps is the upper bound on the number of steps in an unlock code.
+// It is half of the C-side keystroke ring capacity (DND_RING_CAP), which
+// leaves a 2x headroom so a complete code always fits inside the window the
+// poller is able to read back.
+//
+// The length check lives here and only here — validation layers above must
+// not duplicate it.
+const MaxSteps = 32
+
+// Spec represents a parsed step: a set of modifiers + exactly one key.
 type Spec struct {
 	Modifiers ModFlag
 	KeyCode   uint16
@@ -41,6 +65,7 @@ var (
 	ErrInvalidHotkey = errors.New("hotkey: invalid syntax")
 	ErrUnknownToken  = errors.New("hotkey: unknown token")
 	ErrDuplicateMod  = errors.New("hotkey: duplicate modifier")
+	ErrTooManySteps  = errors.New("hotkey: too many steps in unlock code")
 )
 
 var modifierTable = map[string]ModFlag{
@@ -51,21 +76,23 @@ var modifierTable = map[string]ModFlag{
 	"fn":     ModFn,
 }
 
-// Parse converts "ctrl+option+cmd+x" into a Spec, case-insensitive.
-// Order of modifiers in input is irrelevant; output Modifiers is a
-// normalized bitmask. Whitespace around tokens is trimmed.
+// ParseStep converts one step of an unlock code into a Spec, case-insensitive:
+// "s", "ctrl+s", "Ctrl+Option+Cmd+X". Order of modifiers in input is
+// irrelevant; output Modifiers is a normalized bitmask. Whitespace around
+// tokens is trimmed.
+//
+// Unlike Parse, a step carrying zero modifiers is valid — that is exactly what
+// makes a passphrase-style code ("s w o r d") expressible. Exactly one
+// non-modifier key is still required.
 //
 // Returns an error wrapping one of the sentinel errors (use errors.Is).
-func Parse(s string) (Spec, error) {
+func ParseStep(s string) (Spec, error) {
 	s = strings.TrimSpace(s)
 	if s == "" {
 		return Spec{}, ErrEmpty
 	}
 
 	tokens := strings.Split(s, "+")
-	if len(tokens) < 2 {
-		return Spec{}, fmt.Errorf("%w: need at least one modifier and one key", ErrInvalidHotkey)
-	}
 
 	var spec Spec
 	keyToken := ""
@@ -107,9 +134,49 @@ func Parse(s string) (Spec, error) {
 	if !keyTokenSet {
 		return Spec{}, ErrModifierOnly
 	}
+	return spec, nil
+}
+
+// Parse converts "ctrl+option+cmd+x" into a Spec, case-insensitive. It is
+// ParseStep plus the legacy requirement of at least one modifier, and backs
+// the deprecated single-combination `hotkey` config key.
+//
+// Returns an error wrapping one of the sentinel errors (use errors.Is).
+func Parse(s string) (Spec, error) {
+	spec, err := ParseStep(s)
+	if err != nil {
+		return Spec{}, err
+	}
 	if spec.Modifiers == 0 {
-		// Defensive: unreachable given len(tokens) >= 2 + keyTokenSet.
-		return Spec{}, fmt.Errorf("%w: at least one modifier required", ErrInvalidHotkey)
+		return Spec{}, fmt.Errorf("%w: need at least one modifier and one key", ErrInvalidHotkey)
 	}
 	return spec, nil
+}
+
+// ParseSequence converts a whitespace-separated unlock code ("s w o r d",
+// "ctrl+s w cmd+z") into the sequence of steps it denotes. Any run of spaces
+// and tabs collapses into a single separator, so leading, trailing and
+// repeated whitespace is harmless.
+//
+// A failing step is reported by its 1-based position only — the step's own
+// text is deliberately left out so a parse error never echoes a fragment of
+// the user's secret. Sentinels stay reachable through errors.Is.
+func ParseSequence(s string) ([]Spec, error) {
+	fields := strings.Fields(s)
+	if len(fields) == 0 {
+		return nil, ErrEmpty
+	}
+	if len(fields) > MaxSteps {
+		return nil, fmt.Errorf("%w: got %d steps, max %d", ErrTooManySteps, len(fields), MaxSteps)
+	}
+
+	steps := make([]Spec, 0, len(fields))
+	for i, f := range fields {
+		spec, err := ParseStep(f)
+		if err != nil {
+			return nil, fmt.Errorf("step %d: %w", i+1, err)
+		}
+		steps = append(steps, spec)
+	}
+	return steps, nil
 }
