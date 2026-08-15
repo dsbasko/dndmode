@@ -551,6 +551,152 @@ func TestAcceptance_ModifierOnlyHotkey_ExitOne(t *testing.T) {
 	}
 }
 
+// writeUnlockConfig writes a config.yml under tmpHome and returns tmpHome. The
+// unlock-code rejection tests below differ only in the YAML they feed the
+// binary, so the mkdir + write boilerplate is factored out here rather than
+// copied four times.
+func writeUnlockConfig(t *testing.T, yaml string) string {
+	t.Helper()
+	tmpHome := t.TempDir()
+	cfgDir := filepath.Join(tmpHome, ".config", "dndmode")
+	if err := os.MkdirAll(cfgDir, 0o700); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(cfgDir, "config.yml"), []byte(yaml), 0o600); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+	return tmpHome
+}
+
+// runUnlockRejection starts the binary against the given config, waits for it
+// to exit, and asserts exit code 1 plus every wanted substring in stderr. It
+// also asserts that NONE of the notWanted strings appear anywhere in stderr —
+// which is how each caller pins that its diagnostic names the KEY without
+// echoing the secret's VALUE (config.ResolveUnlockCode's contract, restated in
+// main.go Step 5b).
+func runUnlockRejection(t *testing.T, yaml string, wanted, notWanted []string) {
+	t.Helper()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	cmd, _, stderr := dndmodeCmd(t, ctx, writeUnlockConfig(t, yaml))
+	if err := cmd.Run(); err == nil {
+		t.Fatalf("expected non-zero exit for config %q, got nil", yaml)
+	}
+	if code := cmd.ProcessState.ExitCode(); code != 1 {
+		t.Errorf("exit code = %d, want 1 (config rejection)", code)
+	}
+
+	stderrStr := stderr.String()
+	for _, w := range wanted {
+		if !strings.Contains(stderrStr, w) {
+			t.Errorf("stderr missing %q: %s", w, stderrStr)
+		}
+	}
+	for _, nw := range notWanted {
+		if strings.Contains(stderrStr, nw) {
+			t.Errorf("stderr LEAKS %q: %s", nw, stderrStr)
+		}
+	}
+}
+
+// TestAcceptance_BothUnlockKeys_ExitOne pins the "both" row of the
+// unlock-secret precedence table: a config that sets unlock_code AND the
+// deprecated hotkey is an AMBIGUOUS secret, and dndmode refuses to guess which
+// one the user meant rather than silently preferring one. Guessing here has a
+// worst case that is not recoverable from the keyboard — the machine locks with
+// a code the owner does not believe is in effect.
+//
+// The rejection happens at Step 5b, before any permission or display gate, so
+// the assertion is deterministic on any host.
+func TestAcceptance_BothUnlockKeys_ExitOne(t *testing.T) {
+	runUnlockRejection(t,
+		"unlock_code: s w o r d f i s h\nhotkey: Ctrl+Option+Cmd+X\n",
+		[]string{"both unlock_code and the deprecated hotkey", "Fix ~/.config/dndmode/config.yml"},
+		// Neither key's value may surface in the diagnostic.
+		[]string{"s w o r d f i s h", "Ctrl+Option+Cmd+X"},
+	)
+}
+
+// TestAcceptance_ThreeStepUnlockCode_ExitOne pins the 2-3 step band of the
+// length policy: it parses fine, so only ValidateUnlockCode stands between the
+// user and a passphrase that is exhausted in minutes. The refusal is
+// deliberate — a 3-step code creates the illusion of a passphrase while being
+// weaker than the 1-step hotkey it replaced, because the sliding window makes
+// EVERY keypress a fresh match attempt.
+func TestAcceptance_ThreeStepUnlockCode_ExitOne(t *testing.T) {
+	runUnlockRejection(t,
+		"unlock_code: s w o\n",
+		[]string{"invalid unlock_code", "3 steps is too short", "at least 4 steps"},
+		[]string{"s w o"},
+	)
+}
+
+// TestAcceptance_BareKeyUnlockCode_ExitOne pins the 1-step band: a single step
+// is accepted ONLY with a modifier (legacy `hotkey` semantics). `unlock_code:
+// x` would otherwise unlock on the first character a bystander types — the
+// weakest configuration the grammar can express, and the one a user is most
+// likely to reach for while experimenting.
+func TestAcceptance_BareKeyUnlockCode_ExitOne(t *testing.T) {
+	runUnlockRejection(t,
+		"unlock_code: x\n",
+		[]string{"invalid unlock_code", "at least one modifier"},
+		nil, // a single "x" is too short to search for without matching prose
+	)
+}
+
+// TestAcceptance_LegacyHotkeyOnly_StartsWithDeprecationWarning pins the
+// backwards-compatibility row of the table, which is the whole reason
+// `hotkey` still parses: a config written before unlock_code existed — the
+// shape every `brew upgrade` user has on disk — must still START, not fail.
+//
+// Two things are asserted together because they are the same promise: the run
+// gets past validation (banner reports a 1-step code sourced from `hotkey`)
+// AND the operator is told to migrate. The warning rides the same gatedWriter
+// as the banner, so it is --debug-only: a bystander watching a silent-mode
+// terminal learns nothing, not even that a legacy key is in play.
+//
+// overlay_style=none keeps the run headless — no GUI, TCC, or Shortcuts gate.
+func TestAcceptance_LegacyHotkeyOnly_StartsWithDeprecationWarning(t *testing.T) {
+	tmpHome := writeUnlockConfig(t, "hotkey: Ctrl+Option+Cmd+X\noverlay_style: none\n")
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	cmd, stdout, stderr := dndmodeCmd(t, ctx, tmpHome)
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	defer func() {
+		_ = cmd.Process.Kill()
+		_ = cmd.Wait()
+	}()
+
+	if !waitForStdout(stdout, "the 'hotkey' config key is deprecated", 10*time.Second) {
+		t.Fatalf("no deprecation warning for a legacy-only config:\nstdout:\n%s\nstderr:\n%s",
+			stdout.String(), stderr.String())
+	}
+
+	out := stdout.String()
+	// The legacy key collapses to a code of length 1, and the banner names the
+	// key it came from — that source string is what makes the warning
+	// actionable ("this line, in this file").
+	if !strings.Contains(out, "unlock_code=1 step (source=hotkey)") {
+		t.Errorf("banner does not report the legacy source: %s", out)
+	}
+	// A 1-step code is weak BY DESIGN of IsWeakUnlockCode — the shipped
+	// default is exactly this, and the strength advisory is the only signal a
+	// never-opened-config user gets.
+	if !strings.Contains(out, "strongly recommended") {
+		t.Errorf("no strength advisory for a 1-step legacy code: %s", out)
+	}
+	// Even on the deprecation path the value stays out of the terminal.
+	if strings.Contains(out, "Ctrl+Option+Cmd+X") {
+		t.Errorf("banner LEAKS the legacy hotkey value: %s", out)
+	}
+}
+
 // TestAcceptance_InvalidStyleFlag_ExitOne verifies the --style flag is
 // value-validated through the same ValidateOverlayStyle gate as overlay_style
 // (Step 5b.1): a junk value exits 1 BEFORE any PreFlight permission check, and

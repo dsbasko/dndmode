@@ -16,6 +16,10 @@
 // documented on `eventtap_callback` forbids. watchdog_darwin.m does import it,
 // and that is fine: its //export call fires from a GCD handler, never from a
 // tap callback.
+//
+// `TestTapSource_DoesNotImportCgoExportHeader` (nosplit_gold_test.go) reads
+// this file and fails if the directive comes back, so the absence is an
+// assertion rather than a habit.
 
 // USER_INTENTIONAL_MASK is the bit-for-bit twin of `matcher.UserIntentionalMask`
 // on the Go side. The callback strips system bits (CapsLock 0x10000,
@@ -104,6 +108,16 @@ static CFRunLoopRef       g_worker_runloop = NULL;
 // shape that survives `-race` under load. Moving the comparison to Go took
 // that count from one to zero, so the invariant is now strictly stronger
 // than the shape that was validated. Do not add a Go call back.
+//
+// ENFORCED BY nosplit_gold_test.go — and, for the first time, actually
+// enforced. An earlier revision of this comment claimed a "gold-grep in
+// tap_test.go" backed it; no such test existed, and the invariant rested on
+// code review alone for the whole life of that claim. Two tests now read this
+// source text: `TestTapSource_DoesNotImportCgoExportHeader` (no
+// `_cgo_export.h` directive anywhere in the file, which makes a Go call here
+// fail to compile) and `TestEventTapCallback_CallsNoGoExports` (the body of
+// this function calls none of the package's //export symbols, which holds
+// even if some future non-callback code in this file needs the header).
 //
 // The ring append is what replaced it, and it is strictly weaker than the
 // call it displaced — which is why it was chosen over any richer
