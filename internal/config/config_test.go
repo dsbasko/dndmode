@@ -13,6 +13,7 @@ import (
 	"testing"
 
 	"github.com/dsbasko/dndmode/internal/config"
+	"github.com/dsbasko/dndmode/internal/config/hotkey"
 )
 
 type testDeps struct {
@@ -156,7 +157,7 @@ func TestLoader_Load_WritesDefaultWhenMissing(t *testing.T) {
 		validateResp func(t *testing.T, td *testDeps, cfg config.Config, created bool, err error)
 	}{
 		{
-			name:       "fresh path → creates parent dir (0o700) + file (0o600) with default hotkey",
+			name:       "fresh path → creates parent dir (0o700) + file (0o600) with default unlock code",
 			setupMocks: func(td *testDeps) {},
 			validateResp: func(t *testing.T, td *testDeps, cfg config.Config, created bool, err error) {
 				if err != nil {
@@ -165,8 +166,11 @@ func TestLoader_Load_WritesDefaultWhenMissing(t *testing.T) {
 				if !created {
 					t.Errorf("created = false, want true")
 				}
-				if cfg.Hotkey != config.DefaultHotkey {
-					t.Errorf("cfg.Hotkey = %q, want %q", cfg.Hotkey, config.DefaultHotkey)
+				if cfg.UnlockCode != config.DefaultUnlockCode {
+					t.Errorf("cfg.UnlockCode = %q, want %q", cfg.UnlockCode, config.DefaultUnlockCode)
+				}
+				if cfg.Hotkey != "" {
+					t.Errorf("cfg.Hotkey = %q on a fresh config, want empty (the deprecated key is written commented-out)", cfg.Hotkey)
 				}
 
 				// File exists at expected path with mode 0o600 (P1.7).
@@ -192,11 +196,17 @@ func TestLoader_Load_WritesDefaultWhenMissing(t *testing.T) {
 				if err != nil {
 					t.Fatalf("read written file: %v", err)
 				}
-				if !strings.Contains(string(body), "hotkey:") {
-					t.Errorf("written file missing 'hotkey:' key: %s", body)
+				if !strings.Contains(string(body), "unlock_code:") {
+					t.Errorf("written file missing 'unlock_code:' key: %s", body)
 				}
-				if !strings.Contains(string(body), config.DefaultHotkey) {
-					t.Errorf("written file missing default hotkey value: %s", body)
+				if !strings.Contains(string(body), config.DefaultUnlockCode) {
+					t.Errorf("written file missing default unlock code value: %s", body)
+				}
+				// The deprecated key must stay COMMENTED OUT: an active
+				// `hotkey:` next to `unlock_code:` would make the generated
+				// file an ambiguous secret and fail ResolveUnlockCode.
+				if regexp.MustCompile(`(?m)^hotkey:`).MatchString(string(body)) {
+					t.Errorf("written file has an ACTIVE 'hotkey:' key alongside unlock_code: %s", body)
 				}
 			},
 		},
@@ -215,8 +225,8 @@ func TestLoader_Load_WritesDefaultWhenMissing(t *testing.T) {
 				if created {
 					t.Errorf("created = true on second Load, want false")
 				}
-				if cfg.Hotkey != config.DefaultHotkey {
-					t.Errorf("cfg.Hotkey = %q, want %q", cfg.Hotkey, config.DefaultHotkey)
+				if cfg.UnlockCode != config.DefaultUnlockCode {
+					t.Errorf("cfg.UnlockCode = %q, want %q", cfg.UnlockCode, config.DefaultUnlockCode)
 				}
 			},
 		},
@@ -979,18 +989,18 @@ func TestLoader_Load_AtomicWriteUnderConcurrentStart(t *testing.T) {
 		if err != nil {
 			t.Errorf("goroutine %d failed: %v", i, err)
 		}
-		if results[i].Hotkey != config.DefaultHotkey {
-			t.Errorf("goroutine %d hotkey = %q, want %q", i, results[i].Hotkey, config.DefaultHotkey)
+		if results[i].UnlockCode != config.DefaultUnlockCode {
+			t.Errorf("goroutine %d unlock code = %q, want %q", i, results[i].UnlockCode, config.DefaultUnlockCode)
 		}
 	}
 
-	// Final on-disk file must exist with default hotkey + 0o600 perms.
+	// Final on-disk file must exist with the default unlock code + 0o600 perms.
 	body, err := os.ReadFile(td.path)
 	if err != nil {
 		t.Fatalf("read final file: %v", err)
 	}
-	if !strings.Contains(string(body), config.DefaultHotkey) {
-		t.Errorf("final file missing default hotkey: %s", body)
+	if !strings.Contains(string(body), config.DefaultUnlockCode) {
+		t.Errorf("final file missing default unlock code: %s", body)
 	}
 	info, err := os.Stat(td.path)
 	if err != nil {
@@ -1008,5 +1018,308 @@ func TestLoader_Path(t *testing.T) {
 	loader := config.NewLoader(want)
 	if got := loader.Path(); got != want {
 		t.Errorf("Path() = %q, want %q", got, want)
+	}
+}
+
+// --- unlock code: validation, weakness heuristic, resolution ---------------
+
+// steps builds a []hotkey.Spec of length n whose entries carry no modifiers —
+// the shape of a passphrase-style code ("s w o r d"). Only the LENGTH matters
+// to ValidateUnlockCode beyond n == 1, so the keycodes are arbitrary.
+func steps(n int) []hotkey.Spec {
+	out := make([]hotkey.Spec, n)
+	for i := range out {
+		out[i] = hotkey.Spec{KeyCode: uint16(i)}
+	}
+	return out
+}
+
+// ValidateUnlockCode gates length + the 1-step modifier requirement. The upper
+// bound (hotkey.MaxSteps) is deliberately NOT re-checked here — ParseSequence
+// owns it — so a 32-step code must pass.
+func TestValidateUnlockCode(t *testing.T) {
+	tests := []struct {
+		name    string
+		steps   []hotkey.Spec
+		wantErr bool
+	}{
+		{name: "0 steps → error", steps: nil, wantErr: true},
+		{name: "0 steps (empty slice) → error", steps: []hotkey.Spec{}, wantErr: true},
+		{
+			name:    "1 step WITH modifier → ok (legacy hotkey shape)",
+			steps:   []hotkey.Spec{{Modifiers: hotkey.ModCtrl | hotkey.ModOption | hotkey.ModCmd, KeyCode: 7}},
+			wantErr: false,
+		},
+		{
+			name:    "1 step WITHOUT modifier → error (unlocks on one keypress)",
+			steps:   []hotkey.Spec{{KeyCode: 7}},
+			wantErr: true,
+		},
+		{name: "2 steps → error", steps: steps(2), wantErr: true},
+		{name: "3 steps → error", steps: steps(3), wantErr: true},
+		{name: "4 steps (MinUnlockSteps) → ok", steps: steps(config.MinUnlockSteps), wantErr: false},
+		{name: "6 steps → ok", steps: steps(6), wantErr: false},
+		{name: "32 steps (MaxSteps, not re-checked here) → ok", steps: steps(hotkey.MaxSteps), wantErr: false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := config.ValidateUnlockCode(tt.steps)
+			if tt.wantErr && err == nil {
+				t.Fatalf("ValidateUnlockCode(%d steps) = nil, want error", len(tt.steps))
+			}
+			if !tt.wantErr && err != nil {
+				t.Fatalf("ValidateUnlockCode(%d steps) = %v, want nil", len(tt.steps), err)
+			}
+		})
+	}
+}
+
+// IsWeakUnlockCode is a pure length threshold — including for length 1, the
+// shipped default, which is exactly the case that must still warn.
+func TestIsWeakUnlockCode(t *testing.T) {
+	tests := []struct {
+		name  string
+		steps []hotkey.Spec
+		want  bool
+	}{
+		{name: "1 step (the shipped default) → weak", steps: steps(1), want: true},
+		{name: "4 steps → weak", steps: steps(4), want: true},
+		{name: "5 steps → weak", steps: steps(5), want: true},
+		{name: "6 steps (WeakUnlockSteps) → not weak", steps: steps(config.WeakUnlockSteps), want: false},
+		{name: "9 steps → not weak", steps: steps(9), want: false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := config.IsWeakUnlockCode(tt.steps); got != tt.want {
+				t.Errorf("IsWeakUnlockCode(%d steps) = %v, want %v", len(tt.steps), got, tt.want)
+			}
+		})
+	}
+}
+
+// ResolveUnlockCode implements the four-row precedence table. Each row is
+// asserted on BOTH the returned steps and the returned source, because callers
+// phrase their diagnostics off the source.
+func TestResolveUnlockCode(t *testing.T) {
+	tests := []struct {
+		name       string
+		cfg        config.Config
+		wantLen    int
+		wantSource string
+		wantErr    bool
+	}{
+		{
+			name:       "only unlock_code → primary path",
+			cfg:        config.Config{UnlockCode: "s w o r d f i s h"},
+			wantLen:    9,
+			wantSource: config.UnlockSourceCode,
+		},
+		{
+			name:       "only unlock_code, single chord → code of length 1",
+			cfg:        config.Config{UnlockCode: config.DefaultUnlockCode},
+			wantLen:    1,
+			wantSource: config.UnlockSourceCode,
+		},
+		{
+			name:       "only hotkey → works, source names the deprecated key",
+			cfg:        config.Config{Hotkey: "Ctrl+Option+Cmd+X"},
+			wantLen:    1,
+			wantSource: config.UnlockSourceHotkey,
+		},
+		{
+			name:    "both → error (ambiguous secret)",
+			cfg:     config.Config{UnlockCode: "s w o r d", Hotkey: "Ctrl+Cmd+X"},
+			wantErr: true,
+		},
+		{
+			name:    "neither → error",
+			cfg:     config.Config{},
+			wantErr: true,
+		},
+		{
+			name:    "whitespace-only values count as absent",
+			cfg:     config.Config{UnlockCode: "   ", Hotkey: "\t"},
+			wantErr: true,
+		},
+		{
+			name:       "unlock_code with a bad token → error, source still reported",
+			cfg:        config.Config{UnlockCode: "s w nope d"},
+			wantSource: config.UnlockSourceCode,
+			wantErr:    true,
+		},
+		{
+			name:       "unlock_code of 3 steps → rejected by ValidateUnlockCode",
+			cfg:        config.Config{UnlockCode: "s w o"},
+			wantSource: config.UnlockSourceCode,
+			wantErr:    true,
+		},
+		{
+			name:       "bare-key unlock_code of 1 step → rejected",
+			cfg:        config.Config{UnlockCode: "x"},
+			wantSource: config.UnlockSourceCode,
+			wantErr:    true,
+		},
+		{
+			name:       "modifier-only hotkey → error, source names hotkey",
+			cfg:        config.Config{Hotkey: "Ctrl+Cmd"},
+			wantSource: config.UnlockSourceHotkey,
+			wantErr:    true,
+		},
+		{
+			name:       "multi-step value under the deprecated hotkey key → rejected",
+			cfg:        config.Config{Hotkey: "s w o r d"},
+			wantSource: config.UnlockSourceHotkey,
+			wantErr:    true,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := tt.cfg
+			got, source, err := config.ResolveUnlockCode(&cfg)
+			if tt.wantErr {
+				if err == nil {
+					t.Fatalf("ResolveUnlockCode() = nil error, want error")
+				}
+				if got != nil {
+					t.Errorf("steps = %v on error, want nil", got)
+				}
+				if source != tt.wantSource {
+					t.Errorf("source = %q on error, want %q", source, tt.wantSource)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("ResolveUnlockCode() = %v, want nil", err)
+			}
+			if len(got) != tt.wantLen {
+				t.Errorf("len(steps) = %d, want %d", len(got), tt.wantLen)
+			}
+			if source != tt.wantSource {
+				t.Errorf("source = %q, want %q", source, tt.wantSource)
+			}
+		})
+	}
+}
+
+// A resolution error must never echo the secret back: the message names the
+// KEY, and ParseSequence reports a failing step by position only.
+func TestResolveUnlockCode_ErrorNeverEchoesSecret(t *testing.T) {
+	cfg := config.Config{UnlockCode: "s w nope d"}
+	_, _, err := config.ResolveUnlockCode(&cfg)
+	if err == nil {
+		t.Fatal("expected an error")
+	}
+	for _, leaked := range []string{"s w nope d", "s w", "w o r d"} {
+		if strings.Contains(err.Error(), leaked) {
+			t.Errorf("error message leaks the secret fragment %q: %v", leaked, err)
+		}
+	}
+}
+
+// A config carrying unlock_code survives the YAML round-trip through Load()
+// and resolves into the sequence it denotes.
+func TestLoader_Load_UnlockCodeRoundTrip(t *testing.T) {
+	td := newTestDeps(t)
+	if err := os.MkdirAll(filepath.Dir(td.path), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	const code = "ctrl+s w o r d cmd+z"
+	if err := os.WriteFile(td.path, []byte("unlock_code: "+code+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg, created, err := td.loader.Load()
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if created {
+		t.Errorf("created = true, want false (file pre-existed)")
+	}
+	if cfg.UnlockCode != code {
+		t.Errorf("cfg.UnlockCode = %q, want %q", cfg.UnlockCode, code)
+	}
+
+	got, source, rerr := config.ResolveUnlockCode(&cfg)
+	if rerr != nil {
+		t.Fatalf("ResolveUnlockCode: %v", rerr)
+	}
+	if len(got) != 6 {
+		t.Errorf("len(steps) = %d, want 6", len(got))
+	}
+	if source != config.UnlockSourceCode {
+		t.Errorf("source = %q, want %q", source, config.UnlockSourceCode)
+	}
+	if got[0].Modifiers != hotkey.ModCtrl {
+		t.Errorf("step 1 modifiers = %#x, want ModCtrl", got[0].Modifiers)
+	}
+	if got[5].Modifiers != hotkey.ModCmd {
+		t.Errorf("step 6 modifiers = %#x, want ModCmd", got[5].Modifiers)
+	}
+}
+
+// The generated default config must round-trip through its own loader AND
+// resolve — the template is the thing most users never edit, so a drift here
+// would ship a config that cannot start.
+func TestLoader_Load_GeneratedDefaultResolves(t *testing.T) {
+	td := newTestDeps(t)
+	cfg, created, err := td.loader.Load()
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if !created {
+		t.Fatal("created = false, want true")
+	}
+
+	got, source, rerr := config.ResolveUnlockCode(&cfg)
+	if rerr != nil {
+		t.Fatalf("generated default config does not resolve: %v", rerr)
+	}
+	if len(got) != 1 {
+		t.Errorf("len(steps) = %d, want 1 (the default is a single chord)", len(got))
+	}
+	if source != config.UnlockSourceCode {
+		t.Errorf("source = %q, want %q", source, config.UnlockSourceCode)
+	}
+	if !config.IsWeakUnlockCode(got) {
+		t.Error("the shipped default must report as weak so an untouched config still warns")
+	}
+}
+
+// YAML scalars that look boolean in YAML 1.1 ("n", "no", "y", "yes", "on",
+// "off") must arrive as STRINGS, because they are all legitimate single-step
+// unlock codes. goccy/go-yaml decodes a scalar straight into a string field, so
+// no quoting is required — this test pins that behavior; if a future goccy
+// release starts coercing, the generated template must grow a quoting note.
+func TestLoader_Load_BooleanLookingScalars(t *testing.T) {
+	tests := []struct {
+		in   string
+		want string
+	}{
+		{in: "n", want: "n"},
+		{in: "no", want: "no"},
+		{in: "y", want: "y"},
+		{in: "yes", want: "yes"},
+		{in: "on", want: "on"},
+		{in: "off", want: "off"},
+		{in: "n o", want: "n o"},
+		{in: "y e s n o", want: "y e s n o"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.in, func(t *testing.T) {
+			td := newTestDeps(t)
+			if err := os.MkdirAll(filepath.Dir(td.path), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(td.path, []byte("unlock_code: "+tt.in+"\n"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			cfg, _, err := td.loader.Load()
+			if err != nil {
+				t.Fatalf("Load(%q): %v", tt.in, err)
+			}
+			if cfg.UnlockCode != tt.want {
+				t.Errorf("cfg.UnlockCode = %q, want %q (bool-looking scalar must stay a string)", cfg.UnlockCode, tt.want)
+			}
+		})
 	}
 }

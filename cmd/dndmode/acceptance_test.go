@@ -290,25 +290,32 @@ func TestAcceptance_DefaultConfigCreatedOnMissing(t *testing.T) {
 		t.Fatalf("default config not created at %s: %v", cfgPath, err)
 	}
 
-	// Banner must contain config path and default hotkey.
+	// Banner must contain the config path and the SHAPE of the unlock code —
+	// step count plus the key it was resolved from. It must NOT contain the
+	// value: stdout lands in scrollback / tmux, and with overlay_style
+	// none/glass the terminal stays visible while dndmode is active.
 	out := stdout.String()
 	if !strings.Contains(out, "dndmode: config=") {
 		t.Errorf("stdout missing 'dndmode: config=': %s", out)
 	}
-	if !strings.Contains(out, "hotkey=Ctrl+Option+Cmd+X") {
-		t.Errorf("stdout missing default hotkey: %s", out)
+	if !strings.Contains(out, "unlock_code=1 step (source=unlock_code)") {
+		t.Errorf("stdout missing the unlock-code shape: %s", out)
+	}
+	if strings.Contains(out, "Ctrl+Option+Cmd+X") {
+		t.Errorf("banner LEAKS the unlock code value: %s", out)
 	}
 
 	// Clean shutdown.
 	signalAndWait(t, cmd, syscall.SIGINT, 5*time.Second)
 
-	// File must contain Ctrl+Option+Cmd+X.
+	// File must carry the default value under the ACTIVE unlock_code key (the
+	// deprecated hotkey key is written commented-out).
 	body, err := os.ReadFile(cfgPath)
 	if err != nil {
 		t.Fatalf("read config: %v", err)
 	}
-	if !strings.Contains(string(body), "Ctrl+Option+Cmd+X") {
-		t.Errorf("config file missing default hotkey value: %s", body)
+	if !strings.Contains(string(body), "unlock_code: Ctrl+Option+Cmd+X") {
+		t.Errorf("config file missing default unlock_code value: %s", body)
 	}
 }
 
@@ -1458,8 +1465,8 @@ func TestAcceptance_LIFE12_Stderr(t *testing.T) {
 	}
 
 	// Invariant 5: read-failure path must log warn + continue (NOT exit).
-	if !strings.Contains(body, `log.Warn(" pre-check inconclusive"`) {
-		t.Errorf("read-failure path does not log warn ' pre-check inconclusive' (must be warn-not-fatal per the design notes)")
+	if !strings.Contains(body, `log.Warn("pre-check inconclusive"`) {
+		t.Errorf("read-failure path does not log warn 'pre-check inconclusive' (must be warn-not-fatal per the design notes)")
 	}
 
 	// Invariant 6 (Phase 4 closes the placeholder boundary):

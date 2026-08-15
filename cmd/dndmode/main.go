@@ -36,7 +36,6 @@ import (
 	"time"
 
 	"github.com/dsbasko/dndmode/internal/config"
-	"github.com/dsbasko/dndmode/internal/config/hotkey"
 	"github.com/dsbasko/dndmode/internal/macos/audiomute"
 	"github.com/dsbasko/dndmode/internal/macos/caffeinate"
 	"github.com/dsbasko/dndmode/internal/macos/cocoa"
@@ -372,9 +371,15 @@ func run() int {
 		debugOn = true
 	}
 
-	// --- Step 5b: Validate hotkey grammar ---
-	if _, err := hotkey.Parse(cfg.Hotkey); err != nil {
-		_, _ = fmt.Fprintf(errW, "dndmode: invalid hotkey %q: %v. Fix the hotkey grammar in ~/.config/dndmode/config.yml.\n", cfg.Hotkey, err)
+	// --- Step 5b: Resolve + validate the unlock code ---
+	// config.ResolveUnlockCode owns the unlock_code / deprecated-hotkey
+	// precedence table and every length rule; main only phrases the outcome.
+	// The error text names the KEY, never the value — a diagnostic that echoed
+	// the secret would defeat the whole silent-by-default stance (see
+	// gatedWriter above).
+	unlockSteps, unlockSource, err := config.ResolveUnlockCode(&cfg)
+	if err != nil {
+		_, _ = fmt.Fprintf(errW, "dndmode: %v. Fix ~/.config/dndmode/config.yml.\n", err)
 		return exitConfigErr
 	}
 
@@ -460,7 +465,29 @@ func run() int {
 	if created {
 		_, _ = fmt.Fprintf(outW, "dndmode: created default config at %s\n", cfgPath)
 	}
-	_, _ = fmt.Fprintf(outW, "dndmode: config=%s hotkey=%s overlay_style=%s (%s)\n", cfgPath, cfg.Hotkey, overlayStyle, styleSource)
+	// The banner reports the SHAPE of the unlock code (step count + which key
+	// it came from), never its value: with overlay_style none/glass the
+	// terminal stays visible while dndmode is active, and stdout lands in
+	// scrollback / tmux besides — printing the secret here would contradict the
+	// reveal-nothing stance stated on gatedWriter.
+	stepWord := "steps"
+	if len(unlockSteps) == 1 {
+		stepWord = "step"
+	}
+	_, _ = fmt.Fprintf(outW, "dndmode: config=%s unlock_code=%d %s (source=%s) overlay_style=%s (%s)\n",
+		cfgPath, len(unlockSteps), stepWord, unlockSource, overlayStyle, styleSource)
+	// Both advisories below ride the same gatedWriter as the banner, so they
+	// only ever reach a terminal the operator explicitly un-silenced. Neither
+	// names a step — only the shape of the code.
+	if unlockSource == config.UnlockSourceHotkey {
+		_, _ = fmt.Fprintf(outW,
+			"dndmode: the 'hotkey' config key is deprecated — rename it to 'unlock_code' (the same value is a 1-step code).\n")
+	}
+	if config.IsWeakUnlockCode(unlockSteps) {
+		_, _ = fmt.Fprintf(outW,
+			"dndmode: warning — the unlock code is %d %s; %d or more is strongly recommended (every keypress is a fresh match attempt).\n",
+			len(unlockSteps), stepWord, config.WeakUnlockSteps)
+	}
 	switch overlayStyle {
 	case config.OverlayStyleGlass:
 		_, _ = fmt.Fprintf(outW, "dndmode: glass_blur=%g\n", glassBlur)
@@ -839,17 +866,19 @@ func run() int {
 	// on stopper.RequestStop → ctx.cancel → cocoa.RunApp returns →
 	// sup.Wait → defer LIFO unwinds.
 	//
-	// Re-parse the hotkey here (already validated at Step 5b — Parse is
-	// idempotent and cheap). The matcher.UserIntentionalMask pre-masking
-	// happens inside Install per.
-	spec, parseErr := hotkey.Parse(cfg.Hotkey)
+	// Re-resolve the unlock code here (already validated at Step 5b —
+	// ResolveUnlockCode is idempotent and cheap). The
+	// matcher.UserIntentionalMask pre-masking happens inside Install per.
+	steps, _, parseErr := config.ResolveUnlockCode(&cfg)
 	if parseErr != nil {
 		// Unreachable: Step 5b already validated. Defensive only — keeps
 		// the failure surface explicit instead of relying on global state.
-		_, _ = fmt.Fprintf(errW, "dndmode: re-parse hotkey failed: %v\n", parseErr)
+		_, _ = fmt.Fprintf(errW, "dndmode: re-resolving the unlock code failed: %v\n", parseErr)
 		return exitConfigErr
 	}
-	tapRel, err := eventtap.InstallAll(spec, sup.ExitTrigger(), log)
+	// TODO(Task 6/7): eventtap still takes a single Spec; multi-step codes are
+	// wired end-to-end when InstallAll switches to []hotkey.Spec.
+	tapRel, err := eventtap.InstallAll(steps[0], sup.ExitTrigger(), log)
 	if err != nil {
 		if errors.Is(err, eventtap.ErrTapInstallFailed) {
 			_, _ = fmt.Fprintf(errW,

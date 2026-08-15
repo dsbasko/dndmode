@@ -1,8 +1,14 @@
 //go:build darwin
 
 // Package config loads and writes the dndmode YAML configuration. The
-// config schema in v1 is intentionally minimal (just `hotkey`); migration
-// to nested/versioned schema is deferred (the design notes).
+// config schema in v1 is intentionally minimal (the unlock secret plus a
+// handful of look/behavior toggles); migration to nested/versioned schema is
+// deferred (the design notes).
+//
+// The unlock secret has two keys: `unlock_code` (a whitespace-separated
+// sequence of steps) and the deprecated single-combination `hotkey`. They are
+// resolved into one []hotkey.Spec by ResolveUnlockCode, which is the single
+// source of truth for the precedence table — setting BOTH is a startup error.
 //
 // Hot-reload is NOT supported: Load() is invoked exactly once at
 // PreFlight. Loader has no Watch/Reload/Subscribe methods by design.
@@ -15,14 +21,46 @@ import (
 	"math"
 	"os"
 	"path/filepath"
+	"strings"
 
+	"github.com/dsbasko/dndmode/internal/config/hotkey"
 	"github.com/goccy/go-yaml"
 )
 
 const (
-	// DefaultHotkey is the hotkey written to a freshly-created config.yml
-	//. User can edit the file post-creation.
+	// DefaultHotkey is the legacy name of the value written to a
+	// freshly-created config.yml. Kept as the historical spelling; the key it
+	// is written under is now `unlock_code` (see DefaultUnlockCode).
 	DefaultHotkey = "Ctrl+Option+Cmd+X"
+
+	// DefaultUnlockCode is the unlock code written to a freshly-created
+	// config.yml. It is the historical single-combination hotkey, i.e. an
+	// unlock code of length 1 — deliberately kept so `brew upgrade` does not
+	// change the muscle memory of existing users. It is WEAK by design
+	// (IsWeakUnlockCode reports true for it), which is exactly why a user who
+	// never opened the file still gets a warning under --debug.
+	DefaultUnlockCode = DefaultHotkey
+
+	// MinUnlockSteps is the shortest MULTI-step unlock code accepted. Codes of
+	// 2-3 steps are rejected outright: the sliding-window match makes every
+	// keypress a fresh attempt (de Bruijn-sequence attack), so a 3-step code
+	// falls in ~8 minutes to an automated 100/sec typist while still creating
+	// the illusion of a passphrase. A single step is a separate, legacy case
+	// (see ValidateUnlockCode) and must carry at least one modifier.
+	MinUnlockSteps = 4
+
+	// WeakUnlockSteps is the recommended length threshold: anything shorter is
+	// accepted but reported by IsWeakUnlockCode, which main.go surfaces as a
+	// --debug-only warning. At an alphabet of ~36 a 6-step code needs ~2.2e9
+	// keypresses to exhaust — 690 days at 100/sec — while 4 steps fall in
+	// under 5 hours.
+	WeakUnlockSteps = 6
+
+	// UnlockSourceCode / UnlockSourceHotkey name the config key an unlock code
+	// was resolved from. Returned by ResolveUnlockCode so callers can phrase
+	// diagnostics in terms of the key the user actually wrote.
+	UnlockSourceCode   = "unlock_code"
+	UnlockSourceHotkey = "hotkey"
 
 	// OverlayStyleBlack is the v1 default look: a plain opaque-black shield.
 	// An absent/empty overlay_style normalizes to this (NormalizeOverlayStyle).
@@ -91,7 +129,20 @@ const (
 // Config is the v1 dndmode configuration schema. Add fields cautiously —
 // forward-compat trojan keys are rejected by yaml.Strict().
 type Config struct {
+	// Hotkey is the DEPRECATED single-combination unlock key ("ctrl+option+cmd+x").
+	// It still works — a legacy hotkey is simply an unlock code of length 1 —
+	// but it is no longer written to fresh configs and setting it TOGETHER with
+	// UnlockCode is a startup error (the unlock secret must be unambiguous).
+	// Resolved through ResolveUnlockCode, never read directly by callers.
 	Hotkey string `yaml:"hotkey"`
+	// UnlockCode is the unlock secret: a whitespace-separated sequence of at
+	// most hotkey.MaxSteps steps ("s w o r d f i s h", "ctrl+s w cmd+z"). The
+	// grammar is a SUPERSET of Hotkey's, so "Ctrl+Option+Cmd+X" is a valid
+	// unlock code of length 1. Like OverlayStyle the VALUE is not validated by
+	// yaml.Strict() (which only guards unknown KEYS) — ResolveUnlockCode +
+	// ValidateUnlockCode are the real gate, called from main.go before any
+	// window is created.
+	UnlockCode string `yaml:"unlock_code"`
 	// OverlayStyle selects the overlay look. Absent/empty => "black" (v1
 	// default, via NormalizeOverlayStyle); the only valid non-empty values are
 	// "black", "matrix", "terminal", "dvd", "glass" and "none" ("none" = caffeinate-only
@@ -181,6 +232,104 @@ func ValidateOverlayStyle(s string) error {
 	}
 }
 
+// ValidateUnlockCode gates the LENGTH and shape of an already-parsed unlock
+// code, mirroring ValidateOverlayStyle: yaml.Strict() cannot catch a bad VALUE,
+// so this is the real gate before any window is created.
+//
+//   - 0 steps        => error (nothing to match)
+//   - 1 step         => accepted ONLY with at least one modifier. This is the
+//     legacy `hotkey` semantics; a bare key would unlock on a
+//     single keypress, i.e. on the first thing a bystander types.
+//   - 2-3 steps      => error. Too weak to be worth the illusion of a
+//     passphrase (see MinUnlockSteps).
+//   - MinUnlockSteps..hotkey.MaxSteps => accepted.
+//
+// The upper bound is NOT re-checked here: hotkey.ParseSequence owns it and
+// duplicating the limit would create a second source of truth.
+//
+// Error messages never echo a step — a diagnostic must not leak the secret.
+func ValidateUnlockCode(steps []hotkey.Spec) error {
+	switch {
+	case len(steps) == 0:
+		return fmt.Errorf("unlock code is empty: specify at least one step")
+	case len(steps) == 1:
+		if steps[0].Modifiers == 0 {
+			return fmt.Errorf(
+				"a 1-step unlock code must carry at least one modifier (e.g. Ctrl+Option+Cmd+X); "+
+					"a bare key would unlock on a single keypress — use %d or more steps instead",
+				MinUnlockSteps)
+		}
+		return nil
+	case len(steps) < MinUnlockSteps:
+		return fmt.Errorf(
+			"unlock code of %d steps is too short: every keypress is a fresh match attempt, "+
+				"so a %d-step code is exhausted in minutes — use at least %d steps (%d or more recommended)",
+			len(steps), len(steps), MinUnlockSteps, WeakUnlockSteps)
+	default:
+		return nil
+	}
+}
+
+// IsWeakUnlockCode reports whether an accepted unlock code is shorter than the
+// recommended WeakUnlockSteps. main.go surfaces it as a --debug-only warning
+// (never on the silent path — a warning is still a hint about the secret).
+//
+// Length 1 counts as weak DELIBERATELY, even though it is the shipped default:
+// a user who installed via brew and never opened config.yml would otherwise get
+// no signal at all that they are running with exactly the single-combination
+// hotkey whose brute-forceability motivated unlock codes in the first place.
+func IsWeakUnlockCode(steps []hotkey.Spec) bool {
+	return len(steps) < WeakUnlockSteps
+}
+
+// ResolveUnlockCode is the single source of truth for the unlock-secret
+// precedence table. It collapses the two config keys into one []hotkey.Spec so
+// no branching on "which key was it" survives further down the call chain — a
+// legacy hotkey is just a code of length 1.
+//
+//	only unlock_code : primary path
+//	only hotkey      : works, caller emits a deprecation warning under --debug
+//	both             : ERROR — an ambiguous unlock secret is not resolvable
+//	neither          : ERROR
+//
+// The second return value is the config key the code came from
+// (UnlockSourceCode / UnlockSourceHotkey), so callers can name it in
+// diagnostics; it is empty when no single key was in play (both/neither).
+// Errors never contain the value of either key.
+func ResolveUnlockCode(cfg *Config) ([]hotkey.Spec, string, error) {
+	code := strings.TrimSpace(cfg.UnlockCode)
+	legacy := strings.TrimSpace(cfg.Hotkey)
+
+	switch {
+	case code != "" && legacy != "":
+		return nil, "", fmt.Errorf(
+			"config sets both unlock_code and the deprecated hotkey; " +
+				"delete the hotkey line — the unlock secret must be unambiguous")
+	case code != "":
+		steps, err := hotkey.ParseSequence(code)
+		if err != nil {
+			return nil, UnlockSourceCode, fmt.Errorf("invalid unlock_code: %w", err)
+		}
+		if verr := ValidateUnlockCode(steps); verr != nil {
+			return nil, UnlockSourceCode, fmt.Errorf("invalid unlock_code: %w", verr)
+		}
+		return steps, UnlockSourceCode, nil
+	case legacy != "":
+		// Parse (not ParseStep): the legacy key keeps its legacy requirement of
+		// at least one modifier, which is also what ValidateUnlockCode demands
+		// of any 1-step code.
+		spec, err := hotkey.Parse(legacy)
+		if err != nil {
+			return nil, UnlockSourceHotkey, fmt.Errorf("invalid hotkey: %w", err)
+		}
+		return []hotkey.Spec{spec}, UnlockSourceHotkey, nil
+	default:
+		return nil, "", fmt.Errorf(
+			"config sets neither unlock_code nor hotkey: add an unlock_code line " +
+				"(see the generated ~/.config/dndmode/config.yml for the grammar)")
+	}
+}
+
 // NormalizeTerminalLanguage maps "" => the default terminal language (Go),
 // mirroring NormalizeOverlayStyle. A bare `--style terminal` (no :suffix) and an
 // absent value both normalize here; callers thread the result downstream.
@@ -260,7 +409,7 @@ func (l *Loader) Load() (Config, bool, error) {
 	raw, err := os.ReadFile(l.path)
 	switch {
 	case errors.Is(err, fs.ErrNotExist):
-		def := Config{Hotkey: DefaultHotkey}
+		def := Config{UnlockCode: DefaultUnlockCode}
 		if werr := writeDefault(l.path, def); werr != nil {
 			return Config{}, false, fmt.Errorf("write default config: %w", werr)
 		}
@@ -285,37 +434,69 @@ func (l *Loader) Load() (Config, bool, error) {
 // run. It documents EVERY config field with its purpose, default,
 // and accepted values so the user can self-serve without opening the README.
 //
-// Only `hotkey` is an ACTIVE key; every other field is shown commented-out at
-// its default value. This is load-bearing, not cosmetic: an absent key is
+// Only `unlock_code` is an ACTIVE key; every other field is shown commented-out
+// at its default value. This is load-bearing, not cosmetic: an absent key is
 // what carries the documented default (mute nil => true via NormalizeMute,
 // focus false, overlay_style "" => black, allow_display_sleep/debug false), so
 // uncommenting a line only ever *overrides* a default rather than re-stating
 // it. It also keeps the yaml.Strict() round-trip in Load() parsing the written
-// file as hotkey-only (comments are ignored by the parser). The single %s is
-// the hotkey value (DefaultHotkey unless a caller overrides it).
+// file as unlock_code-only (comments are ignored by the parser) — which matters
+// twice over here, because an ACTIVE `hotkey` line alongside `unlock_code`
+// would be rejected by ResolveUnlockCode as an ambiguous secret. The single %s
+// is the unlock code (DefaultUnlockCode unless a caller overrides it).
 //
-// NOTE: no literal '%' may appear below except the one %s — the template is
+// NOTE: no literal '%' may appear below except the single %s — the template is
 // fed through fmt.Sprintf. `timer` is intentionally absent: it is a per-run
 // --timer flag only, never a config key.
 const defaultConfigTemplate = `# dndmode configuration
 # Location: ~/.config/dndmode/config.yml  (auto-created on first run)
 #
-# Every field except 'hotkey' is OPTIONAL. Uncomment a line and change its
+# Every field except 'unlock_code' is OPTIONAL. Uncomment a line and change its
 # value to override the default shown next to it. Unknown keys are REJECTED
 # (strict parsing): a typo aborts startup with an error pointing at the line.
 # Most fields also have a per-run CLI flag that overrides the file for that
 # launch only.
 
-# --- hotkey (REQUIRED) -------------------------------------------------------
-# Key combination that unlocks and exits the locked state.
-# Grammar: "<mod>+<mod>+...+<key>" — one or more modifiers plus exactly one key.
+# --- unlock_code (REQUIRED) --------------------------------------------------
+# The secret that unlocks and exits the locked state. It is a SEQUENCE of
+# steps typed one after another — a passphrase, not a single chord.
+#
+# Grammar: steps separated by spaces; each step is "(<mod>+)*<key>".
 #   Modifiers (case-insensitive): ctrl, option, cmd, shift, fn
 #   Keys: a-z, 0-9, f1-f12, space, return (alias enter), tab, escape (alias
 #         esc), delete, forwarddelete, left, right, up, down,
 #         and the punctuation - = [ ] ; ' , . / \ backtick
-# Matched by PHYSICAL key position, so RU / AZERTY layouts behave identically.
-# Modifier-only combinations are rejected (you must include one real key).
-hotkey: %s
+#   Modifiers inside a step are OPTIONAL, so both 's' and 'ctrl+s' are steps.
+#   A literal space is only a SEPARATOR; the space key itself is 'space'.
+#
+# Examples:
+#   unlock_code: s w o r d f i s h     # a passphrase
+#   unlock_code: ctrl+s w o r d cmd+z  # mixed
+#   unlock_code: Ctrl+Option+Cmd+X     # a single chord = a code of length 1
+#
+# Length rules (dndmode matches the TAIL of everything typed, so every single
+# keypress is a fresh attempt — short codes fall fast):
+#   1 step      : allowed only WITH modifiers (the legacy hotkey shape). Weak.
+#   2-3 steps   : REJECTED — too weak to be worth the illusion of a passphrase.
+#   4-32 steps  : accepted. 6 or more is STRONGLY recommended: at 6 steps a
+#                 brute force needs ~690 days at 100 keypresses/sec, at 4 it
+#                 needs under 5 hours.
+# Change the default below before you rely on it — it ships the same chord on
+# every machine.
+#
+# Matched by PHYSICAL key position, not by the character produced: on a RU
+# layout 'unlock_code: s w o r d' is typed with the keys ы ц о р в.
+# Every step is matched EXACTLY: a modifier you happen to be holding (e.g. Cmd)
+# breaks a step declared without it. CapsLock, NumPad and Fn-lock bits are
+# ignored, so CapsLock can never lock you out.
+unlock_code: %s
+
+# --- hotkey (DEPRECATED) -----------------------------------------------------
+# The pre-sequence single-combination key. Still read, so upgrading does not
+# break an existing config, but setting BOTH it and unlock_code is an error
+# (an ambiguous unlock secret is not resolvable). Migrate by renaming the key:
+# any value valid here is valid as a 1-step unlock_code.
+# hotkey: Ctrl+Option+Cmd+X
 
 # --- overlay_style -----------------------------------------------------------
 # Look of the full-screen shield that covers every attached display.
@@ -416,10 +597,12 @@ func writeDefault(path string, cfg Config) error {
 	// yaml.Marshal: Marshal would drop the comments (the whole point of the
 	// generated file is the inline field documentation) and would emit every
 	// zero-value key uncommented, which would flip the absent-key defaults
-	// (mute, focus, ...). Only `hotkey` is interpolated; all other fields stay
-	// commented so their defaults come from key-absence. yaml.Strict() in Load
+	// (mute, focus, ...). Only `unlock_code` is interpolated; all other fields
+	// stay commented so their defaults come from key-absence — including the
+	// deprecated `hotkey`, which MUST stay commented or ResolveUnlockCode would
+	// reject the generated file as an ambiguous secret. yaml.Strict() in Load
 	// re-parses our output round-trip, so any drift would surface there.
-	body := fmt.Appendf(nil, defaultConfigTemplate, cfg.Hotkey)
+	body := fmt.Appendf(nil, defaultConfigTemplate, cfg.UnlockCode)
 	base := filepath.Base(path)
 	tmpFile, err := os.CreateTemp(dir, base+".tmp.*")
 	if err != nil {
