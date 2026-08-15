@@ -28,6 +28,23 @@ import "errors"
 // reference it without waiting for the install implementation to land.
 var ErrTapInstallFailed = errors.New("eventtap: CGEventTapCreate returned NULL (missing Accessibility, SecureEventInput, or kernel out of mach ports)")
 
+// ErrEmptyUnlockCode is returned by InstallAll / installTapOnly when the
+// `steps` slice is empty. It is a package-boundary guard, not the primary
+// validation: config.ValidateUnlockCode already rejects a zero-step code with
+// a user-facing message, and main.go never gets past Step 5b with one.
+//
+// The guard exists because the failure mode is silent and total rather than
+// noisy. A zero-step matcher.Sequence has Len() == 0, so MatchTail is handed a
+// zero-length tail, finds no step that disagrees, and reports a match — the
+// first keypress of the session (any key) would tear the overlay down. An
+// empty code must therefore fail the install loudly instead of producing a
+// tap that unlocks itself.
+//
+// This became reachable only when the install signature moved from a single
+// hotkey.Spec (always a value) to a []hotkey.Spec (nil-able); it is checked
+// before CGEventTapCreate so no mach port is created on this path.
+var ErrEmptyUnlockCode = errors.New("eventtap: unlock code has no steps")
+
 // Watchdog signalling contract (note):
 //
 // The watchdog has observed `CGEventTapIsEnabled == false` in 5 consecutive

@@ -3,6 +3,7 @@
 package eventtap
 
 import (
+	"errors"
 	"sync/atomic"
 	"testing"
 
@@ -389,5 +390,61 @@ func TestSnapshot_ShortBuffer_Panics(t *testing.T) {
 func TestSeq_NoTapInstalled_IsZero(t *testing.T) {
 	if got := seq(); got != 0 {
 		t.Errorf("seq() = %d, want 0 (no tap installed in this test binary)", got)
+	}
+}
+
+// TestInstall_EmptyUnlockCode_Rejected pins the package-boundary guard that
+// arrived with the []hotkey.Spec signature. Before it, `steps` was a single
+// hotkey.Spec value and "no code at all" was unrepresentable; a nil slice now
+// is, and it is the worst possible input: matcher.Sequence.Len() == 0 makes
+// MatchTail agree with the empty tail, so the poller would fire on the first
+// keypress of the session and drop the overlay for whoever pressed it.
+//
+// Both entry points are covered because they are separate exported surfaces
+// (InstallAll is production, installTapOnly is the smoke-test path) and a
+// future refactor could easily add the check to only one.
+//
+// The guard runs BEFORE CGEventTapCreate, so this test needs no Accessibility
+// grant and no GUI session — it must fail on the guard, never skip.
+//
+// NOT t.Parallel: it goes through the install path, which touches
+// process-global C state on any code path that gets past the guard.
+func TestInstall_EmptyUnlockCode_Rejected(t *testing.T) {
+	sink := make(chan struct{}, 1)
+
+	for _, tc := range []struct {
+		name  string
+		steps []hotkey.Spec
+	}{
+		{name: "nil", steps: nil},
+		{name: "empty", steps: []hotkey.Spec{}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			r, err := InstallAll(tc.steps, sink, nil)
+			if !errors.Is(err, ErrEmptyUnlockCode) {
+				t.Errorf("InstallAll(%s) error = %v, want ErrEmptyUnlockCode", tc.name, err)
+			}
+			if r != nil {
+				t.Errorf("InstallAll(%s) returned a non-nil Releaser alongside the error", tc.name)
+				_ = r.Release()
+			}
+
+			r, err = installTapOnly(tc.steps, sink, nil)
+			if !errors.Is(err, ErrEmptyUnlockCode) {
+				t.Errorf("installTapOnly(%s) error = %v, want ErrEmptyUnlockCode", tc.name, err)
+			}
+			if r != nil {
+				t.Errorf("installTapOnly(%s) returned a non-nil Releaser alongside the error", tc.name)
+				_ = r.Release()
+			}
+		})
+	}
+
+	// Nothing was installed, so nothing may have been signalled: a guard that
+	// bailed out AFTER starting the poller would show up here.
+	select {
+	case <-sink:
+		t.Error("rejected install still signalled the exit sink")
+	default:
 	}
 }

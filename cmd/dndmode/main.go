@@ -242,7 +242,7 @@ func main() {
 //  16. supervisor.New(log, stopper) + supervisor.Start(ctx) — swapped BEFORE
 // eventtap (Phase 4) because InstallAll needs sup.ExitTrigger() as
 //     its sink channel.
-// 17. eventtap.InstallAll(spec, sup.ExitTrigger(), log) — Phase 4;
+// 17. eventtap.InstallAll(steps, sup.ExitTrigger(), log) — Phase 4;
 //     composes tap + watchdog + wake observer into a single Releaser;
 //     rs.Push(tapRel). Replaces the Phase 3 mock-tap placeholder.
 //  18. stdout "dndmode: active. press Ctrl-C.".
@@ -876,9 +876,10 @@ func run() int {
 		_, _ = fmt.Fprintf(errW, "dndmode: re-resolving the unlock code failed: %v\n", parseErr)
 		return exitConfigErr
 	}
-	// TODO(Task 6/7): eventtap still takes a single Spec; multi-step codes are
-	// wired end-to-end when InstallAll switches to []hotkey.Spec.
-	tapRel, err := eventtap.InstallAll(steps[0], sup.ExitTrigger(), log)
+	// The whole code goes to InstallAll: the poller matches every tail of the
+	// keystroke ring against it, so a 9-step passphrase and a 1-step legacy
+	// combination take the identical path.
+	tapRel, err := eventtap.InstallAll(steps, sup.ExitTrigger(), log)
 	if err != nil {
 		if errors.Is(err, eventtap.ErrTapInstallFailed) {
 			_, _ = fmt.Fprintf(errW,

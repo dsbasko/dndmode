@@ -132,9 +132,10 @@ func (s *syncBuffer) String() string {
 // TestAcceptance_SilentByDefault is the headline security-property test for the
 // debug output gate: WITHOUT --debug (and without `debug: true` in config),
 // dndmode must emit NOTHING to stdout or stderr — most importantly it must never
-// print the startup banner (`dndmode: config=... hotkey=...`), which would leak
-// the unlock hotkey to a bystander when overlay_style is `none` or `glass` (the
-// terminal stays visible while active). It uses overlay_style=none so the run
+// print the startup banner (`dndmode: config=... unlock_code=...`), which would
+// reveal to a bystander that dndmode is running at all — and how long the code
+// is — when overlay_style is `none` or `glass` (the terminal stays visible
+// while active). It uses overlay_style=none so the run
 // reaches its active state on ANY arm64 host without GUI/TCC/Shortcuts gates,
 // proven by the caffeinate child appearing; then SIGINT for a clean, silent exit.
 //
@@ -316,6 +317,84 @@ func TestAcceptance_DefaultConfigCreatedOnMissing(t *testing.T) {
 	}
 	if !strings.Contains(string(body), "unlock_code: Ctrl+Option+Cmd+X") {
 		t.Errorf("config file missing default unlock_code value: %s", body)
+	}
+}
+
+// TestAcceptance_Banner_NeverPrintsUnlockCodeValue is the banner half of the
+// reveal-nothing stance: the operator IS allowed to learn that a code of N
+// steps was loaded from key K, and is NOT allowed to have the code itself
+// echoed into stdout (scrollback, tmux capture-pane, a screenshot of a terminal
+// left visible under overlay_style none/glass).
+//
+// The default config exercises this at length 1 inside
+// TestAcceptance_ConfigCreatedOnFirstRun; this test uses a real multi-step
+// passphrase because the leak modes differ. A 1-step code is a modifier
+// combination that reads like a hotkey, while `s w o r d f i s h` reads as what
+// it is — and a naive `%s` of cfg.UnlockCode in the banner would print all nine
+// steps verbatim. Every step is asserted absent individually, so a partial leak
+// (say, only the first token) still fails.
+//
+// overlay_style=none keeps the run headless: no GUI, TCC, or Shortcuts gate, so
+// this passes on any arm64 host including CI.
+func TestAcceptance_Banner_NeverPrintsUnlockCodeValue(t *testing.T) {
+	tmpHome := t.TempDir()
+	cfgDir := filepath.Join(tmpHome, ".config", "dndmode")
+	if err := os.MkdirAll(cfgDir, 0o700); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	steps := []string{"s", "w", "o", "r", "d", "f", "i", "s", "h"}
+	cfgPath := filepath.Join(cfgDir, "config.yml")
+	if err := os.WriteFile(cfgPath,
+		[]byte("unlock_code: "+strings.Join(steps, " ")+"\noverlay_style: none\n"), 0o600); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	// dndmodeCmd injects --debug, so the gatedWriter is OPEN — this is the
+	// most permissive output mode there is, and even here the value must not
+	// appear.
+	cmd, stdout, stderr := dndmodeCmd(t, ctx, tmpHome)
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+
+	if !waitForStdout(stdout, "active (caffeinate-only", 10*time.Second) {
+		_ = cmd.Process.Kill()
+		_ = cmd.Wait()
+		t.Fatalf("did not reach the active banner:\nstdout:\n%s\nstderr:\n%s",
+			stdout.String(), stderr.String())
+	}
+
+	signalAndWait(t, cmd, syscall.SIGINT, 10*time.Second)
+
+	out := stdout.String()
+	// The SHAPE is reported: nine steps, resolved from the unlock_code key.
+	if !strings.Contains(out, "unlock_code=9 steps (source=unlock_code)") {
+		t.Errorf("stdout missing the unlock-code shape: %s", out)
+	}
+	// A 9-step code is above WeakUnlockSteps, so no strength advisory fires —
+	// its absence is what tells us the threshold is wired to the step COUNT.
+	if strings.Contains(out, "strongly recommended") {
+		t.Errorf("weak-code advisory fired for a 9-step code: %s", out)
+	}
+	// The VALUE never appears — not whole, not step by step.
+	if strings.Contains(out, strings.Join(steps, " ")) {
+		t.Errorf("banner LEAKS the whole unlock code: %s", out)
+	}
+	// Field-delimited search: bare "s" or "h" would match "steps"/"hotkey", so
+	// each step is looked for the way it would actually be printed — as a
+	// space-separated token of the code.
+	for _, st := range steps {
+		if strings.Contains(out, " "+st+" ") {
+			t.Errorf("banner LEAKS unlock-code step %q: %s", st, out)
+		}
+	}
+	// stderr carries the slog stream (--debug raises it to DEBUG); the same
+	// rule applies there — a log line is as durable as a banner line.
+	if errOut := stderr.String(); strings.Contains(errOut, strings.Join(steps, " ")) {
+		t.Errorf("stderr LEAKS the whole unlock code: %s", errOut)
 	}
 }
 

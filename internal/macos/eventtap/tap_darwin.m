@@ -271,12 +271,12 @@ void eventtap_wipe_ring(void) {
 //       indicates CoreFoundation allocator exhaustion. We tear down the tap
 //       and reset `g_tap` to NULL so a retry starts from a clean slate.
 //
-// `flags` and `keycode` are vestigial: the callback no longer compares
-// anything, so nothing on this side needs the configured code. They are kept
-// for one more step only to avoid changing the cgo signature in the same
-// commit that switches the mechanism — the Go side already builds its
-// `matcher.Sequence` from the same Spec. Both parameters are dropped when
-// the signature moves to `[]hotkey.Spec`.
+// Takes NO description of the unlock code. The C side never learns what the
+// secret is: the callback records every non-autorepeat press into the ring
+// and the Go poller does all the comparing against its `matcher.Sequence`.
+// The former `flags` / `keycode` parameters were the last trace of the
+// compare-in-C mechanism and are gone with it — a multi-step code has no
+// single (flags, keycode) pair to hand over anyway.
 //
 // The function:
 //   1. Empties the keystroke ring BEFORE creating the tap — once the source
@@ -293,10 +293,7 @@ void eventtap_wipe_ring(void) {
 //      calls `runtime.LockOSThread()` and obtains its own CFRunLoop).
 //   5. Enables the tap — CGEventTapCreate returns a disabled tap; we MUST
 //      explicitly enable before events flow.
-int eventtap_install_c(uint64_t flags, uint16_t keycode, CFMachPortRef *out_tap) {
-    (void)flags;    // vestigial — see the note above; dropped with the signature.
-    (void)keycode;  // vestigial — see the note above; dropped with the signature.
-
+int eventtap_install_c(CFMachPortRef *out_tap) {
     // Start every session with an empty ring. Both writes happen BEFORE the
     // tap exists, so the callback cannot be racing us here. Zeroing matters
     // for more than tidiness: a stale record left over from a previous

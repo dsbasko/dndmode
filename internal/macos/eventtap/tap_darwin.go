@@ -19,7 +19,7 @@ package eventtap
 // `ringCap` for the same reason.
 #include "tap_ring.h"
 
-extern int  eventtap_install_c(uint64_t flags, uint16_t keycode, CFMachPortRef *out_tap);
+extern int  eventtap_install_c(CFMachPortRef *out_tap);
 extern int  eventtap_register_worker_runloop(CFMachPortRef tap, CFRunLoopRef *out_loop);
 extern void eventtap_uninstall_c(CFMachPortRef tap);
 extern int  eventtap_is_enabled(CFMachPortRef tap);
@@ -463,15 +463,21 @@ func (r *Releaser) Release() error {
 }
 
 // installTapOnly installs a CGEventTap at kCGHIDEventTap level and starts
-// the poller that watches for the given hotkey.Spec. The C callback records
+// the poller that watches for the given unlock code. The C callback records
 // every non-autorepeat key press into a static ring; the poller goroutine
-// snapshots that ring on a 10ms ticker, matches it against the Spec in pure
-// Go (matcher.Sequence), and on a match forwards a struct{} send to sink
-// (capacity 1, non-blocking select-default).
+// snapshots that ring on a 10ms ticker, matches every tail of it against the
+// code in pure Go (matcher.Sequence), and on a match forwards a struct{} send
+// to sink (capacity 1, non-blocking select-default).
 //
-// The single Spec becomes a one-step matcher.Sequence — a legacy single
-// combination is just an unlock code of length 1, so there is one matching
-// path in the codebase rather than two.
+// `steps` is the whole unlock code, in order. A legacy single combination is
+// just a code of length 1, so there is one matching path in the codebase
+// rather than two; the C side never learns the code at all.
+//
+// An empty `steps` is rejected with ErrEmptyUnlockCode BEFORE the tap is
+// created: a zero-length matcher.Sequence would match the empty tail of every
+// snapshot, i.e. unlock on the first tick without a single keypress.
+// config.ValidateUnlockCode already rejects it upstream, so this is a
+// defence-in-depth gate on the package boundary, not the primary check.
 //
 // fix: previously exposed as exported `Install`, but the returned
 // `*Releaser` had nil `watchdogStop` + nil `wakeStop` — Release() silently
@@ -489,9 +495,9 @@ func (r *Releaser) Release() error {
 // Logger fallback: nil → slog.Default() (mirrors powerassert.Acquire +
 // state.NewRestoreState + cocoa.NewController convention).
 //
-// Pre-masking: spec.Modifiers is AND'ed with matcher.UserIntentionalMask
-// before the matcher.Sequence is built from it, so the configured side of
-// every comparison is already masked. The C callback masks each incoming
+// Pre-masking: every step's Modifiers is AND'ed with
+// matcher.UserIntentionalMask before the matcher.Sequence is built, so the
+// configured side of every comparison is already masked. The C callback masks each incoming
 // event's flags with the twin USER_INTENTIONAL_MASK before recording it, and
 // MatchTail masks the recorded value again for good measure — no system bits
 // (CapsLock 0x10000, NumPad 0x200000, Help 0x400000, NX_NONCOALSESCEDMASK
@@ -532,8 +538,8 @@ func (r *Releaser) Release() error {
 // their own GCD timer / notification token respectively; they are NOT
 // bundled here so the three plans can land in parallel and so the smoke
 // test stays minimal. Production callers MUST use InstallAll.
-func installTapOnly(spec hotkey.Spec, sink chan<- struct{}, log *slog.Logger) (*Releaser, error) {
-	r, _, err := installInternal(spec, sink, log)
+func installTapOnly(steps []hotkey.Spec, sink chan<- struct{}, log *slog.Logger) (*Releaser, error) {
+	r, _, err := installInternal(steps, sink, log)
 	return r, err
 }
 
@@ -548,31 +554,46 @@ func installTapOnly(spec hotkey.Spec, sink chan<- struct{}, log *slog.Logger) (*
 //
 // Logger fallback, latch reset, and mask pre-computation are identical
 // to the original `Install` body — extracted verbatim during.
-func installInternal(spec hotkey.Spec, sink chan<- struct{}, log *slog.Logger) (*Releaser, C.CFMachPortRef, error) {
+func installInternal(steps []hotkey.Spec, sink chan<- struct{}, log *slog.Logger) (*Releaser, C.CFMachPortRef, error) {
 	if log == nil {
 		log = slog.Default()
 	}
 
-	// Pre-mask the configured modifiers with the user-intentional mask so
-	// the matcher compares pre-masked against pre-masked.
+	// Reject the empty code before touching CoreGraphics — see the
+	// ErrEmptyUnlockCode paragraph on installTapOnly for why a zero-step
+	// Sequence is an immediate unlock rather than a never-matching one.
+	if len(steps) == 0 {
+		var zero C.CFMachPortRef
+		return nil, zero, ErrEmptyUnlockCode
+	}
+
+	// Pre-mask every step's modifiers with the user-intentional mask so the
+	// matcher compares pre-masked against pre-masked.
 	// matcher.UserIntentionalMask is the single source of truth for which
 	// modifier bits represent user intent (Cmd | Option | Ctrl | Shift | Fn
 	// — see matcher/matcher.go).
-	masked := spec.Modifiers & matcher.UserIntentionalMask
+	//
+	// The copy is deliberate: the caller's slice is not retained, so a
+	// caller that reuses or mutates its backing array after Install cannot
+	// change the code the poller is matching against.
+	masked := make([]hotkey.Spec, len(steps))
+	for i, st := range steps {
+		masked[i] = hotkey.Spec{
+			Modifiers: st.Modifiers & matcher.UserIntentionalMask,
+			KeyCode:   st.KeyCode,
+		}
+	}
 
-	// The unlock matcher. Built once, here, from a copy of the Spec —
+	// The unlock matcher. Built once, here, from the masked copy —
 	// matcher.Sequence is immutable after construction and MatchTail is
 	// pure, so the poller goroutine can use it without any synchronisation.
 	// A ring reset happens inside eventtap_install_c below, so the poller
 	// starts against an empty ring no matter what a previous Install left
 	// behind.
-	seqMatcher := matcher.NewSequence([]hotkey.Spec{{
-		Modifiers: masked,
-		KeyCode:   spec.KeyCode,
-	}})
+	seqMatcher := matcher.NewSequence(masked)
 
 	var cTap C.CFMachPortRef
-	rc := C.eventtap_install_c(C.uint64_t(masked), C.uint16_t(spec.KeyCode), &cTap)
+	rc := C.eventtap_install_c(&cTap)
 	if rc != 0 {
 		var zero C.CFMachPortRef
 		return nil, zero, fmt.Errorf("%w: rc=%d (likely Accessibility revoked, SecureEventInput active, or kernel out of mach ports)",
@@ -791,6 +812,9 @@ func installInternal(spec hotkey.Spec, sink chan<- struct{}, log *slog.Logger) (
 // Error path is roll-back-on-failure (threat — partial
 // initialisation must not leak):
 //
+//   - empty `steps` → return (nil, ErrEmptyUnlockCode) before any resource is
+//     touched (see the sentinel's docstring: a zero-step code matches the
+//     empty tail and would unlock on the first keypress).
 //   - `Install` failure → return (nil, wrapped err). Nothing acquired.
 //   - `StartWatchdog` failure → call r.Release() to tear down the tap +
 //     poller, then return wrapped err.
@@ -812,7 +836,7 @@ func installInternal(spec hotkey.Spec, sink chan<- struct{}, log *slog.Logger) (
 //
 // Logger fallback: nil → slog.Default() (mirrors all other Install-shaped
 // constructors in this codebase).
-func InstallAll(spec hotkey.Spec, sink chan<- struct{}, log *slog.Logger) (*Releaser, error) {
+func InstallAll(steps []hotkey.Spec, sink chan<- struct{}, log *slog.Logger) (*Releaser, error) {
 	if log == nil {
 		log = slog.Default()
 	}
@@ -822,7 +846,7 @@ func InstallAll(spec hotkey.Spec, sink chan<- struct{}, log *slog.Logger) (*Rele
 	// helpers without storing it on a Releaser field — see the
 	// Design note on the Releaser struct for the go-vet
 	// / GC-safety rationale).
-	r, cTap, err := installInternal(spec, sink, log)
+	r, cTap, err := installInternal(steps, sink, log)
 	if err != nil {
 		// Nothing acquired; propagate the wrapped error so callers can
 		// `errors.Is(err, ErrTapInstallFailed)` for exit-code dispatch.

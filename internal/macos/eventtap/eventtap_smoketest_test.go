@@ -58,18 +58,19 @@ func TestEventTap_Smoketest_InstallUninstall_Roundtrip(t *testing.T) {
 		}
 	}()
 
-	// Spec mirrors the manual-test default (Ctrl+Option+Cmd+X). KeyCode 7
-	// is `kVK_ANSI_X` on the US-ANSI layout (physical position matched per
-	//).
-	spec := hotkey.Spec{
+	// The code mirrors the manual-test default (Ctrl+Option+Cmd+X) — a
+	// 1-step unlock code, which is what the legacy `hotkey` key resolves to.
+	// KeyCode 7 is `kVK_ANSI_X` on the US-ANSI layout (physical position
+	// matched per).
+	steps := []hotkey.Spec{{
 		Modifiers: hotkey.ModCtrl | hotkey.ModOption | hotkey.ModCmd,
 		KeyCode:   7, // kVK_ANSI_X
-	}
+	}}
 
 	log := slog.New(slog.NewTextHandler(os.Stderr, nil))
 	sink := make(chan struct{}, 1)
 
-	r, err := installTapOnly(spec, sink, log)
+	r, err := installTapOnly(steps, sink, log)
 	if err != nil {
 		// CGEventTapCreate returned NULL — the host's Accessibility grant
 		// is stale despite IsAccessibilityTrusted returning true (this is
