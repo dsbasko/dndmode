@@ -25,6 +25,20 @@ import (
 // 50ms timeouts to absorb scheduler jitter).
 const pollInterval = 10 * time.Millisecond
 
+// ringCap is the number of key-press records the C-side keystroke ring
+// holds, and ringMask is the index mask derived from it.
+//
+// ringCap MUST equal DND_RING_CAP in tap_ring.h — the Go snapshot buffer is
+// sized from this constant while the memcpy on the C side is sized from
+// that macro, so a divergence would either truncate the snapshot or overrun
+// the Go buffer. ring_guard_test.go pins the two together (and pins ringCap
+// to a power of two, which ringMask-based indexing requires) so the drift
+// fails a unit test instead of corrupting memory at runtime.
+const (
+	ringCap  = 64
+	ringMask = ringCap - 1
+)
+
 // pollMatched is the fan-out goroutine body that watches the `matched`
 // atomic.Bool (flipped to true by the C callback via the //export
 // `eventtap_matched` helper) and forwards a single struct{} signal to `sink`
