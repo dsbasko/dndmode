@@ -338,9 +338,10 @@ func StartWatchdog(tap unsafe.Pointer, sink chan<- struct{}, log *slog.Logger) (
 // history: a prior version of this comment claimed "the matched-
 // key poller in DOES use LockOSThread because its 10ms ticker
 // contends with GCD blocks." That was wrong — the matched-key poller
-// (tap_darwin.go installInternal, pollMatched goroutine) does NOT
-// LockOSThread either, for the same reason this one doesn't: atomic
-// reads + non-blocking channel sends don't require thread affinity.
+// (tap_darwin.go installInternal, pollSequence goroutine) does NOT
+// LockOSThread either: its cgo calls into the keystroke ring are plain
+// ACQUIRE loads and a memcpy — no thread affinity required, the same way
+// this one's atomic reads + non-blocking channel sends don't.
 // The CGEventTap WORKER goroutine (the one that runs CFRunLoopRun on
 // the C-side run loop) DOES LockOSThread — easy to confuse with the
 // poller, but they are distinct goroutines.

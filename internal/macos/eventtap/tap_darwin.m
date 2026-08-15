@@ -7,7 +7,15 @@
 #import <stdint.h>
 #import <string.h>       // memcpy / memset for the keystroke ring
 #import "tap_ring.h"     // DND_RING_CAP, dnd_keyrec_t — shared with tap_darwin.go
-#import "_cgo_export.h"  // generated header for //export eventtap_matched
+
+// The cgo-generated export header is deliberately NOT imported here. This
+// translation unit makes ZERO calls into Go: the callback only appends to the
+// static ring below, and every comparison happens on the poller goroutine
+// (poller.go). Importing that header is the first step of re-introducing a Go
+// call into the callback, which is exactly what the nosplit invariant
+// documented on `eventtap_callback` forbids. watchdog_darwin.m does import it,
+// and that is fine: its //export call fires from a GCD handler, never from a
+// tap callback.
 
 // USER_INTENTIONAL_MASK is the bit-for-bit twin of `matcher.UserIntentionalMask`
 // on the Go side. The callback strips system bits (CapsLock 0x10000,
@@ -32,21 +40,6 @@ static const uint64_t USER_INTENTIONAL_MASK =
     (uint64_t)kCGEventFlagMaskAlternate |
     (uint64_t)kCGEventFlagMaskCommand   |
     (uint64_t)kCGEventFlagMaskSecondaryFn;
-
-// expected_flags and expected_keycode are the (modifiers, keyCode) baseline
-// the callback compares incoming CGEvents against. `eventtap_install_c` sets
-// these from the Go-side hotkey.Spec via cgo before the tap is added to the
-// worker run loop. `volatile` because the callback (worker thread) reads
-// them while the main thread writes them; on macOS/ARM64 both fit in a
-// single naturally-aligned load/store so no atomic primitive is required —
-// the read pattern is "load once, compare", never "read-modify-write".
-//
-// Go side pre-masks `spec.Modifiers` with `matcher.UserIntentionalMask` BEFORE
-// passing them in, so the callback compares against an already-masked value
-// (the design notes): the incoming event's flags are masked at read time, the
-// expected value is masked once at Install time.
-static volatile uint64_t expected_flags  = 0;
-static volatile uint16_t expected_keycode = 0;
 
 // g_ring and g_seq are the keystroke ring: the callback (single writer, tap
 // worker thread) appends one dnd_keyrec_t per non-autorepeat KeyDown, the
@@ -93,26 +86,28 @@ static CFRunLoopRef       g_worker_runloop = NULL;
 //   2. If `type == kCGEventFlagsChanged` → return NULL (suppress without
 // match-testing). Flag-only events have no keyCode.
 //   3. If `type == kCGEventKeyDown` → drop autorepeat events, then append
-//      (masked flags, keyCode) to the keystroke ring for the poller to
-//      match in Go. The legacy single-hotkey comparison against the
-//      Install-time globals still runs alongside it and calls
-//      `eventtap_matched()` (//export Go helper that flips `matched`
-//      atomic.Bool — see tap_darwin.go); it is removed once the Go-side
-//      sequence matcher is wired up.
+//      (masked flags, keyCode) to the keystroke ring. That is the WHOLE
+//      key-handling path: this callback compares nothing. The poller
+//      goroutine snapshots the ring every pollInterval and runs the unlock
+//      code comparison in pure Go (poller.go → internal/matcher).
 //   4. Unconditional `return NULL` at the end — all keyboard / mouse / scroll
 // events are swallowed ("all input blocked except the configured
-//      hotkey"); matched events are ALSO swallowed so the trigger combo does
+//      unlock code"); the keys of the code are ALSO swallowed so they do
 //      not leak into the underlying app (e.g. a stray Cmd+X reaching a text
 //      editor).
 //
 // nosplit invariant: this body MUST NOT acquire Go locks, allocate Go
-// memory, log, or call dispatch_async. The only Go-side call is the no-arg,
-// no-return `eventtap_matched()` which does a single atomic store. Pre-fix
-// experimentation in the design notes confirmed this is the only callback shape
-// that survives `-race` under load.
+// memory, log, or call dispatch_async — and, as of the sequence-matcher
+// wiring, MUST NOT call into Go AT ALL. It previously made exactly one Go
+// call (`eventtap_matched()`, a single atomic store), which pre-fix
+// experimentation in the design notes had established as the only callback
+// shape that survives `-race` under load. Moving the comparison to Go took
+// that count from one to zero, so the invariant is now strictly stronger
+// than the shape that was validated. Do not add a Go call back.
 //
-// The ring append added below does NOT weaken that invariant, and this is
-// the reason it was chosen over any richer accumulation scheme:
+// The ring append is what replaced it, and it is strictly weaker than the
+// call it displaced — which is why it was chosen over any richer
+// accumulation scheme:
 //
 //   - It touches only static C storage (`g_ring`, `g_seq`) that is allocated
 //     once in BSS at process start — no malloc, no Go heap, no CFRetain.
@@ -123,11 +118,6 @@ static CFRunLoopRef       g_worker_runloop = NULL;
 //   - It makes no Go call, no syscall, no allocation, and cannot block or
 //     grow the stack, so the thread never needs the Go runtime while it is
 //     inside this function.
-//
-// In other words the accumulation path is strictly weaker than the
-// `eventtap_matched()` call already present: once that legacy call is
-// removed, the number of Go calls in this callback becomes zero and the
-// invariant is stronger than it has ever been.
 //
 // silent fail: no NSLog / printf / fprintf — wrong-key presses leave
 // no observable side channel. `--debug` mode is deferred per the design notes.
@@ -158,7 +148,7 @@ static CGEventRef eventtap_callback(CGEventTapProxy proxy,
         return NULL;
     }
 
-    // match path: only KeyDown can match the configured hotkey.
+    // record path: only KeyDown carries a keyCode worth recording.
     // KeyUp / mouse / scroll / NX_SYSDEFINED all fall through to the final
     // unconditional `return NULL` below.
     if (type == kCGEventKeyDown) {
@@ -186,17 +176,11 @@ static CGEventRef eventtap_callback(CGEventTapProxy proxy,
         g_ring[s & (DND_RING_CAP - 1)].flags   = flags;
         g_ring[s & (DND_RING_CAP - 1)].keycode = (uint16_t)keycode;
         __atomic_store_n(&g_seq, s + 1, __ATOMIC_RELEASE);
-
-        if (flags == expected_flags && (uint16_t)keycode == expected_keycode) {
-            // //export Go helper — body is exactly `matched.Store(true)`,
-            // enforced by gold-grep in tap_test.go (Threat).
-            eventtap_matched();
-        }
     }
 
-    //: ALWAYS return NULL after the match-test branch. Every
-    // keyboard / mouse / scroll / media event is suppressed; the matched
-    // event is swallowed too so the hotkey combo does not surface in any app.
+    //: ALWAYS return NULL after the record branch. Every
+    // keyboard / mouse / scroll / media event is suppressed; the keys of the
+    // unlock code are swallowed too so the code does not surface in any app.
     return NULL;
 }
 
@@ -244,6 +228,34 @@ uint64_t eventtap_snapshot(dnd_keyrec_t *out) {
     return cur;
 }
 
+// eventtap_wipe_ring clears the recorded key presses and resets the press
+// counter. It exists so the tail of what the user typed — which ends with
+// the unlock code itself — stops being resident in process memory the
+// moment the tap goes down, rather than at `eventtap_uninstall_c` several
+// CoreFoundation teardown steps later.
+//
+// CALL SITE CONTRACT: Release path ONLY, after `eventtap_enable(tap, false)`
+// (Releaser.Release Step 1 in tap_darwin.go). It MUST NOT be called from the
+// poller: the poller runs concurrently with a live tap, so calling it there
+// would introduce a SECOND writer to the ring and destroy the single-writer
+// premise the whole correctness argument for `eventtap_snapshot` rests on.
+//
+// The counter reset is not cosmetic. It is what keeps the poller — which is
+// still ticking between Step 1 and the `close(stopPoller)` at Step 6 — from
+// ever examining the wiped slots: its `lastSeq` is already past zero, so the
+// half-open range [lastSeq, cur) it would consider collapses to empty and
+// `matchAny` iterates zero times. Without the reset, a wiped ring reads as a
+// run of `{flags: 0, keycode: 0}` records, and keycode 0 is kVK_ANSI_A — an
+// unlock code of bare `a` steps could spuriously match on the zeroes.
+//
+// The tap is already disabled here, so at most one in-flight callback can
+// still be running; a record it writes concurrently with this memset is
+// discarded by the counter reset either way.
+void eventtap_wipe_ring(void) {
+    memset(g_ring, 0, sizeof(g_ring));
+    __atomic_store_n(&g_seq, 0, __ATOMIC_RELEASE);
+}
+
 // eventtap_install_c installs the CGEventTap at kCGHIDEventTap with
 // kCGHeadInsertEventTap placement and the suppression-capable
 // kCGEventTapOptionDefault (all three constants are grep-pinned by
@@ -259,10 +271,17 @@ uint64_t eventtap_snapshot(dnd_keyrec_t *out) {
 //       indicates CoreFoundation allocator exhaustion. We tear down the tap
 //       and reset `g_tap` to NULL so a retry starts from a clean slate.
 //
+// `flags` and `keycode` are vestigial: the callback no longer compares
+// anything, so nothing on this side needs the configured code. They are kept
+// for one more step only to avoid changing the cgo signature in the same
+// commit that switches the mechanism — the Go side already builds its
+// `matcher.Sequence` from the same Spec. Both parameters are dropped when
+// the signature moves to `[]hotkey.Spec`.
+//
 // The function:
-//   1. Records (flags, keycode) into the static globals BEFORE creating the
-//      tap — once the source is added to the run loop, the callback may fire
-//      on the very first event and MUST read coherent values.
+//   1. Empties the keystroke ring BEFORE creating the tap — once the source
+//      is added to the run loop, the callback may fire on the very first
+//      event, and the poller must not see a record from a previous session.
 //   2. Builds the 15-bit event mask via CGEventMaskBit() over the table in
 // the design notes (KeyDown/Up, FlagsChanged, all 9 mouse events, MouseMoved,
 //      ScrollWheel, NX_SYSDEFINED for media keys).
@@ -275,8 +294,8 @@ uint64_t eventtap_snapshot(dnd_keyrec_t *out) {
 //   5. Enables the tap — CGEventTapCreate returns a disabled tap; we MUST
 //      explicitly enable before events flow.
 int eventtap_install_c(uint64_t flags, uint16_t keycode, CFMachPortRef *out_tap) {
-    expected_flags  = flags;
-    expected_keycode = keycode;
+    (void)flags;    // vestigial — see the note above; dropped with the signature.
+    (void)keycode;  // vestigial — see the note above; dropped with the signature.
 
     // Start every session with an empty ring. Both writes happen BEFORE the
     // tap exists, so the callback cannot be racing us here. Zeroing matters
@@ -449,12 +468,16 @@ void eventtap_enable(CFMachPortRef tap, int enable) {
 // no caller (no Go-side `C.eventtap_test_set_expected` invocation in
 // tap_test.go or anywhere else), so it was dead in both the production
 // AND test binary. Keeping it always-compiled added a small but real
-// attack surface: a process-injected adversary could rewrite
-// (expected_flags, expected_keycode) at runtime without going through
-// Accessibility / Install / a configured Spec, locking out the
-// legitimate user with a custom hotkey. The "1KB binary savings" comment
-// optimized the wrong variable (correctness/security > size). If a
-// future test wants the setter back, prefer either (a) a build-tag
+// attack surface: a process-injected adversary could rewrite the
+// (expected_flags, expected_keycode) globals of the day at runtime without
+// going through Accessibility / Install / a configured Spec, locking out
+// the legitimate user with a custom hotkey. (Those globals are gone
+// entirely now — the configured code lives only on the Go side — but the
+// reasoning below still governs any future test-only C helper, and the
+// same conclusion was reached again when a ring-injection helper was
+// considered and rejected for the sequence matcher.) The "1KB binary
+// savings" comment optimized the wrong variable (correctness/security >
+// size). If a future test wants the setter back, prefer either (a) a build-tag
 // gated `*_darwin_test.m` companion file that ships ONLY in test
 // binaries, or (b) a `#ifdef DNDMODE_TEST_HELPERS` guard wired to a
 // dedicated `#cgo test_helpers CFLAGS: -DDNDMODE_TEST_HELPERS`. Both

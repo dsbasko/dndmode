@@ -5,7 +5,6 @@ package eventtap
 import (
 	"sync/atomic"
 	"testing"
-	"time"
 
 	"github.com/dsbasko/dndmode/internal/config/hotkey"
 	"github.com/dsbasko/dndmode/internal/matcher"
@@ -21,9 +20,10 @@ type releaserTestDeps struct {
 	uninstallCalls        atomic.Int64
 	gestureDisableCalls   atomic.Int64
 	gestureUninstallCalls atomic.Int64
+	wipeRingCalls         atomic.Int64
 
 	// callOrder records the sequence of "disable" / "gesture-disable" /
-	// "gesture-uninstall" / "uninstall" strings, in the order the fake
+	// "wipe-ring" / "gesture-uninstall" / "uninstall" strings, in the order the fake
 	// closures were invoked. Slice append is NOT goroutine-safe in general,
 	// but in the Release path the closures are invoked from the same
 	// goroutine (mutex-serialised), so a plain slice is sufficient. The
@@ -37,7 +37,7 @@ type releaserTestDeps struct {
 // closures that record their invocation count + order into the testDeps
 // struct. stopPoller/pollerDone channels are pre-populated and pollerDone
 // is pre-closed so Release does not block on the poller-wait step (the
-// poller is exercised separately in pollMatched tests below).
+// poller itself is exercised in poller_test.go, against a fake ring).
 func newReleaserTestDeps(t *testing.T) *releaserTestDeps {
 	t.Helper()
 	d := &releaserTestDeps{}
@@ -64,6 +64,10 @@ func newReleaserTestDeps(t *testing.T) *releaserTestDeps {
 	d.releaser.gestureUninstallFn = func() {
 		d.gestureUninstallCalls.Add(1)
 		d.callOrder = append(d.callOrder, "gesture-uninstall")
+	}
+	d.releaser.wipeRingFn = func() {
+		d.wipeRingCalls.Add(1)
+		d.callOrder = append(d.callOrder, "wipe-ring")
 	}
 	return d
 }
@@ -112,6 +116,9 @@ func TestReleaser_Release_IsIdempotent(t *testing.T) {
 	if got := d.gestureUninstallCalls.Load(); got != 1 {
 		t.Errorf("after 3 Release calls, gestureUninstallCalls = %d, want 1 (gate must block)", got)
 	}
+	if got := d.wipeRingCalls.Load(); got != 1 {
+		t.Errorf("after 3 Release calls, wipeRingCalls = %d, want 1 (gate must block)", got)
+	}
 }
 
 // TestReleaser_Release_DisableBeforeUninstall verifies two ordering
@@ -123,10 +130,17 @@ func TestReleaser_Release_IsIdempotent(t *testing.T) {
 //  2. gesture-uninstall BEFORE main uninstall (Step 2a before Steps 2+3) —
 //     the main uninstall ends with CFRunLoopStop on the SHARED worker run
 //     loop; the gesture source must leave that loop before it can be torn
-//     down (see gesturetap_uninstall_c ordering contract).
+//     down (see gesturetap_uninstall_c ordering contract);
+//  3. wipe-ring AFTER both disables and BEFORE any uninstall — the
+//     keystroke ring holds the tail of what the user typed, ending with the
+//     unlock code itself. It must be cleared as soon as no writer is left
+//     (both taps disabled) rather than waiting for the CF teardown, which
+//     can be slow or fail outright. Wiping any earlier — while a tap is
+//     still live — would make the wiper a second writer to the ring and
+//     break the single-writer premise eventtap_snapshot relies on.
 //
 // The fake closures append their tags to callOrder; the test asserts the
-// exact four-step sequence.
+// exact five-step sequence.
 func TestReleaser_Release_DisableBeforeUninstall(t *testing.T) {
 	t.Parallel()
 
@@ -135,13 +149,13 @@ func TestReleaser_Release_DisableBeforeUninstall(t *testing.T) {
 		t.Fatalf("Release: %v", err)
 	}
 
-	want := []string{"disable", "gesture-disable", "gesture-uninstall", "uninstall"}
+	want := []string{"disable", "gesture-disable", "wipe-ring", "gesture-uninstall", "uninstall"}
 	if len(d.callOrder) != len(want) {
 		t.Fatalf("callOrder = %v, want %v (len mismatch)", d.callOrder, want)
 	}
 	for i := range want {
 		if d.callOrder[i] != want[i] {
-			t.Errorf("callOrder[%d] = %q, want %q (disable-first)", i, d.callOrder[i], want[i])
+			t.Errorf("callOrder[%d] = %q, want %q (disable-first, wipe-after-disable, gesture-before-main)", i, d.callOrder[i], want[i])
 		}
 	}
 }
@@ -157,147 +171,6 @@ func TestReleaser_Name_ReturnsEventtap(t *testing.T) {
 	if got := d.releaser.Name(); got != "eventtap" {
 		t.Errorf("Name() = %q, want %q", got, "eventtap")
 	}
-}
-
-// TestPoller_AtomicTrigger_SendsToSink verifies the matched-to-sink fan-out
-// path: when the C callback flips `matched.Store(true)`, the poller goroutine
-// observes it on the next ticker fire and pushes a struct{} send to sink
-// within ~5×pollInterval = 50ms (the Phase 4 success criterion #2 budget).
-func TestPoller_AtomicTrigger_SendsToSink(t *testing.T) {
-	t.Parallel()
-
-	var flag atomic.Bool
-	flag.Store(true)
-	sink := make(chan struct{}, 1)
-	stop := make(chan struct{})
-	done := make(chan struct{})
-
-	go func() {
-		defer close(done)
-		pollMatched(stop, &flag, sink, nil)
-	}()
-
-	select {
-	case <-sink:
-		// success — got the signal
-	case <-time.After(5 * pollInterval):
-		t.Fatalf("sink did not receive within %v (poller stuck?)", 5*pollInterval)
-	}
-
-	close(stop)
-	select {
-	case <-done:
-		// poller goroutine exited cleanly
-	case <-time.After(5 * pollInterval):
-		t.Fatalf("poller goroutine did not exit within %v after close(stop)", 5*pollInterval)
-	}
-
-	// CompareAndSwap(true, false) must have cleared the flag after sending.
-	if flag.Load() {
-		t.Errorf("flag = true after poller fired, want false (CAS must reset)")
-	}
-}
-
-// TestPoller_StopChannel_StopsPolling verifies clean shutdown: closing
-// the stop channel exits the goroutine within one tick interval even when
-// no match has been observed. This is the LIFO Cleanup chain's exit path
-// (Release closes stopPoller as step 3 of the teardown sequence).
-func TestPoller_StopChannel_StopsPolling(t *testing.T) {
-	t.Parallel()
-
-	var flag atomic.Bool // stays false
-	sink := make(chan struct{}, 1)
-	stop := make(chan struct{})
-	done := make(chan struct{})
-
-	go func() {
-		defer close(done)
-		pollMatched(stop, &flag, sink, nil)
-	}()
-
-	// Let the poller run for ~3 ticks without setting flag.
-	time.Sleep(3 * pollInterval)
-	close(stop)
-
-	select {
-	case <-done:
-		// success — goroutine exited within bounded time
-	case <-time.After(5 * pollInterval):
-		t.Fatalf("poller did not exit within %v after close(stop)", 5*pollInterval)
-	}
-
-	// Sink must NOT have received anything — flag was never true.
-	select {
-	case <-sink:
-		t.Errorf("sink received a signal but flag was never true")
-	default:
-		// expected — no spurious send
-	}
-}
-
-// TestPoller_FullSinkBuffer_DoesNotBlock verifies non-blocking-send
-// semantics: if `sink` is already full (cap=1, prefilled), the poller's
-// `select-default` branch swallows the send instead of blocking the
-// goroutine. This is critical for a stuck poller would prevent
-// the worker goroutine from exiting and leak the locked OS thread.
-func TestPoller_FullSinkBuffer_DoesNotBlock(t *testing.T) {
-	t.Parallel()
-
-	var flag atomic.Bool
-	flag.Store(true)
-	sink := make(chan struct{}, 1)
-	sink <- struct{}{} // pre-fill so the poller hits the default branch
-
-	stop := make(chan struct{})
-	done := make(chan struct{})
-
-	go func() {
-		defer close(done)
-		pollMatched(stop, &flag, sink, nil)
-	}()
-
-	// Wait at least 2 ticks so the poller has had multiple chances to
-	// hit the full-sink default branch; it MUST not block.
-	time.Sleep(3 * pollInterval)
-	close(stop)
-
-	select {
-	case <-done:
-		// success — goroutine exited despite full sink
-	case <-time.After(5 * pollInterval):
-		t.Fatalf("poller blocked on full sink; did not exit within %v after close(stop)", 5*pollInterval)
-	}
-
-	// Sink still holds exactly one element (the pre-fill). No additional
-	// signal was pushed because each CAS(true,false) → default-drop pair
-	// "consumes" the flag without enqueueing.
-	if got := len(sink); got != 1 {
-		t.Errorf("sink len = %d, want 1 (pre-fill should remain; default branch must drop)", got)
-	}
-}
-
-// TestEventTapMatched_Function_StoresAtomic validates the //export Go
-// callback body. Threat requires the body be EXACTLY
-// `matched.Store(true)` — this test verifies the SEMANTIC contract: calling
-// the function flips the package-global atomic.Bool to true.
-//
-// The body cannot be grepped from this Go test (the eventtap_matched body
-// is in tap_darwin.go which is the same package — the test can call it
-// directly as a regular Go function since //export funcs are still
-// reachable from Go). A reviewer who extends the body with allocation /
-// channel send / panic will break the production CGEventTap callback path
-// on a real signed binary; this unit test is the early-warning system.
-func TestEventTapMatched_Function_StoresAtomic(t *testing.T) {
-	// NOT t.Parallel — touches the package-global `matched`.
-
-	matched.Store(false) // baseline
-	eventtap_matched()
-	if !matched.Load() {
-		t.Errorf("matched = false after eventtap_matched(), want true (body must be matched.Store(true))")
-	}
-
-	// Restore baseline for other tests / production wire-up.
-	matched.Store(false)
 }
 
 // TestUserIntentionalMask_MatchesMatcherPackage pins the bit-for-bit
@@ -349,5 +222,172 @@ func TestUserIntentionalMask_MatchesMatcherPackage(t *testing.T) {
 		if ind.flag&want != ind.flag {
 			t.Errorf("%s = 0x%x is NOT within UserIntentionalMask 0x%x", ind.name, uint64(ind.flag), uint64(want))
 		}
+	}
+}
+
+// TestKeyEventFromRecord_MapsFieldsVerbatim pins the field mapping between a
+// C ring record and its Go mirror. This is the half of the snapshot
+// conversion that can be tested without cgo (test files cannot `import "C"`
+// at all, so a C.dnd_keyrec_t can never be constructed here) — and it is the
+// half where the interesting mistakes live: swapping the two fields, or
+// narrowing a value on the way across.
+//
+// A regression here is silent and total: every recorded keystroke would
+// carry a wrong keycode or wrong modifiers, so the unlock code would simply
+// never match and the machine would stay locked.
+func TestKeyEventFromRecord_MapsFieldsVerbatim(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name    string
+		flags   uint64
+		keycode uint16
+		want    matcher.KeyEvent
+	}{
+		{
+			name:    "zero record",
+			flags:   0,
+			keycode: 0,
+			want:    matcher.KeyEvent{Modifiers: 0, KeyCode: 0},
+		},
+		{
+			name:    "bare key",
+			flags:   0,
+			keycode: 1, // kVK_ANSI_S
+			want:    matcher.KeyEvent{Modifiers: 0, KeyCode: 1},
+		},
+		{
+			name:    "modified key",
+			flags:   uint64(hotkey.ModCtrl | hotkey.ModOption | hotkey.ModCmd),
+			keycode: 7, // kVK_ANSI_X
+			want: matcher.KeyEvent{
+				Modifiers: hotkey.ModCtrl | hotkey.ModOption | hotkey.ModCmd,
+				KeyCode:   7,
+			},
+		},
+		{
+			// The callback masks before recording, but the conversion must
+			// not silently launder a value that arrives unmasked — that
+			// would hide a C-side regression from every Go test.
+			// MatchTail is the one place masking happens on this side.
+			name:    "unmasked system bits survive the conversion",
+			flags:   uint64(hotkey.ModShift) | 0x10000, // + CapsLock
+			keycode: 49,                                // kVK_Space
+			want: matcher.KeyEvent{
+				Modifiers: hotkey.ModShift | 0x10000,
+				KeyCode:   49,
+			},
+		},
+		{
+			// Widest values either field can carry. A conversion that
+			// truncated (e.g. uint16 → uint8, or ModFlag declared 32-bit)
+			// shows up here rather than on an exotic keyboard.
+			name:    "widest values are not truncated",
+			flags:   ^uint64(0),
+			keycode: ^uint16(0),
+			want: matcher.KeyEvent{
+				Modifiers: hotkey.ModFlag(^uint64(0)),
+				KeyCode:   ^uint16(0),
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			got := keyEventFromRecord(tt.flags, tt.keycode)
+			if got != tt.want {
+				t.Errorf("keyEventFromRecord(0x%x, %d) = %+v, want %+v",
+					tt.flags, tt.keycode, got, tt.want)
+			}
+		})
+	}
+}
+
+// TestSnapshot_FillsWholeBufferAndReusesIt exercises the real cgo snapshot
+// against a ring no tap has ever written to: with no Install in this test
+// binary the C-side ring and counter are still their BSS zero values, so the
+// expected result is fully determined.
+//
+// What it pins:
+//
+//   - every one of the ringCap slots is written on each call. The buffer is
+//     poisoned first, so a conversion loop that stopped short (or that sized
+//     itself from the Go slice instead of the C array) leaves poison behind
+//     and fails here. A short copy would mean the poller matches against
+//     stale records from a previous tick;
+//   - the caller's backing array is reused rather than replaced. The poller
+//     allocates the buffer once and relies on snapshot writing in place —
+//     this is the "no allocations in hot path" contract from matcher.go;
+//   - the returned counter is the press count (0 here, since nothing has
+//     been recorded), not an index or a slot count.
+//
+// NOT t.Parallel: it reads process-global C state.
+func TestSnapshot_FillsWholeBufferAndReusesIt(t *testing.T) {
+	buf := make([]matcher.KeyEvent, ringCap)
+	poison := matcher.KeyEvent{Modifiers: 0xDEAD, KeyCode: 0xBEEF}
+	for i := range buf {
+		buf[i] = poison
+	}
+	before := &buf[0]
+
+	cur := snapshot(buf)
+
+	if cur != 0 {
+		t.Errorf("snapshot returned %d, want 0 (no tap installed in this test "+
+			"binary, so no key press can have been recorded)", cur)
+	}
+	if len(buf) != ringCap {
+		t.Fatalf("len(buf) = %d after snapshot, want %d (buffer must not be resliced)", len(buf), ringCap)
+	}
+	for i, ev := range buf {
+		if ev != (matcher.KeyEvent{}) {
+			t.Errorf("buf[%d] = %+v, want zero value: the C ring is empty, so "+
+				"a non-zero slot means the conversion did not write this "+
+				"index (poison was %+v)", i, ev, poison)
+		}
+	}
+	if &buf[0] != before {
+		t.Errorf("snapshot replaced the caller's backing array; it must write in place")
+	}
+
+	// Second call on the same buffer: reuse must be safe and idempotent.
+	// The poller calls snapshot on every tick with the same slice.
+	if cur2 := snapshot(buf); cur2 != cur {
+		t.Errorf("second snapshot returned %d, want %d (counter must not move without key presses)", cur2, cur)
+	}
+	if &buf[0] != before {
+		t.Errorf("second snapshot replaced the caller's backing array; it must write in place")
+	}
+}
+
+// TestSnapshot_ShortBuffer_Panics pins the guard on the one input that would
+// corrupt memory rather than merely misbehave: the C side memcpys
+// DND_RING_CAP records into the pointer it is given, so a shorter Go buffer
+// would be written past its end. Failing loudly at the call is the only
+// acceptable outcome.
+//
+// NOT t.Parallel: it reads process-global C state.
+func TestSnapshot_ShortBuffer_Panics(t *testing.T) {
+	defer func() {
+		if r := recover(); r == nil {
+			t.Errorf("snapshot(short buffer) did not panic; the C memcpy would "+
+				"have written %d records past the end of the slice", ringCap-1)
+		}
+	}()
+
+	snapshot(make([]matcher.KeyEvent, ringCap-1))
+}
+
+// TestSeq_NoTapInstalled_IsZero pins the other half of the poller's cgo
+// bridge. pollSequence takes its starting `lastSeq` from this call, so a
+// wrapper that returned garbage (wrong C type width, sign extension) would
+// make the poller either skip real keystrokes or replay phantom ones.
+//
+// NOT t.Parallel: it reads process-global C state.
+func TestSeq_NoTapInstalled_IsZero(t *testing.T) {
+	if got := seq(); got != 0 {
+		t.Errorf("seq() = %d, want 0 (no tap installed in this test binary)", got)
 	}
 }

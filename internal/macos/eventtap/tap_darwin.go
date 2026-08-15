@@ -10,11 +10,30 @@ package eventtap
 #include <CoreFoundation/CoreFoundation.h>
 #include <CoreGraphics/CoreGraphics.h>
 
+// tap_ring.h is the shared declaration of the keystroke ring — the same
+// header tap_darwin.m includes. It is what makes `C.dnd_keyrec_t` exist on
+// this side; without it the snapshot below would need a hand-written second
+// copy of the record layout and of the capacity, and a silent drift between
+// the two would either truncate every snapshot or memcpy past the end of the
+// Go buffer. ring_guard_test.go pins DND_RING_CAP against the Go-side
+// `ringCap` for the same reason.
+#include "tap_ring.h"
+
 extern int  eventtap_install_c(uint64_t flags, uint16_t keycode, CFMachPortRef *out_tap);
 extern int  eventtap_register_worker_runloop(CFMachPortRef tap, CFRunLoopRef *out_loop);
 extern void eventtap_uninstall_c(CFMachPortRef tap);
 extern int  eventtap_is_enabled(CFMachPortRef tap);
 extern void eventtap_enable(CFMachPortRef tap, int enable);
+
+// The keystroke-ring readers. `eventtap_seq` is the cheap per-tick probe
+// (a bare ACQUIRE load); `eventtap_snapshot` copies the whole ring into a
+// caller-provided buffer with room for DND_RING_CAP records and returns the
+// press count the copy describes. `eventtap_wipe_ring` clears the ring and
+// the counter and is callable ONLY from the Release path — see its contract
+// in tap_darwin.m.
+extern uint64_t eventtap_seq(void);
+extern uint64_t eventtap_snapshot(dnd_keyrec_t *out);
+extern void     eventtap_wipe_ring(void);
 
 // eventtap_set_observed_tap is the canonical writer for the shared
 // `volatile CFMachPortRef g_observed_tap` global that lives in
@@ -67,45 +86,72 @@ import (
 	"github.com/dsbasko/dndmode/internal/matcher"
 )
 
-// matched is the package-level latch flipped by the //export Go helper
-// eventtap_matched, which is invoked from the CGEventTap C callback on its
-// worker thread when (modifiers, keyCode) match the configured Spec.
-//
-// The poller goroutine (pollMatched in poller.go; 10ms ticker) reads
-// matched.CompareAndSwap(true, false) and on success performs a non-blocking
-// `select { case sink <- struct{}{}: default: }` to the supervisor's
-// ExitTrigger channel.
-//
-// atomic.Bool is the ONLY storage primitive permitted in the //export Go
-// callback per (nosplit invariant; the design notes forbidden-operations
-// list). No mutex, no channel, no slog — a single atomic store is the
-// entire body of eventtap_matched.
-var matched atomic.Bool
+// There is deliberately NO //export function in this file. The CGEventTap
+// callback used to call one (`eventtap_matched`, whose body was a single
+// atomic store into a package-level latch); the comparison now happens on
+// the poller goroutine, so the callback calls into Go zero times. That is
+// the strongest form of the nosplit invariant documented on
+// `eventtap_callback` in tap_darwin.m, and re-adding an //export used from
+// the callback would weaken it. The Go→C direction (seq / snapshot below)
+// is unaffected: those run on the poller goroutine, which is an ordinary
+// Go-scheduled goroutine making an ordinary cgo call.
 
-// eventtap_matched is the cgo entry point invoked from the C-side
-// `eventtap_callback` in tap_darwin.m when an incoming CGEvent matches the
-// configured (modifiers, keyCode). It fires on the CGEventTap worker thread
-// — NOT main, NOT a Go-scheduled goroutine — so the body MUST satisfy the
-// callback contract:
+// seq returns the number of key presses the C callback has recorded since
+// Install. It is the poller's cheap per-tick probe: an unchanged value means
+// no new keystroke, so the snapshot (and its ring-sized memcpy) can be
+// skipped entirely.
+func seq() uint64 {
+	return uint64(C.eventtap_seq())
+}
+
+// snapshot copies the C-side keystroke ring into buf and returns the press
+// count that copy describes — the `to` bound of the half-open range
+// [previous, to) the caller may safely consume.
 //
-//   - No Go memory allocation (would race against the Go scheduler GC barrier
-//     while the worker thread is not Go-scheduled).
-//   - No blocking primitive (channel send, mutex lock, condition var).
-//   - No syscall, no slog, no panic.
-//   - Single atomic store is verified safe in production by
-//     pqrs-org/osx-event-observer-examples and lwouis/alt-tab-macos (both
-//     ship at high event-rates without races under `-race` builds — see
-// the design notes reference patterns).
+// buf MUST have room for ringCap records and is written in place: the poller
+// allocates it once, before its loop, and reuses it on every tick, so this
+// path stays allocation-free per the contract in matcher.go. A short buffer
+// is a programming error, not a runtime condition — the C memcpy is sized
+// from DND_RING_CAP and would write past the end of a smaller Go slice, so
+// the length is checked here and panics rather than corrupting the heap.
+// The only caller passes `make([]matcher.KeyEvent, ringCap)`.
 //
-// Per Threat, this body MUST stay EXACTLY
-// `matched.Store(true)`. The acceptance gate in tap_test.go verifies this
-// (grep + functional test) and refuses any extension. The poller goroutine
-// on the Go side does ALL the post-match work (forward to sink, clear the
-// latch, log).
+// The C records are copied into a local [ringCap]C.dnd_keyrec_t (stack, no
+// allocation) and converted field-by-field: the Go and C layouts are pinned
+// to the same widths by ring_guard_test.go, but converting explicitly rather
+// than reinterpreting the memory keeps the whole thing free of unsafe and
+// survives any future padding change in either language.
+func snapshot(buf []matcher.KeyEvent) uint64 {
+	if len(buf) < ringCap {
+		panic("eventtap: snapshot buffer shorter than ringCap")
+	}
+	var cring [ringCap]C.dnd_keyrec_t
+	cur := uint64(C.eventtap_snapshot(&cring[0]))
+	for i := range cring {
+		buf[i] = keyEventFromRecord(uint64(cring[i].flags), uint16(cring[i].keycode))
+	}
+	return cur
+}
+
+// keyEventFromRecord is the field mapping between one C ring record and its
+// Go mirror: `flags` (already masked with USER_INTENTIONAL_MASK by the
+// callback) becomes Modifiers, `keycode` becomes KeyCode.
 //
-//export eventtap_matched
-func eventtap_matched() {
-	matched.Store(true)
+// Split out of snapshot as a plain function with plain integer parameters so
+// the mapping is unit-testable: cgo is not usable in _test.go files at all,
+// so a test can never construct a C.dnd_keyrec_t to feed the conversion.
+// Everything that can be checked without cgo — which field goes where, and
+// that neither width truncates — is checked here instead.
+//
+// The Modifiers value is NOT re-masked. matcher.Sequence.MatchTail masks the
+// event side itself precisely so it does not have to trust the C side, and
+// masking twice here would hide a C-side regression from the Go tests rather
+// than expose it.
+func keyEventFromRecord(flags uint64, keycode uint16) matcher.KeyEvent {
+	return matcher.KeyEvent{
+		Modifiers: hotkey.ModFlag(flags),
+		KeyCode:   keycode,
+	}
 }
 
 // Releaser is the active CGEventTap handle and implements state.Releaser
@@ -206,6 +252,21 @@ type Releaser struct {
 	gestureDisableFn   func()
 	gestureUninstallFn func()
 
+	// wipeRingFn clears the C-side keystroke ring (and its press counter).
+	// It runs at the END of Step 1, once BOTH taps are disabled and no
+	// further key press can be recorded — the ring holds the tail of what
+	// the user typed, ending with the unlock code itself, and there is no
+	// reason to leave it resident for the rest of the process lifetime.
+	//
+	// Release is the ONLY permitted call site. Calling it from the poller
+	// would make the poller a second writer to the ring while the tap is
+	// still live, which is precisely the premise `eventtap_snapshot`'s
+	// correctness argument rules out (see its comment in tap_darwin.m).
+	//
+	// nil in test constructors that don't exercise the ring (Release
+	// nil-guards it).
+	wipeRingFn func()
+
 	// watchdogStop / wakeStop are the tear-down
 	// closures returned by `StartWatchdog` and `InstallWakeObserver`
 	// respectively. Set by `InstallAll`. The plain `Install` constructor
@@ -263,6 +324,9 @@ func (r *Releaser) Name() string { return "eventtap" }
 //     and Step 4-5 reads g_observed_tap → sees NULL → returns immediately
 //     without touching the (about-to-be-freed at Step 3) mach port.
 // Step 1 — both calls happen here under the same mutex.
+//     wipeRingFn — eventtap_wipe_ring() — closes Step 1 once both taps
+//     are down and nothing can record another key press; the recorded
+//     keystrokes (which end with the unlock code) stop being resident.
 //  2. uninstallFn — CFRunLoopRemoveSource → CFRelease(source) →
 //     CGEventTapEnable(tap, false) [defensive] → CFRelease(tap) →
 //     CFRunLoopStop(worker_runloop). The C-side helper
@@ -279,11 +343,11 @@ func (r *Releaser) Name() string { return "eventtap" }
 // 5. wakeStop — stop closure. Removes both NSWorkspace
 //     observers (DidWake + SessionDidBecomeActive) and re-NULLs
 //     g_observed_tap defensively. Skipped if nil (same rationale).
-//  6. close(stopPoller) — the matched-key poller goroutine exits its
+//  6. close(stopPoller) — the unlock-code poller goroutine exits its
 //     ticker loop within pollInterval (10ms).
-//  7. <-pollerDone — wait for the matched-key poller to fully unwind
-//     before returning. Under `-race`, a still-running goroutine
-//     accessing `matched` after Release would be flagged.
+//  7. <-pollerDone — wait for the unlock-code poller to fully unwind
+//     before returning. Under `-race`, a still-running goroutine calling
+//     into the C ring after Release would be flagged.
 func (r *Releaser) Release() error {
 	// Fast path: hint flag. Cheap Load — once released is durably set
 	// (after the winner stored it under mu), any repeat caller skips
@@ -320,6 +384,16 @@ func (r *Releaser) Release() error {
 	if r.gestureDisableFn != nil {
 		r.gestureDisableFn()
 	}
+	// Closing Step 1: with both taps disabled there is no writer left for
+	// the keystroke ring, so wipe it. Deliberately here and not later —
+	// the whole point is to shorten the window in which the just-typed
+	// unlock code is readable in process memory, and the CF teardown below
+	// can take arbitrarily long (or fail outright). eventtap_uninstall_c
+	// memsets the ring again at Step 2; that repetition is intentional
+	// belt-and-braces, both are cheap.
+	if r.wipeRingFn != nil {
+		r.wipeRingFn()
+	}
 
 	// --- Step 2a: gesture tap teardown MUST precede the main uninstall.
 	// uninstallFn ends with CFRunLoopStop on the SHARED worker run loop;
@@ -352,7 +426,7 @@ func (r *Releaser) Release() error {
 		r.wakeStop = nil
 	}
 
-	// Stop the matched-key poller goroutine. The channel may be nil in
+	// Stop the unlock-code poller goroutine. The channel may be nil in
 	// unit-test constructors that exercise only the disable/uninstall
 	// path; the production Install path always populates it.
 	if r.stopPoller != nil {
@@ -363,7 +437,7 @@ func (r *Releaser) Release() error {
 	}
 	if r.pollerDone != nil {
 		// Wait for the goroutine to actually exit. Under `-race`, a
-		// still-running goroutine accessing `matched` after Release
+		// still-running goroutine reading the C ring after Release
 		// returns would be flagged. The poller's loop returns within
 		// pollInterval (10ms) of stopPoller close, so this wait is
 		// bounded.
@@ -378,6 +452,7 @@ func (r *Releaser) Release() error {
 	r.uninstallFn = nil
 	r.gestureDisableFn = nil
 	r.gestureUninstallFn = nil
+	r.wipeRingFn = nil
 
 	// Store AFTER teardown completes. Concurrent callers blocked on
 	// mu.Lock will see released=true under mu and short-circuit; new
@@ -387,11 +462,16 @@ func (r *Releaser) Release() error {
 	return nil
 }
 
-// installTapOnly installs a CGEventTap at kCGHIDEventTap level configured
-// to match the given hotkey.Spec. On a successful (modifiers, keyCode)
-// match the C callback flips the package-level atomic.Bool `matched`; the
-// poller goroutine reads it on a 10ms ticker and forwards a struct{} send
-// to sink (capacity 1, non-blocking select-default).
+// installTapOnly installs a CGEventTap at kCGHIDEventTap level and starts
+// the poller that watches for the given hotkey.Spec. The C callback records
+// every non-autorepeat key press into a static ring; the poller goroutine
+// snapshots that ring on a 10ms ticker, matches it against the Spec in pure
+// Go (matcher.Sequence), and on a match forwards a struct{} send to sink
+// (capacity 1, non-blocking select-default).
+//
+// The single Spec becomes a one-step matcher.Sequence — a legacy single
+// combination is just an unlock code of length 1, so there is one matching
+// path in the codebase rather than two.
 //
 // fix: previously exposed as exported `Install`, but the returned
 // `*Releaser` had nil `watchdogStop` + nil `wakeStop` — Release() silently
@@ -410,12 +490,14 @@ func (r *Releaser) Release() error {
 // state.NewRestoreState + cocoa.NewController convention).
 //
 // Pre-masking: spec.Modifiers is AND'ed with matcher.UserIntentionalMask
-// BEFORE being passed to the C side, so the callback's static `expected_flags`
-// global holds an already-masked value. The C callback then masks each
-// incoming event's flags with USER_INTENTIONAL_MASK and compares the two
-// masked values for equality — no system bits (CapsLock 0x10000, NumPad
-// 0x200000, Help 0x400000, NX_NONCOALSESCEDMASK 0x100) affect the result
-// (the design notes).
+// before the matcher.Sequence is built from it, so the configured side of
+// every comparison is already masked. The C callback masks each incoming
+// event's flags with the twin USER_INTENTIONAL_MASK before recording it, and
+// MatchTail masks the recorded value again for good measure — no system bits
+// (CapsLock 0x10000, NumPad 0x200000, Help 0x400000, NX_NONCOALSESCEDMASK
+// 0x100) affect the result (the design notes). The masking on the configured
+// side matters because MatchTail compares for EXACT equality: an unmasked
+// stray bit in the Spec would make the code unenterable.
 //
 // Worker thread pattern (the design notes): a dedicated goroutine is spawned
 // inside installTapOnly. It calls runtime.LockOSThread() (no Unlock — the
@@ -471,16 +553,23 @@ func installInternal(spec hotkey.Spec, sink chan<- struct{}, log *slog.Logger) (
 		log = slog.Default()
 	}
 
-	// Reset the matched latch in case this is a re-Install within the same
-	// process (the unit-test path exercises this; production never re-installs
-	// the tap, but a defensive reset costs one atomic store).
-	matched.Store(false)
-
 	// Pre-mask the configured modifiers with the user-intentional mask so
-	// the C callback compares pre-masked vs pre-masked. matcher.UserIntentionalMask
-	// is the single source of truth for which modifier bits represent user
-	// intent (Cmd | Option | Ctrl | Shift | Fn — see matcher/matcher.go).
+	// the matcher compares pre-masked against pre-masked.
+	// matcher.UserIntentionalMask is the single source of truth for which
+	// modifier bits represent user intent (Cmd | Option | Ctrl | Shift | Fn
+	// — see matcher/matcher.go).
 	masked := spec.Modifiers & matcher.UserIntentionalMask
+
+	// The unlock matcher. Built once, here, from a copy of the Spec —
+	// matcher.Sequence is immutable after construction and MatchTail is
+	// pure, so the poller goroutine can use it without any synchronisation.
+	// A ring reset happens inside eventtap_install_c below, so the poller
+	// starts against an empty ring no matter what a previous Install left
+	// behind.
+	seqMatcher := matcher.NewSequence([]hotkey.Spec{{
+		Modifiers: masked,
+		KeyCode:   spec.KeyCode,
+	}})
 
 	var cTap C.CFMachPortRef
 	rc := C.eventtap_install_c(C.uint64_t(masked), C.uint16_t(spec.KeyCode), &cTap)
@@ -645,6 +734,12 @@ func installInternal(spec hotkey.Spec, sink chan<- struct{}, log *slog.Logger) (
 	gestureUninstallFn := func() {
 		C.gesturetap_uninstall_c()
 	}
+	// wipeRingFn captures nothing — the ring is a file-scope static in
+	// tap_darwin.m, keyed by file scope exactly like the gesture-tap
+	// closures above. Release invokes it at the end of Step 1.
+	wipeRingFn := func() {
+		C.eventtap_wipe_ring()
+	}
 
 	r := &Releaser{
 		log:                log,
@@ -655,14 +750,21 @@ func installInternal(spec hotkey.Spec, sink chan<- struct{}, log *slog.Logger) (
 		uninstallFn:        uninstallFn,
 		gestureDisableFn:   gestureDisableFn,
 		gestureUninstallFn: gestureUninstallFn,
+		wipeRingFn:         wipeRingFn,
 	}
 
-	// Poller goroutine: reads `matched` on a 10ms ticker, on success
-	// forwards a struct{} send to `sink` (non-blocking). The
-	// goroutine exits cleanly when stopPoller is closed.
+	// Poller goroutine: probes the keystroke counter on a 10ms ticker,
+	// snapshots the ring only when it has moved, matches in pure Go, and on
+	// a match forwards a struct{} send to `sink` (non-blocking) and
+	// returns. It also exits cleanly when stopPoller is closed.
+	//
+	// `seq` and `snapshot` are passed as function values rather than called
+	// directly inside pollSequence: that keeps the poller itself free of
+	// cgo, so poller_test.go can drive the whole matching path against a
+	// fake ring without standing up a CGEventTap.
 	go func() {
 		defer close(pollerDone)
-		pollMatched(stopPoller, &matched, sink, log)
+		pollSequence(stopPoller, seq, snapshot, seqMatcher, sink, log)
 	}()
 
 	return r, cTap, nil
@@ -678,7 +780,7 @@ func installInternal(spec hotkey.Spec, sink chan<- struct{}, log *slog.Logger) (
 //	Step 3: CFRelease(source+tap)  ┘  (both bundled in eventtap_uninstall_c)
 //	Step 4: watchdog_stop          (dispatch_source_cancel + Go poller drain)
 //	Step 5: wake_observer_remove   (NSWorkspace observers + g_observed_tap=NULL)
-//	(plus internal Steps 6/7: matched-key poller close + drain).
+//	(plus internal Steps 6/7: unlock-code poller close + drain).
 //
 // calls this from cmd/dndmode/main.go Step 16 (after controller,
 // before sup.Wait). The single returned Releaser is pushed onto
