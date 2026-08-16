@@ -225,6 +225,11 @@ hotkey: Ctrl+Option+Cmd+X
 unlock_code: s w o r d f i s h
 ```
 
+Renaming is not always enough: **spaces separate steps** in `unlock_code`, so
+any spaces around the `+` have to go. `hotkey: Ctrl + Option + X` is a legal
+chord, but as an `unlock_code` it reads as five steps - the first of them a bare
+`Ctrl` - and startup fails with exit `1`.
+
 Setting **both** keys is a startup error (exit `1`) - an ambiguous unlock
 secret is not resolvable, and guessing wrong here locks the machine with a code
 the owner does not believe is in effect. See

@@ -227,6 +227,18 @@ func ParseSequence(s string) ([]Spec, error) {
 	for i, f := range fields {
 		spec, err := ParseStep(f)
 		if err != nil {
+			// A modifier-only step is the shape a migrated `hotkey` value takes
+			// when it was written with spaces around '+' ("Ctrl + Option + X"):
+			// ParseStep trims those spaces INSIDE a step, but here whitespace is
+			// the step SEPARATOR, so field 1 is a bare "Ctrl" and the message
+			// ("no non-modifier key") reads as nonsense against a value that
+			// plainly contains one. The hint branches on the error CATEGORY, not
+			// on the input text — the step itself stays out of the message, so a
+			// parse error still cannot echo a fragment of the secret.
+			if errors.Is(err, ErrModifierOnly) {
+				return nil, fmt.Errorf("step %d: %w (spaces separate steps here, so a "+
+					"migrated hotkey must lose any spaces around its '+')", i+1, err)
+			}
 			return nil, fmt.Errorf("step %d: %w", i+1, err)
 		}
 		steps = append(steps, spec)

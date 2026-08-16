@@ -71,8 +71,10 @@ func (s *Supervisor) Wait() { s.wg.Wait() }
 func (s *Supervisor) run(ctx context.Context) {
 	sigCh := make(chan os.Signal, 1) // cap=1; P1.2 — never unbuffered
 	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM, syscall.SIGHUP)
-	defer signal.Stop(sigCh) // P1.4: prevent leak; second SIGINT after this
-	// goes to default Go handler (fast exit).
+	defer signal.Stop(sigCh) // P1.4: prevent leak. A second SIGINT after this
+	// is absorbed by main's signal.NotifyContext registration, which outlives
+	// the whole cleanup chain on purpose (see Step 3 in cmd/dndmode/main.go) —
+	// it must NOT reach the default disposition and kill us mid-teardown.
 
 	select {
 	case sig := <-sigCh:

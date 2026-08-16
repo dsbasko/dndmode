@@ -1254,6 +1254,59 @@ func TestResolveUnlockCode_ErrorNeverEchoesSecret(t *testing.T) {
 	}
 }
 
+// The YAML layer must honour the same no-echo contract as the parser: a
+// syntax error in config.yml is reported by [line:col] and category, never by
+// quoting the offending source. goccy's pretty formatter prints the lines
+// AROUND the error, and in this file that is nearly always
+// `unlock_code: <the secret>` — so an unrelated typo (a misspelled key, a bad
+// indent) would print the whole unlock code to stderr, on exactly the recovery
+// path the README recommends. Mirrors
+// TestResolveUnlockCode_ErrorNeverEchoesSecret one layer up: EVERY token of the
+// secret is searched for, not a sample.
+func TestLoader_Load_ParseErrorNeverEchoesSecret(t *testing.T) {
+	const secret = "zebra quokka narwhal axolotl"
+
+	cases := []struct {
+		name string
+		body string
+	}{
+		{"unknown key on a later line", "unlock_code: " + secret + "\nuntrusted_field: payload\n"},
+		{"bad indent under the secret", "unlock_code: " + secret + "\n  bad: indent\n"},
+		{"secret opens with a YAML indicator", "unlock_code: - " + secret + "\n"},
+		{"unterminated quote around the secret", "unlock_code: \"" + secret + "\n"},
+		{"tab in the secret line", "unlock_code:\t" + secret + "\n\tbad: tab\n"},
+	}
+
+	for _, tt := range cases {
+		t.Run(tt.name, func(t *testing.T) {
+			td := newTestDeps(t)
+			if err := os.MkdirAll(filepath.Dir(td.path), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(td.path, []byte(tt.body), 0o600); err != nil {
+				t.Fatal(err)
+			}
+
+			_, _, err := td.loader.Load()
+			if err == nil {
+				t.Fatal("expected a parse error")
+			}
+			msg := err.Error()
+			for _, tok := range strings.Fields(secret) {
+				if strings.Contains(msg, tok) {
+					t.Errorf("parse error echoes the secret token %q: %v", tok, err)
+				}
+			}
+			// The location must survive the redaction — without [line:col]
+			// the diagnostic would be unusable, which is the pressure that
+			// would push someone back to inclSource=true.
+			if !regexp.MustCompile(`\[\d+:\d+\]`).MatchString(msg) {
+				t.Errorf("error message missing line:col [L:C] format: %q", msg)
+			}
+		})
+	}
+}
+
 // A config carrying unlock_code survives the YAML round-trip through Load()
 // and resolves into the sequence it denotes.
 func TestLoader_Load_UnlockCodeRoundTrip(t *testing.T) {

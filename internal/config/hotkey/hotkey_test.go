@@ -722,6 +722,40 @@ func TestParseSequence_Hotkey_Errors(t *testing.T) {
 	}
 }
 
+// The documented migration path (rename `hotkey:` to `unlock_code:`) has one
+// trap: ParseStep trims whitespace INSIDE a step, so "Ctrl + Option + Cmd + X"
+// is a legal legacy chord — but whitespace is the STEP separator in a sequence,
+// so the same text reads as seven steps, the first a bare "Ctrl". Without the
+// hint the resulting message ("no non-modifier key") reads as nonsense against
+// a value that plainly contains one, and the no-echo policy means the user
+// cannot see what the parser saw. Pins both halves of the asymmetry, and that
+// the hint is added without quoting any part of the value.
+func TestParseSequence_Hotkey_SpacedLegacyChordExplainsTheSeparator(t *testing.T) {
+	const spaced = "Ctrl + Option + Cmd + X"
+
+	if _, err := hotkey.Parse(spaced); err != nil {
+		t.Fatalf("legacy Parse(%q) = %v, want nil (this is the value being migrated)", spaced, err)
+	}
+
+	_, err := hotkey.ParseSequence(spaced)
+	if !errors.Is(err, hotkey.ErrModifierOnly) {
+		t.Fatalf("got %v, want errors.Is(err, ErrModifierOnly)", err)
+	}
+	msg := err.Error()
+	if !strings.Contains(msg, "step 1") {
+		t.Errorf("error %q must name the failing step position (step 1)", msg)
+	}
+	if !strings.Contains(msg, "spaces separate steps") {
+		t.Errorf("error %q must explain the step separator — it is the only way "+
+			"a user can act on it without seeing their own value", msg)
+	}
+	for _, tok := range []string{"Ctrl", "Option", "Cmd"} {
+		if strings.Contains(msg, tok) {
+			t.Errorf("error message echoes the secret token %q: %s", tok, msg)
+		}
+	}
+}
+
 func assertSequence(t *testing.T, got, want []hotkey.Spec) {
 	t.Helper()
 	if len(got) != len(want) {

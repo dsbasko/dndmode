@@ -176,25 +176,25 @@ func parseStyleFlag(s string) (string, *float64, string, error) {
 }
 
 // armTimer starts a one-shot timer that auto-disables dndmode after d by calling
-// stop — the signal.NotifyContext cancel — so expiry drives the EXACT clean
+// cancel — the ctx cancel from Step 3, NOT the NotifyContext stop, so the timer
+// never unregisters a signal handler — so expiry drives the EXACT clean
 // shutdown path as the unlock code or a signal: ctx cancels → cocoa.RunApp's
 // watcher posts the synthetic stop event and [NSApp run] returns nil (full mode)
 // / the caffeinate select wakes on ctx.Done() (none mode) → LIFO Cleanup → exit
 // 0. A non-positive d disarms the timer (returns a no-op func) so callers can
 // pass an unresolved --timer unconditionally. The returned func stops the timer
 // and MUST be deferred by the caller: an early exit (unlock code/signal before expiry)
-// would otherwise leave a stray AfterFunc goroutine armed to fire stop after
-// run() has already returned. stop is idempotent (supervisor sync.Once +
-// ctx.cancel), so a benign race between a near-simultaneous signal and the timer
-// is harmless. time.AfterFunc runs its callback on its own goroutine; stop is
-// documented thread-safe.
-func armTimer(d time.Duration, stop func(), log *slog.Logger) func() {
+// would otherwise leave a stray AfterFunc goroutine armed to fire cancel after
+// run() has already returned. cancel is idempotent, so a benign race between a
+// near-simultaneous signal and the timer is harmless. time.AfterFunc runs its
+// callback on its own goroutine; context.CancelFunc is documented thread-safe.
+func armTimer(d time.Duration, cancel context.CancelFunc, log *slog.Logger) func() {
 	if d <= 0 {
 		return func() {}
 	}
 	t := time.AfterFunc(d, func() {
 		log.Info("auto-disable timer elapsed; shutting down", slog.Duration("after", d))
-		stop()
+		cancel()
 	})
 	return func() { t.Stop() }
 }
@@ -294,6 +294,29 @@ func run() int {
 		}
 	}()
 
+	// --- Signal-handler lifetime (pairs with Step 3 below) ---
+	// The unregister call for signal.NotifyContext is deferred HERE, ~200 lines
+	// before the handlers are actually installed, because defer order is what
+	// decides whether a second Ctrl-C is a no-op or a kill. Deferring it at Step
+	// 3 (the natural place) registers it AFTER the rs.Cleanup defer below, so
+	// LIFO unwind would unregister the handlers FIRST and run the whole teardown
+	// — overlay, event tap, audio unmute, Focus off, runtime.json — with SIGINT
+	// back at its default disposition. A second Ctrl-C during that ~100ms window
+	// (the reflex when a program looks slow to quit) would then kill the process
+	// mid-unwind, leaving Focus on, audio muted and runtime.json naming a PID
+	// that no longer exists, which the next launch reads as a crash. Registered
+	// before rs.Cleanup, it runs after it, so the handlers outlive every
+	// releaser. TestAcceptance_DoubleSIGINT_NoOp pins the no-op semantics.
+	//
+	// stopSignals stays nil on every path that returns before Step 3 (bad flags,
+	// --help, platform check); the nil guard is what makes that safe.
+	var stopSignals func()
+	defer func() {
+		if stopSignals != nil {
+			stopSignals()
+		}
+	}()
+
 	// --- Step 1: Parse flags (stdlib flag) ---
 	// --debug un-silences ALL console output for the run (banners + diagnostics +
 	// debug-level logging). Default OFF = silent; only the exit code speaks.
@@ -379,7 +402,7 @@ func run() int {
 	// gatedWriter above).
 	unlockSteps, unlockSource, err := config.ResolveUnlockCode(&cfg)
 	if err != nil {
-		_, _ = fmt.Fprintf(errW, "dndmode: %v. Fix ~/.config/dndmode/config.yml.\n", err)
+		_, _ = fmt.Fprintf(errW, "dndmode: %v. Fix %s.\n", err, cfgPath)
 		return exitConfigErr
 	}
 
@@ -500,15 +523,31 @@ func run() int {
 
 	// --- Step 3 (Phase 3): signal-driven ctx ---
 	// signal.NotifyContext converts SIGINT/SIGTERM/SIGHUP into ctx cancellation.
-	// defer stop() unregisters the signal handlers on shutdown.
+	// stop() unregisters the signal handlers — and it is the ONLY thing allowed
+	// to, which is why the shutdown request threaded through the rest of run()
+	// is `cancel` (the plain parent cancel) and never `stop`. Its deferred call
+	// lives at the top of run() so it runs AFTER the cleanup chain, not before.
 	//
-	// stopper wraps the cancel func returned by signal.NotifyContext.
+	// The distinction is load-bearing, not cosmetic. stop() both cancels AND
+	// calls signal.Stop, so handing it to the supervisor as the Stopper would
+	// tear down the LAST SIGINT registration the instant shutdown begins:
+	// supervisor.run drops its own registration on return (defer signal.Stop),
+	// and a second Ctrl-C — the reflex when a program looks slow to quit —
+	// would then hit the DEFAULT disposition and kill the process mid-cleanup,
+	// with Focus still on, audio still muted and runtime.json still on disk
+	// naming a live PID. Keeping the NotifyContext registration alive until
+	// run() returns makes that second signal a no-op instead
+	// (TestAcceptance_DoubleSIGINT_NoOp pins it).
+	//
+	// stopper wraps this cancel func.
 	// supervisor.go retains its own signal.Notify(sigCh, ...) — double subscription is intentional:
 	// Go runtime broadcasts signals to all registered channels; cancel is idempotent;
-	// supervisor's fireStop is sync.Once-guarded (P1); both paths unregister on shutdown.
+	// supervisor's fireStop is sync.Once-guarded (P1).
 	// See <signal_subscription_rationale> for full rationale.
-	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM, syscall.SIGHUP)
-	defer stop()
+	rootCtx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	ctx, stop := signal.NotifyContext(rootCtx, syscall.SIGINT, syscall.SIGTERM, syscall.SIGHUP)
+	stopSignals = stop // deferred at the top of run() — see the comment there
 
 	// --- Step 8 (Phase 3): Platform check (exit 2) ---
 	ver := permissions.CurrentOSVersion()
@@ -538,7 +577,7 @@ func run() int {
 	// top of run) still apply, so the caffeinate child is torn down and the
 	// stdout cleanup banner still prints on exit.
 	if overlayStyle == config.OverlayStyleNone {
-		return runCaffeinateOnly(ctx, stop, cfg.AllowDisplaySleep, timerDur, rs, log, outW, errW)
+		return runCaffeinateOnly(ctx, cancel, cfg.AllowDisplaySleep, timerDur, rs, log, outW, errW)
 	}
 
 	// --- Step 8b: resolve effective mute / focus (flag overrides config) ---
@@ -847,7 +886,7 @@ func run() int {
 	// supervisor.Start drives a goroutine that listens to its own signal.Notify
 	// channel and to ctx.Done — both paths converge on cancel; see Step 3
 	// rationale comment for why this double subscription is safe.
-	stopper := &cancelStopper{cancel: stop}
+	stopper := &cancelStopper{cancel: cancel}
 	sup := supervisor.New(log, stopper)
 	sup.Start(ctx)
 
@@ -905,11 +944,11 @@ func run() int {
 	// When --timer was given (timerDur > 0), start the countdown NOW — the moment
 	// dndmode is fully active — not at launch, so the time the operator spent
 	// granting permissions never eats into the deadline. On expiry armTimer cancels
-	// ctx (via stop, the signal.NotifyContext cancel), driving the SAME clean
+	// ctx (via cancel, NOT the NotifyContext stop — see Step 3), driving the SAME clean
 	// shutdown as the unlock code or SIGINT (Step 19's cocoa.RunApp returns nil →
 	// sup.Wait → deferred LIFO Cleanup → exit 0). defer disarms it so an EARLY exit
 	// (unlock code/signal before expiry) leaves no stray AfterFunc goroutine armed.
-	stopTimer := armTimer(timerDur, stop, log)
+	stopTimer := armTimer(timerDur, cancel, log)
 	defer stopTimer()
 
 	// --- Step 18 (Phase 3): Active state banner (P2: AFTER controller create) ---
@@ -969,10 +1008,11 @@ func run() int {
 // --debug or `debug: true`); the caffeinate-only path prints its active banner
 // and any start error through them so none mode honors the same gate.
 //
-// stop is the signal.NotifyContext cancel; timerDur (from --timer) arms the same
+// cancel is the Step 3 ctx cancel (NOT the NotifyContext stop — this path must
+// not unregister a signal handler either); timerDur (from --timer) arms the same
 // auto-disable countdown as the full path — on expiry armTimer cancels ctx and
 // the select below wakes on ctx.Done() for a clean exit 0. timerDur == 0 disarms.
-func runCaffeinateOnly(ctx context.Context, stop func(), allowDisplaySleep bool, timerDur time.Duration, rs *state.RestoreState, log *slog.Logger, outW, errW io.Writer) int {
+func runCaffeinateOnly(ctx context.Context, cancel context.CancelFunc, allowDisplaySleep bool, timerDur time.Duration, rs *state.RestoreState, log *slog.Logger, outW, errW io.Writer) int {
 	proc, err := caffeinate.Start(ctx, os.Getpid(), allowDisplaySleep, log)
 	if err != nil {
 		// A signal can cancel ctx in the small window before caffeinate.Start
@@ -990,10 +1030,10 @@ func runCaffeinateOnly(ctx context.Context, stop func(), allowDisplaySleep bool,
 	rs.Push(proc) // released on Cleanup (LIFO); Name() == "caffeinate"
 
 	// Arm the per-run auto-disable timer for none mode too (--timer works for any
-	// overlay_style). Same mechanism as the full path: on expiry stop() cancels
+	// overlay_style). Same mechanism as the full path: on expiry cancel() cancels
 	// ctx, the select below wakes on ctx.Done(), Cleanup tears down caffeinate →
 	// exit 0. Disarmed on return so an early SIGINT leaves no armed timer.
-	stopTimer := armTimer(timerDur, stop, log)
+	stopTimer := armTimer(timerDur, cancel, log)
 	defer stopTimer()
 
 	_, _ = fmt.Fprintln(outW, "dndmode: active (caffeinate-only, no overlay). press Ctrl-C.")

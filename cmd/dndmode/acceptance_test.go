@@ -613,7 +613,10 @@ func runUnlockRejection(t *testing.T, yaml string, wanted, notWanted []string) {
 func TestAcceptance_BothUnlockKeys_ExitOne(t *testing.T) {
 	runUnlockRejection(t,
 		"unlock_code: s w o r d f i s h\nhotkey: Ctrl+Option+Cmd+X\n",
-		[]string{"both unlock_code and the deprecated hotkey", "Fix ~/.config/dndmode/config.yml"},
+		// The path must be the REAL config path ($HOME is a temp dir here),
+		// not a hardcoded ~/... literal — the operator has to be able to
+		// open the file the diagnostic names.
+		[]string{"both unlock_code and the deprecated hotkey", ".config/dndmode/config.yml"},
 		// Neither key's value may surface in the diagnostic.
 		[]string{"s w o r d f i s h", "Ctrl+Option+Cmd+X"},
 	)

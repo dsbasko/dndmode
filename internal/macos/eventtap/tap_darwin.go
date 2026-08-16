@@ -606,8 +606,10 @@ func installInternal(steps []hotkey.Spec, sink chan<- struct{}, log *slog.Logger
 	// Pre-mask every step's modifiers with the user-intentional mask so the
 	// matcher compares pre-masked against pre-masked.
 	// matcher.UserIntentionalMask is the single source of truth for which
-	// modifier bits represent user intent (Cmd | Option | Ctrl | Shift | Fn
-	// — see matcher/matcher.go).
+	// modifier bits represent user intent (Cmd | Option | Ctrl | Shift — and
+	// deliberately NOT Fn, which macOS raises on the whole function-key group
+	// by itself; see the mask's doc comment in matcher/matcher.go before
+	// "restoring" it here).
 	//
 	// The copy is deliberate: the caller's slice is not retained, so a
 	// caller that reuses or mutates its backing array after Install cannot

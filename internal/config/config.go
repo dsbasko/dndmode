@@ -409,8 +409,8 @@ func (l *Loader) Path() string { return l.path }
 // Load returns the parsed config. If the file does not exist, it writes a
 // default config to disk (creating parent dirs as needed) and returns the
 // default with created=true. On YAML syntax error, returns a wrapped error
-// whose message contains the goccy-formatted line:col + source snippet
-// .
+// whose message contains the goccy-formatted line:col location — and NOT the
+// offending source line (see the FormatError call for why).
 func (l *Loader) Load() (Config, bool, error) {
 	raw, err := os.ReadFile(l.path)
 	switch {
@@ -428,9 +428,19 @@ func (l *Loader) Load() (Config, bool, error) {
 	// yaml.Strict() rejects unknown YAML keys (mitigation:
 	// forward-compat trojan keys cannot smuggle behavior into v1).
 	if perr := yaml.UnmarshalWithOptions(raw, &cfg, yaml.Strict()); perr != nil {
-		// goccy pretty errors with line:col + source snippet.
+		// goccy pretty errors, line:col ONLY — inclSource=false is a security
+		// decision, not a formatting one. The source snippet quotes the lines
+		// AROUND the error, and in this file the line above almost any error is
+		// `unlock_code: <the secret>`, so a typo in an unrelated key would print
+		// the whole unlock code to stderr. That is the same leak the parser
+		// diagnostics avoid by never echoing a token (see hotkey.ParseStep), and
+		// it is reached by the recovery path the README itself recommends
+		// ("startup dies with a YAML error → run with --debug"). Redacting the
+		// snippet instead was rejected: the value can sit on its own line under a
+		// broken mapping, where no line-prefix rule can find it. [line:col] is
+		// what actually locates the typo; the user has the file open anyway.
 		// color=false in v1 (P1.6 — TTY detection deferred to Phase 6).
-		pretty := yaml.FormatError(perr, false /*colored*/, true /*inclSource*/)
+		pretty := yaml.FormatError(perr, false /*colored*/, false /*inclSource*/)
 		return Config{}, false, fmt.Errorf("parse config %s:\n%s", l.path, pretty)
 	}
 	return cfg, false, nil
@@ -511,8 +521,9 @@ unlock_code: %s
 # --- hotkey (DEPRECATED) -----------------------------------------------------
 # The pre-sequence single-combination key. Still read, so upgrading does not
 # break an existing config, but setting BOTH it and unlock_code is an error
-# (an ambiguous unlock secret is not resolvable). Migrate by renaming the key:
-# any value valid here is valid as a 1-step unlock_code.
+# (an ambiguous unlock secret is not resolvable). Migrate by renaming the key —
+# with one caveat: spaces separate STEPS in unlock_code, so any spaces around the
+# '+' must go ('Ctrl + X' is legal here, but reads as three steps below).
 # hotkey: Ctrl+Option+Cmd+X
 
 # --- overlay_style -----------------------------------------------------------
