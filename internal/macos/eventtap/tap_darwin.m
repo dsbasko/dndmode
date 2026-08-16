@@ -616,6 +616,21 @@ int eventtap_install_c(CFMachPortRef *out_tap) {
 // thread-safe so it can be called from the main goroutine teardown path even
 // though the loop runs on the worker thread.
 //
+// CFRetain, and it is load-bearing rather than defensive. A run loop is
+// owned by its thread: CoreFoundation keeps it in thread-local storage and
+// the TSD finalizer releases it when the thread dies. The worker thread dies
+// on its own inside `eventtap_uninstall_c` — `CFRunLoopRemoveSource` there
+// takes the LAST source off the loop (the gesture source was detached one
+// step earlier), and the drain's `CFRunLoopWakeUp` makes the now-empty loop
+// return from `CFRunLoopRun` on that same iteration. The worker goroutine
+// then returns, Go reaps its LockOSThread thread, and without a reference of
+// our own the loop is deallocated while `eventtap_uninstall_c` is still
+// several CF calls away from its `CFRunLoopStop(g_worker_runloop)` — a
+// use-after-free racing `CGEventTapEnable`'s WindowServer round-trip, which
+// writes through a freed object rather than trapping on it. Holding a
+// reference makes the pointer valid no matter when the thread exits;
+// `CFRunLoopStop` on a loop that already finished is a no-op.
+//
 // `out_loop` mirrors `g_worker_runloop` back to Go so the Releaser struct
 // can hold a Go-side opaque pointer alongside the C-side static, which lets
 // the unit tests assert that the field is non-nil after Install.
@@ -626,7 +641,7 @@ int eventtap_install_c(CFMachPortRef *out_tap) {
 int eventtap_register_worker_runloop(CFMachPortRef tap, CFRunLoopRef *out_loop) {
     (void)tap; // tap is captured via the static `g_tap` set in install_c.
 
-    g_worker_runloop = CFRunLoopGetCurrent();
+    g_worker_runloop = (CFRunLoopRef)CFRetain(CFRunLoopGetCurrent());
     if (g_source != NULL) {
         CFRunLoopAddSource(g_worker_runloop, g_source, kCFRunLoopCommonModes);
     }
@@ -745,7 +760,18 @@ int eventtap_uninstall_c(CFMachPortRef tap) {
         // main goroutine while the worker goroutine is blocked in
         // CFRunLoopRun. The worker loop wakes, Run() returns, the goroutine
         // exits, and Go reaps its locked OS thread.
+        //
+        // It is also reached in the case where the loop has ALREADY returned
+        // on its own: the drain above wakes a loop whose last source we just
+        // removed, and an empty mode ends `CFRunLoopRun`. That is a no-op
+        // here rather than a use-after-free only because
+        // `eventtap_register_worker_runloop` CFRetained the loop — see the
+        // paragraph there. The matching CFRelease is below, on BOTH the
+        // drained and the timed-out path: the reference exists to keep this
+        // pointer valid for the CFRunLoopStop call, and nothing reads
+        // g_worker_runloop after it (no callback ever does).
         CFRunLoopStop(g_worker_runloop);
+        CFRelease(g_worker_runloop);
         g_worker_runloop = NULL;
     }
 

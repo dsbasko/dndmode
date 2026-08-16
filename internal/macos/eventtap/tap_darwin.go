@@ -1014,12 +1014,17 @@ func installInternal(steps []hotkey.Spec, sink chan<- struct{}, log *slog.Logger
 	}
 	// wipeRingFn captures nothing — the ring is a file-scope static in
 	// tap_darwin.m, keyed by file scope exactly like the gesture-tap
-	// closures above. Release invokes it at the end of Step 1.
+	// closures above. Release invokes it at the end of Step 3, AFTER the
+	// poller is closed and joined — that ordering is the safety property,
+	// not a detail: a memset landing between eventtap_snapshot's ACQUIRE
+	// load and its memcpy hands a live poller a run of {flags: 0,
+	// keycode: 0} records, and keycode 0 is kVK_ANSI_A, i.e. a spurious
+	// match for a bare-`a` code during teardown. Do not move it earlier.
 	//
 	// The wipe runs ON the worker thread, not here. Release has already
 	// stopped the ring's READER (the poller) by the time this is called, but
 	// the WRITER is a tap callback on the worker thread and the tap source is
-	// still attached to the worker loop at Step 1 — CGEventTapEnable(tap,
+	// still attached to the worker loop at Step 3 — CGEventTapEnable(tap,
 	// false) carries no drain guarantee, and a mach message already queued on
 	// the tap port can produce a callback after any handshake this side could
 	// wait on. A memset issued from this goroutine would therefore be racing

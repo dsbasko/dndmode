@@ -297,8 +297,9 @@ A few notes on behavior:
   outcome only through its [exit code](#exit-codes). This is a security default:
   with `glass` or `none` the terminal stays visible while dndmode runs, and a
   printed banner would leak your unlock code to anyone watching. Even under
-  `--debug` the banner prints only the *number* of steps and which config key
-  they came from - never the code itself. Pass `--debug`
+  `--debug` the banner confirms only *that* a code resolved and which config
+  key it came from (`unlock_code=ok (source=...)`) - never the code itself and
+  never its length, because the length is part of the secret. Pass `--debug`
   (or set `debug: true`) to turn output back on when a run exits non-zero and you
   need to see why.
 - **Invalid flag values** (`--timer 5x`, `--mute banana`, `--style neon`) exit with
@@ -781,9 +782,10 @@ all. Exit with `Ctrl-C` in the terminal that launched it, then check, in order:
    р в** on a Russian layout.
 2. **A modifier you are holding.** A step written without modifiers matches
    only a press with none held. Resting on Cmd or Shift silently breaks it.
-3. **The count.** `--debug` prints `unlock_code=N steps (source=…)` at startup
-   without printing the code itself. If N is not what you expect, the file is
-   not the one you edited.
+3. **The source.** `--debug` prints `unlock_code=ok (source=…)` at startup -
+   never the code and never its length. If it says `source=hotkey` where you
+   expected `source=unlock_code`, the key or the file you edited is not the one
+   in effect; check `config=` on the same line for the path being read.
 4. **Keep typing.** There is no reset and no timeout - matching is on the tail
    of everything typed, so a mistake costs you nothing but a retype.
 

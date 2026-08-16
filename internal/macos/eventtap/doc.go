@@ -147,7 +147,7 @@
 //     confirmed `eventtap_drain_worker_callbacks` handshake — with the
 //     source off the loop, "no callback is running" also means "none can
 //     start", so the drain is conclusive;
-//     the Release Step 1 wipe cannot rely on a drain at all (a mach message
+//     the Release Step 3 wipe cannot rely on a drain at all (a mach message
 //     already queued on the still-attached tap port can produce a callback
 //     after any handshake) and instead runs AS a block on the worker loop
 //     via `eventtap_wipe_ring_on_worker`. The callback is a run-loop callout

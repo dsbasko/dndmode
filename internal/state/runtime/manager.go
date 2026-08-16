@@ -94,7 +94,17 @@ func (m *Manager) Name() string { return "runtime-file" }
 // directory-entry update). Without this cleanup, per-PID-suffixed temp
 // files would accumulate in the user's config dir on the rare cross-
 // volume setup.
+// Concurrency: the whole body runs under `m.mu`, the same mutex Release
+// holds across its os.Remove + released.Store(true). That is what makes the
+// re-arm at the tail meaningful — see the comment there. Locking only around
+// the Store would leave the rename outside the critical section, so a
+// concurrent Release could still slot its os.Remove between the rename and
+// the reset and leave `released == false` with no file on disk. Write never
+// calls Release (or itself), so taking the lock here cannot deadlock.
 func (m *Manager) Write(s Snapshot) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
 	dir := filepath.Dir(m.path)
 	// 0o700: user-private — matches configDirPerm from Phase 1
 	// internal/config/config.go:28. //nolint:gosec // G302: intentional
@@ -142,12 +152,11 @@ func (m *Manager) Write(s Snapshot) error {
 	// restart to show up. Pinned by TestAcceptance_CrashScenario and by
 	// TestManager_WriteAfterReleaseReArmsDeletion.
 	//
-	// Under mu, not a bare Store: a concurrent Release must not interleave
-	// its os.Remove with this reset and leave the flag disagreeing with
-	// what is on disk.
-	m.mu.Lock()
+	// Under mu — held since the top of this function, not grabbed just for
+	// this line: a concurrent Release must not interleave its os.Remove with
+	// the write-then-reset pair and leave the flag disagreeing with what is
+	// on disk.
 	m.released.Store(false)
-	m.mu.Unlock()
 
 	return nil
 }
