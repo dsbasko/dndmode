@@ -3,6 +3,7 @@
 
 #import <CoreFoundation/CoreFoundation.h>
 #import <CoreGraphics/CoreGraphics.h>
+#import "tap_ring.h"  // eventtap_drain_worker_callbacks — the shared prototype
 
 // Session-level trackpad-gesture suppression tap — the SECOND tap of the
 // package, complementing the HID-level tap in tap_darwin.m.
@@ -44,11 +45,27 @@ enum {
 // tap statics in tap_darwin.m (exactly one gesture tap per dndmode process).
 // g_gesture_runloop is the main tap's WORKER run loop (passed into
 // gesturetap_install_c) — both tap sources are serviced by the same locked
-// OS thread, so the gesture tap needs no thread of its own. Not volatile for
-// the same reason g_tap isn't: the disable-first Release ordering stops
-// callbacks before teardown, and cross-thread re-enable callers are gated by
-// the volatile g_observed_tap guard that precedes them (see
-// gesturetap_reenable).
+// OS thread, so the gesture tap needs no thread of its own.
+//
+// g_gesture_tap is accessed through `__atomic_*` with RELAXED ordering
+// EVERYWHERE, for the same reason g_tap is in tap_darwin.m: it is read from
+// threads other than the one that writes it. gesturetap_callback reads it on
+// the worker thread, gesturetap_reenable / gesturetap_disable_c read it from
+// the watchdog's GCD handler and the NSWorkspace observers, and
+// gesturetap_uninstall_c writes NULL — including on the drain-TIMEOUT
+// branch, i.e. precisely when no callback can be proven idle. Plain accesses
+// on both ends of that would be a C data race; the atomic pair makes it
+// well-defined, and reading once into a local stops the compiler from
+// rematerialising the load between the NULL check and the use (which would
+// turn a guarded call into `CGEventTapEnable(NULL, true)`). Volatile would
+// NOT be enough here — it forbids caching, not tearing, and carries no
+// memory-model guarantee. RELAXED is sufficient because the pointer is the
+// only thing published, and on arm64 it is the same instruction a plain
+// access would emit.
+//
+// g_gesture_source and g_gesture_runloop stay plain: neither is read by any
+// callback, and install/teardown are serialised onto one goroutine by the
+// Go-side Release guard.
 static CFMachPortRef      g_gesture_tap     = NULL;
 static CFRunLoopSourceRef g_gesture_source  = NULL;
 static CFRunLoopRef       g_gesture_runloop = NULL;
@@ -68,8 +85,24 @@ static CGEventRef gesturetap_callback(CGEventTapProxy proxy,
 
     if (type == kCGEventTapDisabledByTimeout ||
         type == kCGEventTapDisabledByUserInput) {
-        if (g_gesture_tap != NULL) {
-            CGEventTapEnable(g_gesture_tap, true);
+        // One RELAXED atomic load into a local — see the g_gesture_tap
+        // declaration comment for why both halves of that matter.
+        CFMachPortRef tap = __atomic_load_n(&g_gesture_tap, __ATOMIC_RELAXED);
+        if (tap != NULL) {
+            CGEventTapEnable(tap, true);
+            // Teardown re-check — identical contract to the main callback's
+            // (tap_darwin.m): on the drain-TIMEOUT path this callback may be
+            // live, its load above may predate the NULL published by
+            // gesturetap_uninstall_c, and the enable would then land after
+            // teardown's own disable and after CFRunLoopRemoveSource —
+            // leaving an enabled tap whose source is detached, i.e. gesture
+            // events posted to a port nobody services. A NULL here means
+            // teardown ran, so we undo our own enable. Dereferencing `tap` is
+            // safe: the CFReleases are skipped on exactly the path where this
+            // callback can still be running.
+            if (__atomic_load_n(&g_gesture_tap, __ATOMIC_RELAXED) == NULL) {
+                CGEventTapEnable(tap, false);
+            }
         }
         return event;
     }
@@ -102,21 +135,25 @@ int gesturetap_install_c(CFRunLoopRef loop) {
         CGEventMaskBit(kCGSEventGesture) |
         CGEventMaskBit(kCGSEventDockControl);
 
-    g_gesture_tap = CGEventTapCreate(
+    // Local first, published through one atomic store: g_gesture_tap has no
+    // plain accesses anywhere in this file, and a single one would re-open
+    // the race the callback's atomic load exists to close.
+    CFMachPortRef tap = CGEventTapCreate(
         kCGSessionEventTap,          // gestures are session-synthesized — see header comment
         kCGHeadInsertEventTap,       // ahead of the Dock's consumption
         kCGEventTapOptionDefault,    // suppression-capable (NOT ListenOnly)
         mask,
         gesturetap_callback,
         NULL);
-    if (g_gesture_tap == NULL) {
+    if (tap == NULL) {
         return 3;
     }
+    __atomic_store_n(&g_gesture_tap, tap, __ATOMIC_RELAXED);
 
-    g_gesture_source = CFMachPortCreateRunLoopSource(kCFAllocatorDefault, g_gesture_tap, 0);
+    g_gesture_source = CFMachPortCreateRunLoopSource(kCFAllocatorDefault, tap, 0);
     if (g_gesture_source == NULL) {
-        CFRelease(g_gesture_tap);
-        g_gesture_tap = NULL;
+        CFRelease(tap);
+        __atomic_store_n(&g_gesture_tap, NULL, __ATOMIC_RELAXED);
         return 4;
     }
 
@@ -126,7 +163,7 @@ int gesturetap_install_c(CFRunLoopRef loop) {
 
     // CGEventTapCreate returns a DISABLED tap — enable explicitly, same
     // pitfall as the main tap (silent no-callback failure otherwise).
-    CGEventTapEnable(g_gesture_tap, true);
+    CGEventTapEnable(tap, true);
     return 0;
 }
 
@@ -135,8 +172,9 @@ int gesturetap_install_c(CFRunLoopRef loop) {
 // with the keyboard) even if the CF teardown below were to fail. Idempotent,
 // nil-safe.
 void gesturetap_disable_c(void) {
-    if (g_gesture_tap != NULL) {
-        CGEventTapEnable(g_gesture_tap, false);
+    CFMachPortRef tap = __atomic_load_n(&g_gesture_tap, __ATOMIC_RELAXED);
+    if (tap != NULL) {
+        CGEventTapEnable(tap, false);
     }
 }
 
@@ -148,22 +186,69 @@ void gesturetap_disable_c(void) {
 // before uninstallFn); TestReleaser_Release_DisableBeforeUninstall guards
 // the full four-step sequence.
 //
+// The drain between RemoveSource and the CFReleases is the same handshake
+// eventtap_uninstall_c runs, and it is needed here for the same reason: this
+// tap has a callback of its own, it is dispatched on the same worker loop,
+// and its self-heal branch DEREFERENCES g_gesture_tap
+// (`CGEventTapEnable(g_gesture_tap, true)`). Releasing the mach port while
+// such a callback is in flight is a use-after-free. Disabling the tap at
+// Release Step 1 does not prevent it — Apple documents no drain guarantee
+// for CGEventTapEnable — and neither does any drain the main tap runs
+// LATER, since eventtap_uninstall_c is called after this function returns.
+// Detaching the source first is what makes the drain conclusive: once the
+// source is off the loop no further callback can be dispatched, so a
+// confirmed drain means none is running and none will be.
+//
+// Returns 0 normally, 1 when that drain timed out — in which case the source
+// and tap are LEFT RETAINED rather than released, exactly as in
+// eventtap_uninstall_c: a leaked mach port on a once-per-exit path is
+// strictly cheaper than a possible use-after-free, and the Go caller logs
+// the 1 at WARN so it is not silent — this function is only reachable from
+// a teardown whose worker loop is alive, so a drain that times out there is
+// a fault rather than an expected outcome.
+//
 // Idempotent: nil-checks on every path — safe to call with nothing
 // installed or after a prior call.
-void gesturetap_uninstall_c(void) {
+int gesturetap_uninstall_c(void) {
     if (g_gesture_runloop != NULL && g_gesture_source != NULL) {
         CFRunLoopRemoveSource(g_gesture_runloop, g_gesture_source, kCFRunLoopCommonModes);
     }
-    if (g_gesture_source != NULL) {
-        CFRelease(g_gesture_source);
-        g_gesture_source = NULL;
+    int drained = eventtap_drain_worker_callbacks();
+    CFMachPortRef tap = __atomic_load_n(&g_gesture_tap, __ATOMIC_RELAXED);
+    // Publish the teardown BEFORE the final disable, mirroring
+    // eventtap_uninstall_c: the callback's post-enable re-check reads this
+    // location, and a NULL that landed after our disable would let a live
+    // callback's re-enable be the last word — an enabled tap with a detached
+    // source. With the NULL first, either the re-check sees it and undoes the
+    // enable, or the enable preceded our disable and the disable wins.
+    //
+    // ATOMIC because on the timeout path this is a genuinely concurrent
+    // write: `drained != 0` means a callback may be executing, and that
+    // callback loads the same location.
+    __atomic_store_n(&g_gesture_tap, NULL, __ATOMIC_RELAXED);
+    if (tap != NULL) {
+        // Safe on both paths — the port is still retained here either way.
+        CGEventTapEnable(tap, false);
     }
-    if (g_gesture_tap != NULL) {
-        CGEventTapEnable(g_gesture_tap, false);
-        CFRelease(g_gesture_tap);
-        g_gesture_tap = NULL;
+    if (drained == 0) {
+        if (g_gesture_source != NULL) {
+            CFRelease(g_gesture_source);
+        }
+        if (tap != NULL) {
+            CFRelease(tap);
+        }
     }
+    // g_gesture_tap was nulled above, before the disable — see the comment
+    // there for why that ordering is load-bearing. It is nulled on both
+    // paths: a late callback that still reaches its self-heal branch reads
+    // NULL and skips it, and a hypothetical re-Install starts clean instead
+    // of inheriting a handle to an abandoned tap.
+    //
+    // g_gesture_source and g_gesture_runloop stay plain — no callback reads
+    // either.
+    g_gesture_source = NULL;
     g_gesture_runloop = NULL;
+    return drained;
 }
 
 // gesturetap_reenable is the self-heal hook shared with the watchdog probe
@@ -171,13 +256,112 @@ void gesturetap_uninstall_c(void) {
 // (wake_darwin.m): wherever the main tap gets re-enabled after sleep or a
 // silent disable, the gesture tap is re-enabled on the same cadence.
 // Nil-safe no-op when the gesture tap is not installed or already torn
-// down. Every caller runs its volatile g_observed_tap NULL-guard FIRST, so
-// a Release in progress (NULL written at Step 1) also suppresses late
-// re-enables of this tap. The gesture tap has no failure counter of its
-// own: the shared silent-disable failure mode (ad-hoc re-sign TCC race)
-// kills both taps together, and the main tap's counter is the exit signal.
+// down. Every caller runs its g_observed_tap NULL-guard FIRST, so a Release
+// in progress (NULL written at Step 1) also suppresses late re-enables of
+// this tap. The gesture tap has no failure counter of its own: the shared
+// silent-disable failure mode (ad-hoc re-sign TCC race) kills both taps
+// together, and the main tap's counter is the exit signal.
+//
+// LIFETIME: the guard above cannot be what keeps the load below safe — a
+// caller that read a non-NULL pointer and was then descheduled resumes
+// holding a raw CFMachPortRef, and no later store affects a pointer already
+// in a register. Two mechanisms cover the two callers, mirroring exactly
+// what protects the main tap (see the g_observed_tap comment in
+// watchdog_darwin.m):
+//
+//   1. ORDER, for the wake / session-active observers. Their blocks run on
+//      the main queue and `wake_observer_remove` is main-thread-only, so
+//      `Releaser.Release` — which calls it at Step 2, before this port is
+//      released at Step 4 — cannot be running concurrently with one.
+//   2. RETAIN, for the watchdog. Its drain (`watchdog_stop`) is BOUNDED:
+//      on timeout it logs a WARN and teardown proceeds, so order alone
+//      leaves a descheduled GCD handler holding this pointer across the
+//      CFRelease below. `watchdog_start` therefore takes its own reference
+//      via `gesturetap_retain_current` and drops it from the source's
+//      cancel handler, which libdispatch runs only after the last handler
+//      invocation has returned — so the reference outlives every handler by
+//      construction, drain timeout or not.
+//
+// Both are load-bearing. Dropping (2) on the strength of (1) is what the
+// previous revision of this comment did, and it left the drain-timeout path
+// a use-after-free rather than merely a wasted probe.
+//
+// Both also cover only the port of the CALLER'S OWN session, because the
+// load below is fresh — a watchdog handler's identity guard was checked
+// before it entered this function and says nothing about what is published
+// once it runs. A stale handler that resumed after a RESTART would therefore
+// enable, and on a second deschedule dereference, a port it never retained
+// and that (2) does not cover. That is closed by a third property, on the Go
+// side:
+//
+//   3. NO SECOND SESSION. `watchdog_stop` reporting a timed-out drain
+//      latches `teardownUnclean` (StartWatchdog's stop closure), and
+//      `installInternal` — the only caller of gesturetap_install_c — then
+//      refuses every later install with ErrTeardownUnclean. A stale handler
+//      can only ever observe its own session's port here, or the NULL its
+//      teardown published.
+//
+// So this function stays a fresh-load, no-argument healer; keeping it that
+// way is only correct while every caller has (1) or (3). A new caller with
+// neither must be given the pointer it owns instead.
 void gesturetap_reenable(void) {
-    if (g_gesture_tap != NULL) {
-        CGEventTapEnable(g_gesture_tap, true);
+    // Atomic load into a local: this runs on the watchdog's GCD thread and
+    // on the main thread's NSWorkspace observers, either of which can be
+    // concurrent with the NULL store in gesturetap_uninstall_c.
+    CFMachPortRef tap = __atomic_load_n(&g_gesture_tap, __ATOMIC_RELAXED);
+    if (tap == NULL) {
+        return;
     }
+    CGEventTapEnable(tap, true);
+
+    // Teardown re-check — the same contract gesturetap_callback and the
+    // watchdog handler both carry, and it is needed here for exactly the
+    // reason the RETAIN in (2) above exists. The retain makes a descheduled
+    // handler's dereference SAFE; it does not make the enable HARMLESS. A
+    // handler that loaded a non-NULL pointer, was descheduled past a
+    // timed-out `watchdog_stop` and then past `gesturetap_uninstall_c`, and
+    // only then reached the line above has just re-enabled a tap whose
+    // source was already detached from the worker loop — so WindowServer
+    // resumes posting gesture events to a port nobody services and trackpad
+    // gestures stall until it times the tap out. That is the one action in
+    // this function a stale snapshot turns from wasted into harmful, and it
+    // would otherwise survive teardown's own final disable, which ran while
+    // we were descheduled.
+    //
+    // Pointer IDENTITY, not merely non-NULL: teardown publishes NULL, and a
+    // hypothetical re-install publishes a different port — in both cases the
+    // port we just enabled is no longer the current one and must not be left
+    // enabled. Dereferencing `tap` on this path is safe for both callers:
+    // the watchdog holds the `gesturetap_retain_current` reference for as
+    // long as any of its handlers can run, and the wake observers are
+    // main-thread-confined against the teardown that would release it.
+    if (__atomic_load_n(&g_gesture_tap, __ATOMIC_RELAXED) != tap) {
+        CGEventTapEnable(tap, false);
+    }
+}
+
+// gesturetap_retain_current hands the caller a +1 reference to the gesture
+// tap's mach port, or NULL when no gesture tap is installed. It is the
+// mechanism half of point (2) in the LIFETIME note above: `watchdog_start`
+// calls it once at install time and its source's cancel handler drops the
+// reference, so a GCD handler that snapshotted g_gesture_tap and was then
+// descheduled past a TIMED-OUT `watchdog_stop` still dereferences a live
+// port instead of freed memory.
+//
+// THREADING: the load-then-retain pair is not atomic as a whole, so this is
+// only safe against a concurrent teardown if it never runs concurrently with
+// one. It does not: the sole caller is `watchdog_start`, reached from the
+// main goroutine during InstallAll, and `gesturetap_uninstall_c` runs from
+// `Releaser.Release` on that same goroutine. Install and Release are
+// serialised against each other by construction — Release only exists once
+// Install returned. Do NOT call this from a healer callback; there the load
+// really would be racing the NULL store, and a CFRetain on a pointer whose
+// last reference just went away is the very use-after-free this is meant to
+// prevent.
+CFMachPortRef gesturetap_retain_current(void) {
+    CFMachPortRef tap = __atomic_load_n(&g_gesture_tap, __ATOMIC_RELAXED);
+    if (tap != NULL) {
+        CFRetain(tap);
+    }
+    return tap;
 }

@@ -4,6 +4,7 @@
 #import <Cocoa/Cocoa.h>
 #import <CoreGraphics/CoreGraphics.h>
 #import <IOKit/hidsystem/ev_keymap.h>  // NX_SYSDEFINED (== 14) media-key event type
+#import <dispatch/dispatch.h>  // dispatch_semaphore_t — the drain handshake below
 #import <stdint.h>
 #import <string.h>       // memcpy / memset for the keystroke ring
 #import "tap_ring.h"     // DND_RING_CAP, dnd_keyrec_t — shared with tap_darwin.go
@@ -85,6 +86,23 @@ static uint64_t     g_seq = 0;
 // source is added to THIS run loop, NOT `CFRunLoopGetMain()`, so that
 // CGEvent dispatch happens off the main thread and AppKit on the main thread
 // stays responsive (the design notes).
+//
+// g_tap is the ONE of the three that is callback-visible: the self-heal
+// branch of `eventtap_callback` reads it on the worker thread. Every access
+// to it — here, in install, in uninstall, in the callback — therefore goes
+// through `__atomic_*` with RELAXED ordering. Not decoration: the teardown
+// path writes NULL on the drain-TIMEOUT branch too, i.e. precisely when the
+// callback could NOT be proven idle, so a plain store there would be a data
+// race against a plain load in the callback. RELAXED is sufficient because
+// the pointer is the only thing being published — no other memory is ordered
+// against it — and on arm64 it compiles to the same single instruction a
+// plain access would, which keeps the callback's nosplit budget intact.
+// Mixing a plain access in anywhere re-opens the race, so there are no plain
+// accesses at all.
+//
+// g_source and g_worker_runloop stay plain: no callback reads either. They
+// are touched only by install and by teardown, and the Go-side Release guard
+// serialises those onto one goroutine.
 static CFMachPortRef      g_tap            = NULL;
 static CFRunLoopSourceRef g_source         = NULL;
 static CFRunLoopRef       g_worker_runloop = NULL;
@@ -157,10 +175,49 @@ static CGEventRef eventtap_callback(CGEventTapProxy proxy,
     // thread; propagate the event as-is per the design notes (the `event` field is
     // undocumented for these types but pqrs-org/Karabiner production code
     // returns it without issue — A7 assumption verified there).
+    //
+    // The RELAXED atomic load is load-bearing twice over, and both reasons
+    // are about the teardown thread writing NULL concurrently (which it does
+    // on the drain-timeout path, where this callback is by definition NOT
+    // provably idle):
+    //
+    //   1. It is what makes that concurrent write well-defined instead of a
+    //      C data race. A plain load here paired with the plain store in
+    //      `eventtap_uninstall_c` is UB no matter how benign the values are.
+    //   2. It pins the value to ONE load. With a plain non-volatile static
+    //      the compiler is entitled to assume nothing else writes it and to
+    //      rematerialise the load after the NULL check — turning the guarded
+    //      call into `CGEventTapEnable(NULL, true)`. The local makes the
+    //      check and the use read the same value by construction.
+    //
+    // RELAXED is the right strength: the only thing being published is the
+    // pointer itself, no other memory is ordered against it, and the callback
+    // must stay a handful of instructions (nosplit invariant above). On arm64
+    // a relaxed load is the same `ldr` a plain load would emit.
     if (type == kCGEventTapDisabledByTimeout ||
         type == kCGEventTapDisabledByUserInput) {
-        if (g_tap != NULL) {
-            CGEventTapEnable(g_tap, true);
+        CFMachPortRef tap = __atomic_load_n(&g_tap, __ATOMIC_RELAXED);
+        if (tap != NULL) {
+            CGEventTapEnable(tap, true);
+            // Teardown re-check — the second half of the same race, and the
+            // half a NULL store alone cannot win. On the drain-TIMEOUT path
+            // this callback is by definition possibly-live, and the load
+            // above may have happened BEFORE `eventtap_uninstall_c` published
+            // NULL. The enable that follows then lands AFTER teardown's own
+            // final disable and after `CFRunLoopRemoveSource`, leaving an
+            // ENABLED tap whose source is detached: the kernel keeps posting
+            // events to a port nobody services and the machine's input stalls
+            // until WindowServer times the tap out. Re-reading g_tap after the
+            // enable closes it — a NULL here means teardown ran, so we undo
+            // our own enable. Teardown publishes the NULL BEFORE its disable
+            // precisely so this check cannot be the loser of that ordering.
+            //
+            // Dereferencing `tap` here is safe on both paths: the CFReleases
+            // are SKIPPED whenever this callback could be live (drained != 0),
+            // and when they do run the drain has already proven it is not.
+            if (__atomic_load_n(&g_tap, __ATOMIC_RELAXED) == NULL) {
+                CGEventTapEnable(tap, false);
+            }
         }
         return event;
     }
@@ -253,6 +310,88 @@ uint64_t eventtap_snapshot(dnd_keyrec_t *out) {
     return cur;
 }
 
+// DND_DRAIN_TIMEOUT_NS bounds the callback-drain handshake below. A
+// CFRunLoopWakeUp round-trip on an idle loop is microseconds, so 100ms is
+// ~1000x headroom; the bound exists only so that a worker loop which is NOT
+// running (the install-rollback paths, where the goroutine may have died
+// before CFRunLoopRun) turns into a short stall instead of a permanent hang
+// of the teardown chain — which would leave the overlay up and the keyboard
+// under a disabled-but-not-released tap.
+#define DND_DRAIN_TIMEOUT_NS (100ull * NSEC_PER_MSEC)
+
+// eventtap_drain_worker_callbacks blocks until `eventtap_callback` is known
+// not to be executing, so that a ring wipe cannot race the callback's writes.
+//
+// Why this is needed: `CGEventTapEnable(tap, false)` stops the kernel from
+// posting NEW events to the tap, but Apple documents no drain guarantee for
+// it — a callback that had already been dispatched keeps running on the
+// worker thread. Its ring append is a pair of PLAIN stores (only the counter
+// is atomic), so a `memset(g_ring, ...)` overlapping it is a genuine C data
+// race, and a callback that stores its record after the memset repopulates
+// the ring that was just wiped and leaves the counter non-zero. "Tap
+// disabled" is therefore not the same as "no writer left".
+//
+// How it drains: the tap callback is a run-loop callout on `g_worker_runloop`
+// and a block queued with CFRunLoopPerformBlock is executed by that SAME
+// thread. A run-loop callout cannot be preempted by a queued block, so the
+// block can only run once any in-flight callback has returned — observing
+// the block's signal from another thread is therefore proof that the
+// callback finished. CFRunLoopWakeUp is required because PerformBlock alone
+// does not wake a sleeping loop.
+//
+// What it does NOT promise: this is a drain, not a barrier. It says nothing
+// about a mach message already queued on the tap port that has not been
+// delivered yet — such an event can still produce a callback afterwards.
+// Only detaching the source removes that possibility, which is why
+// `eventtap_uninstall_c` calls this AFTER `CFRunLoopRemoveSource`: there the
+// drain is airtight, and it also guarantees no callback is inside
+// `CGEventTapEnable(g_tap, true)` when the mach port is CFReleased on the
+// next line. That is also why the Release Step 1 wipe does NOT use this
+// function on its own: with the source still attached a drain cannot rule
+// out a later callback, so that wipe runs ON the worker thread instead
+// (`eventtap_wipe_ring_on_worker` below), where the thread — not a
+// handshake — is what serialises it against the callback.
+//
+// RETURN VALUE — 0 means the drain is established, 1 means it timed out and
+// the caller must treat a callback as possibly live. It is NOT decoration:
+// every caller here branches on it, because "proceed anyway" means
+// CFReleasing a mach port a callback may be sitting inside. Timing out is
+// only reachable when the worker loop is not servicing blocks (the
+// install-rollback paths, where the goroutine can die before CFRunLoopRun);
+// a callback of a handful of stores cannot hold the thread for 100ms. The
+// bounded wait exists so that case is a short stall rather than a permanent
+// hang of the teardown chain — which would leave the overlay up and the
+// keyboard under a disabled-but-not-released tap.
+//
+// Callable with no worker loop (before install, after uninstall NULLs it):
+// returns 0 immediately — no loop means no callback can be dispatched, which
+// is the same fact the handshake would have established.
+//
+// ARC note: the package compiles with -fobjc-arc (see the #cgo CFLAGS in
+// tap_darwin.go), so the block's strong capture of `sem` keeps the semaphore
+// alive for as long as the queued block exists. On the timeout path the
+// block may still signal later, and it is signalling an object it owns —
+// there is no dangling reference and no manual release to get wrong.
+int eventtap_drain_worker_callbacks(void) {
+    CFRunLoopRef loop = g_worker_runloop;
+    if (loop == NULL) {
+        return 0;
+    }
+    dispatch_semaphore_t sem = dispatch_semaphore_create(0);
+    CFRunLoopPerformBlock(loop, kCFRunLoopCommonModes, ^{
+        dispatch_semaphore_signal(sem);
+    });
+    CFRunLoopWakeUp(loop);
+    // dispatch_semaphore_wait returns non-zero on timeout (Apple docs). That
+    // is the ONLY signal a caller gets that the block never ran, so it is
+    // returned rather than dropped.
+    if (dispatch_semaphore_wait(sem,
+            dispatch_time(DISPATCH_TIME_NOW, (int64_t)DND_DRAIN_TIMEOUT_NS)) != 0) {
+        return 1;
+    }
+    return 0;
+}
+
 // eventtap_wipe_ring clears the recorded key presses and resets the press
 // counter. It exists so the tail of what the user typed — which ends with
 // the unlock code itself — stops being resident in process memory the
@@ -260,14 +399,22 @@ uint64_t eventtap_snapshot(dnd_keyrec_t *out) {
 // CoreFoundation teardown steps later.
 //
 // CALL SITE CONTRACT: only where neither a tap callback NOR the poller can
-// be running — install (before the tap exists), Release Step 1 (after
-// `eventtap_enable(tap, false)` AND after the poller goroutine has been
-// closed and joined in tap_darwin.go) and the tail of
-// `eventtap_uninstall_c` (after the tap is released). Those three are the
-// ONLY call sites and they are the only implementation of "clear the ring":
-// a fourth open-coded memset that forgets the counter reset would hand the
-// poller a run of `{flags: 0, keycode: 0}` records, and keycode 0 is
-// kVK_ANSI_A.
+// be running — install (before the tap exists), the tail of
+// `eventtap_uninstall_c` (source detached, drain confirmed, tap released),
+// and the body of `eventtap_wipe_ring_on_worker`, which is how Release
+// Step 1 reaches it: ON the worker thread, where the callback cannot run
+// concurrently because that same thread is what would run it. Those three
+// are the ONLY call sites and they are the only implementation of "clear
+// the ring": a fourth open-coded memset that forgets the counter reset
+// would hand the poller a run of `{flags: 0, keycode: 0}` records, and
+// keycode 0 is kVK_ANSI_A.
+//
+// Note what is NOT on that list: a plain call from the Go side while the tap
+// source is still attached to the worker loop. That was the Step 1 shape
+// before, and it was unsound for a reason no drain can fix — a mach message
+// already queued on the tap port produces a callback the handshake did not
+// and could not wait for, whose ring append is a pair of PLAIN stores
+// overlapping the memset. Go through `eventtap_wipe_ring_on_worker` there.
 //
 // It MUST NOT be called from the
 // poller: the poller runs concurrently with a live tap, so calling it there
@@ -287,12 +434,72 @@ uint64_t eventtap_snapshot(dnd_keyrec_t *out) {
 // draining the poller before the wipe is what closes the interleaved case.
 // Keep both.
 //
-// The tap is already disabled here, so at most one in-flight callback can
-// still be running; a record it writes concurrently with this memset is
-// discarded by the counter reset either way.
+// The WRITER half of the contract is satisfied differently at each of the
+// three sites, which is why this function does NOT try to satisfy it
+// itself: at install no loop exists yet, at the uninstall tail the source
+// is already detached and `eventtap_drain_worker_callbacks` has confirmed,
+// and at Step 1 the wrapper puts the call on the writer's own thread. A
+// drain bolted on here would be a no-op at two sites and the wrong
+// mechanism at the third. Disabling the tap is NOT sufficient by itself —
+// Apple documents no callback-drain guarantee for CGEventTapEnable, so an
+// already-dispatched callback can still be mid-write and would repopulate
+// the ring it just wiped.
 void eventtap_wipe_ring(void) {
     memset(g_ring, 0, sizeof(g_ring));
     __atomic_store_n(&g_seq, 0, __ATOMIC_RELEASE);
+}
+
+// eventtap_wipe_ring_on_worker is the Release Step 1 wipe: it clears the
+// ring FROM the worker thread instead of from the caller's.
+//
+// Why not "drain, then memset here": at Step 1 the tap source is still
+// attached to the worker loop. A drain proves no callback is running at the
+// instant it returns, but a mach message already queued on the tap port can
+// still be delivered afterwards — CFRunLoopPerformBlock enqueues work for a
+// future loop cycle, it is not a barrier over the loop's sources. The memset
+// would then be racing a callback whose ring append is a pair of PLAIN
+// stores: a genuine C data race, not merely a benign one, and no later clean
+// wipe can retroactively undo undefined behaviour.
+//
+// Running the wipe as the block body removes the race instead of narrowing
+// it. The callback is a run-loop callout on this same thread and a queued
+// block is executed by that same thread, so the two CANNOT overlap — the
+// serialisation comes from the thread, not from a handshake, and it holds
+// for callbacks queued before AND after the block. What remains is
+// repopulation (a callback dispatched after the block records a fresh press
+// into the wiped ring), which is not UB, is not read by anyone — Release
+// stopped and joined the poller before calling this — and is mopped up by
+// the airtight wipe at the tail of `eventtap_uninstall_c`, taken there after
+// the source is detached and the drain has confirmed.
+//
+// Returns 0 if the ring was wiped, 1 if the handshake timed out and it was
+// NOT. On the 1 path the caller deliberately does nothing else: the point of
+// this early wipe is to shorten the window in which the just-typed unlock
+// code sits in process memory, and falling back to a direct memset would
+// re-introduce exactly the data race this function exists to remove. The
+// uninstall-time wipe a few CF calls later is unconditional, so the secret
+// is still cleared — just not as early.
+//
+// With no worker loop (install-rollback paths) the wipe is done inline and 0
+// returned: no loop means no callback can be dispatched, so there is no
+// writer to serialise against.
+int eventtap_wipe_ring_on_worker(void) {
+    CFRunLoopRef loop = g_worker_runloop;
+    if (loop == NULL) {
+        eventtap_wipe_ring();
+        return 0;
+    }
+    dispatch_semaphore_t sem = dispatch_semaphore_create(0);
+    CFRunLoopPerformBlock(loop, kCFRunLoopCommonModes, ^{
+        eventtap_wipe_ring();
+        dispatch_semaphore_signal(sem);
+    });
+    CFRunLoopWakeUp(loop);
+    if (dispatch_semaphore_wait(sem,
+            dispatch_time(DISPATCH_TIME_NOW, (int64_t)DND_DRAIN_TIMEOUT_NS)) != 0) {
+        return 1;
+    }
+    return 0;
 }
 
 // eventtap_install_c installs the CGEventTap at kCGHIDEventTap with
@@ -361,21 +568,28 @@ int eventtap_install_c(CFMachPortRef *out_tap) {
         CGEventMaskBit(kCGEventScrollWheel)      |
         CGEventMaskBit(NX_SYSDEFINED);            // 14 — media/function keys
 
-    g_tap = CGEventTapCreate(
+    // Local first, published to the static via one atomic store. No callback
+    // can run yet (the source below is not attached to any loop until the
+    // worker goroutine registers it), so the ordering is not what matters
+    // here — what matters is that `g_tap` has no plain accesses anywhere in
+    // the file, because a single plain one re-opens the race the callback's
+    // atomic load exists to close. See the declaration comment.
+    CFMachPortRef tap = CGEventTapCreate(
         kCGHIDEventTap,                  // before WindowServer Bluetooth-safe
         kCGHeadInsertEventTap,           // front of chain — first to see events
         kCGEventTapOptionDefault,        // suppression-capable (NOT ListenOnly)
-        mask,                            // 
+        mask,                            //
         eventtap_callback,
         NULL);                           // refcon — unused (uses statics)
-    if (g_tap == NULL) {
+    if (tap == NULL) {
         return 1;
     }
+    __atomic_store_n(&g_tap, tap, __ATOMIC_RELAXED);
 
-    g_source = CFMachPortCreateRunLoopSource(kCFAllocatorDefault, g_tap, 0);
+    g_source = CFMachPortCreateRunLoopSource(kCFAllocatorDefault, tap, 0);
     if (g_source == NULL) {
-        CFRelease(g_tap);
-        g_tap = NULL;
+        CFRelease(tap);
+        __atomic_store_n(&g_tap, NULL, __ATOMIC_RELAXED);
         return 2;
     }
 
@@ -383,9 +597,9 @@ int eventtap_install_c(CFMachPortRef *out_tap) {
     // call, the source can be added to a run loop but no callback ever
     // fires — and the silent failure looks identical to the post-install
     // success path until the first key press never matches.
-    CGEventTapEnable(g_tap, true);
+    CGEventTapEnable(tap, true);
 
-    *out_tap = g_tap;
+    *out_tap = tap;
     return 0;
 }
 
@@ -443,19 +657,87 @@ int eventtap_register_worker_runloop(CFMachPortRef tap, CFRunLoopRef *out_loop) 
 // this with a NULL tap or after a prior call — the Go-side two-layer guard
 // already serialises Release callers, but the C side is defensive in case
 // of future test fixtures that exercise this directly.
-void eventtap_uninstall_c(CFMachPortRef tap) {
+//
+// RETURN VALUE: 0 on the normal path, 1 when the post-detach drain timed out
+// and the source + tap were therefore LEFT RETAINED instead of released. The
+// leak is the deliberate choice: a timeout means the callback cannot be
+// proven idle, CFReleasing the mach port out from under one sitting in its
+// `CGEventTapEnable(g_tap, true)` self-heal branch is a use-after-free that
+// crashes the process, and one leaked mach port on a teardown path that runs
+// once at exit costs nothing anyone can measure.
+//
+// The rule the timeout path follows is broader than the CFReleases, and it
+// is the whole reason to read this function twice: on `drained != 0` NOTHING
+// callback-visible is written non-atomically. The source + tap are left
+// retained (above), the ring wipe is skipped (below — a memset overlapping
+// the callback's plain ring stores is a data race, not a benign one), and
+// the one write that does still happen, `g_tap = NULL`, goes through
+// __atomic. What remains is the tap disabled, g_source / g_worker_runloop
+// nulled (neither is read by any callback) and the run loop stopped via
+// CFRunLoopStop, which Apple documents as thread-safe. So the consequences
+// of a timeout are exactly two — a leaked mach port and a ring left
+// resident — and the Go caller logs the 1 (at WARN from `uninstallFn`,
+// where the worker loop is alive and a timeout is a fault; at DEBUG from
+// the install-rollback call site, where the worker died before
+// CFRunLoopRun and a timeout is the expected outcome) rather than letting
+// either pass unobserved.
+int eventtap_uninstall_c(CFMachPortRef tap) {
     if (g_worker_runloop != NULL && g_source != NULL) {
         CFRunLoopRemoveSource(g_worker_runloop, g_source, kCFRunLoopCommonModes);
     }
-    if (g_source != NULL) {
-        CFRelease(g_source);
-        g_source = NULL;
-    }
+    // Drain BEFORE anything is released. With the source detached above, no
+    // further callback can be dispatched, so once this returns 0 the callback
+    // is provably not running and provably cannot start again. That buys two
+    // things on one line: the CFRelease(tap) below cannot pull the mach port
+    // out from under a callback sitting in its `CGEventTapEnable(g_tap, true)`
+    // self-heal branch, and the eventtap_wipe_ring at the tail of this
+    // function has no writer left to race.
+    //
+    // A non-zero return means the handshake timed out and neither of those
+    // two facts is established, so the CFReleases AND the tail wipe are
+    // SKIPPED — see the return-value paragraph above for why leaking beats
+    // releasing, and the wipe's own comment for why a memset under a
+    // possibly-live callback is not the harmless half of that trade.
+    int drained = eventtap_drain_worker_callbacks();
+    // Publish the teardown BEFORE the final disable, not after. The order of
+    // these two statements is the whole correctness argument for the
+    // callback's post-enable re-check: a callback that is still live on the
+    // timeout path re-reads g_tap after its own CGEventTapEnable(true), and
+    // if our NULL had not landed yet it would keep the tap enabled while our
+    // disable had already gone by — an enabled tap with a detached source,
+    // i.e. stalled input until WindowServer's own tap timeout. With the NULL
+    // first, either the callback's re-check sees it and undoes the enable, or
+    // the enable preceded our disable and the disable wins. Both orders end
+    // with the tap disabled.
+    //
+    // g_tap is the callback-visible global, so the store is ATOMIC — on the
+    // timeout path it is a genuinely concurrent write and the callback loads
+    // the same location. See the declaration comment.
+    __atomic_store_n(&g_tap, NULL, __ATOMIC_RELAXED);
     if (tap != NULL) {
+        // Safe on both paths: disabling a retained mach port cannot free
+        // anything, and it is idempotent per Apple's documentation.
         CGEventTapEnable(tap, false);
-        CFRelease(tap);
     }
-    g_tap = NULL;
+    if (drained == 0) {
+        if (g_source != NULL) {
+            CFRelease(g_source);
+        }
+        if (tap != NULL) {
+            CFRelease(tap);
+        }
+    }
+    // g_tap was nulled above, before the disable — see the comment there for
+    // why that ordering is load-bearing rather than cosmetic. It is nulled on
+    // BOTH paths: whether the objects were released or deliberately leaked,
+    // this process no longer owns a usable tap, and a hypothetical re-Install
+    // must start from a clean slate rather than inherit a handle to the
+    // abandoned one.
+    //
+    // g_source is left plain: no callback reads it (see the declaration
+    // comment), and install/teardown are serialised onto one goroutine by the
+    // Go-side Release guard.
+    g_source = NULL;
     if (g_worker_runloop != NULL) {
         // CFRunLoopStop is documented thread-safe — safe to invoke from the
         // main goroutine while the worker goroutine is blocked in
@@ -465,8 +747,11 @@ void eventtap_uninstall_c(CFMachPortRef tap) {
         g_worker_runloop = NULL;
     }
 
-    // Wipe the recorded key presses. By this point the tap is disabled and
-    // released, so the callback is gone and there is no writer to race.
+    // Wipe the recorded key presses — but ONLY on the drained == 0 path,
+    // exactly like the CFReleases above. With the source detached and the
+    // drain confirmed, the callback is not running and cannot start again:
+    // there is no writer left to race, which makes this the one wipe in the
+    // process that is provably clean.
     // This is hygiene, not correctness — Release Step 1 already wiped the
     // ring, and the install-time rollback paths never recorded anything —
     // but the ring holds the tail of what the user typed, including the
@@ -474,7 +759,35 @@ void eventtap_uninstall_c(CFMachPortRef tap) {
     // resident for the remainder of the process lifetime. Going through
     // eventtap_wipe_ring rather than an open-coded memset keeps the counter
     // reset attached to the wipe; see its call-site contract.
-    eventtap_wipe_ring();
+    //
+    // An earlier revision ran this wipe unconditionally and argued the
+    // asymmetry with the CFReleases from the failure mode: freeing a CF
+    // object under a live callback corrupts memory it executes against,
+    // whereas a memset of a naturally-aligned static array under one only
+    // scrambles a record nobody reads. The second half of that is a
+    // statement about arm64 code generation, not about C: the callback's
+    // ring append is a pair of PLAIN stores, so an overlapping memset is a
+    // data race and therefore undefined behaviour outright — the same
+    // argument this file already makes in `eventtap_wipe_ring_on_worker`
+    // when it refuses to fall back to a direct memset for identical
+    // reasons. Making the wipe conditional is what keeps the two consistent,
+    // and it is what puts this call inside eventtap_wipe_ring's stated
+    // call-site contract ("only where neither a tap callback NOR the poller
+    // can be running") instead of alongside it.
+    //
+    // What the timeout path gives up is bounded and small. On the only
+    // routinely-reachable timeout (an install rollback whose worker died
+    // before CFRunLoopRun) the ring is empty anyway — nothing was ever
+    // recorded. On the other one (a live worker descheduled past the 100ms
+    // bound) the secret stays resident for the remainder of the process
+    // lifetime, which on every path that reaches Release is milliseconds:
+    // the tap is torn down either at exit or on an install-rollback that
+    // returns a fatal error. Trading undefined behaviour for that is the
+    // right way round.
+    if (drained == 0) {
+        eventtap_wipe_ring();
+    }
+    return drained;
 }
 
 // eventtap_is_enabled wraps `CGEventTapIsEnabled` for the watchdog probe

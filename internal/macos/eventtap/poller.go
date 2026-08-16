@@ -95,6 +95,19 @@ func clampFrom(from, to, l uint64) (uint64, bool) {
 // [from, to), reading the records out of `ring` — a snapshot of the C-side
 // keystroke ring, indexed by `seq & ringMask`.
 //
+// `base` is the session baseline: the sequence number of the first press
+// this poller is allowed to look at. A candidate window ends inside
+// [from, to) but STARTS l-1 records earlier, which can reach below `from`
+// — that is deliberate and is what lets a code typed across several ticks
+// match. It must not reach below `base`, though: those records belong to a
+// previous tap. Without the floor a stale `s w o r` left in a live ring
+// plus one fresh `d` would complete `s w o r d`, i.e. four fifths of the
+// code would come from a session the poller was never armed for. In
+// production `base` is 0 (Install samples it over a freshly zeroed ring, so
+// nothing precedes it) and the floor is inert; it is what makes the
+// guarantee documented on pollSequence true for a poller re-armed over a
+// ring that already holds keystrokes.
+//
 // Why EVERY tail in the range and not just the newest one: the poller wakes
 // on a 10ms ticker, and a snapshot routinely contains more than one new
 // keystroke. If the user finishes the code and immediately presses one more
@@ -112,14 +125,18 @@ func clampFrom(from, to, l uint64) (uint64, bool) {
 //
 // Pure function — no cgo, no IO. Nothing about the keystrokes it reads is
 // logged or returned; the only observable output is the boolean.
-func matchAny(ring []matcher.KeyEvent, from, to uint64, tail []matcher.KeyEvent, m *matcher.Sequence) bool {
+func matchAny(ring []matcher.KeyEvent, base, from, to uint64, tail []matcher.KeyEvent, m *matcher.Sequence) bool {
 	l := uint64(m.Len())
 	from, _ = clampFrom(from, to, l)
 
 	for end := from; end < to; end++ {
-		if end+1 < l {
-			// Fewer than l keystrokes have happened in total — no window
-			// ending here exists yet. Only possible at session start.
+		if end+1 < base+l {
+			// Fewer than l keystrokes have been recorded since the
+			// baseline, so a window ending here would have to start below
+			// it. With base == 0 (production) that is the "no complete
+			// window exists yet" case at session start; with base > 0 it is
+			// a window that would splice records from a previous tap onto
+			// fresh ones. Both are skipped.
 			continue
 		}
 		start := end + 1 - l
@@ -137,6 +154,35 @@ func matchAny(ring []matcher.KeyEvent, from, to uint64, tail []matcher.KeyEvent,
 // it watches the C-side keystroke ring through the `seq` / `snapshot`
 // accessors, matches the configured code in pure Go, and forwards a single
 // struct{} signal to `sink` when the code is entered.
+//
+// `baseSeq` is the press count this poller treats as "already seen": only
+// records with sequence number >= baseSeq are ever offered to the matcher.
+// That covers both ends of a candidate window, not just the end it stops
+// on — matchAny is handed the baseline and skips any window whose START
+// falls below it, so a match can never be assembled from stale records plus
+// fresh ones (TestMatchAny_WindowSpanningBaseline pins it).
+// It is a PARAMETER rather than an in-loop `seq()` read on purpose, and the
+// distinction is load-bearing:
+//
+//   - The caller picks the baseline at a moment when the ring is provably
+//     quiescent. Install reads it right after `eventtap_install_c` has
+//     zeroed the counter and BEFORE the worker goroutine adds the tap source
+//     to a run loop, which is the earliest instant a callback can record
+//     anything.
+//   - Seeding from `seq()` here instead would sample the counter after the
+//     tap is already live and after this goroutine has been scheduled.
+//     Every press recorded in that gap — source registration, the gesture
+//     tap install, channel and closure setup, the `go` statement, and
+//     however long the scheduler takes to run us — would be classified as
+//     "predates the session" and could never END a matching window. A code
+//     typed entirely inside that window would be silently swallowed, and
+//     silently is the operative word: the mode logs nothing on a failed
+//     match, so the only symptom is a machine that did not unlock.
+//
+// The baseline is still not simply 0: a poller re-armed over a live ring
+// must not replay keystrokes from a previous tap. Passing the value in keeps
+// that property while making WHEN it is sampled the caller's decision, which
+// is the only place with the ordering knowledge to sample it safely.
 //
 // Comparison used to happen inside the CGEventTap callback, which forced
 // the callback to call back into Go on every match. Here the callback only
@@ -177,6 +223,7 @@ func matchAny(ring []matcher.KeyEvent, from, to uint64, tail []matcher.KeyEvent,
 // accidentally silence the match line.
 func pollSequence(
 	stop <-chan struct{},
+	baseSeq uint64,
 	seq func() uint64,
 	snapshot func([]matcher.KeyEvent) uint64,
 	m *matcher.Sequence,
@@ -203,11 +250,11 @@ func pollSequence(
 	defer clear(ring)
 	defer clear(tail)
 
-	// Start from whatever the counter already reads rather than from 0:
-	// keystrokes that predate this goroutine are not part of this session's
-	// input. Install zeroes the counter, so in production this is 0 anyway;
-	// the read matters only if a tap is ever re-armed over a live ring.
-	lastSeq := seq()
+	// Caller-supplied baseline — see the paragraph on `baseSeq` above for
+	// why this is not `seq()`. In production Install samples it while the
+	// tap source is not yet attached to any run loop, so it is 0 and no
+	// keystroke of this session can fall below it.
+	lastSeq := baseSeq
 
 	ticker := time.NewTicker(pollInterval)
 	defer ticker.Stop()
@@ -232,7 +279,7 @@ func pollSequence(
 				log.Debug("eventtap: keystroke ring lagged; older events aged out unread")
 			}
 
-			if matchAny(ring, lastSeq, cur, tail, m) {
+			if matchAny(ring, baseSeq, lastSeq, cur, tail, m) {
 				select {
 				case sink <- struct{}{}:
 					log.Info("eventtap: unlock code matched, signalling exit")

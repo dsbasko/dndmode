@@ -21,7 +21,7 @@ package eventtap
 
 extern int  eventtap_install_c(CFMachPortRef *out_tap);
 extern int  eventtap_register_worker_runloop(CFMachPortRef tap, CFRunLoopRef *out_loop);
-extern void eventtap_uninstall_c(CFMachPortRef tap);
+extern int  eventtap_uninstall_c(CFMachPortRef tap);
 extern int  eventtap_is_enabled(CFMachPortRef tap);
 extern void eventtap_enable(CFMachPortRef tap, int enable);
 
@@ -35,13 +35,21 @@ extern uint64_t eventtap_seq(void);
 extern uint64_t eventtap_snapshot(dnd_keyrec_t *out);
 extern void     eventtap_wipe_ring(void);
 
+// eventtap_drain_worker_callbacks and eventtap_wipe_ring_on_worker — the two
+// writer-quiescence primitives — are declared in tap_ring.h (included above)
+// rather than here, because gesturetap_darwin.m calls the drain too and one
+// shared prototype is what makes a signature change fail to compile in all
+// three places instead of in none. Both return 0 on success and 1 on a
+// handshake timeout; both returns are acted on at their Go call sites.
+
 // eventtap_set_observed_tap is the canonical writer for the shared
-// `volatile CFMachPortRef g_observed_tap` global that lives in
-// watchdog_darwin.m and is read by both the watchdog GCD handler AND the
-// NSWorkspace wake-observer blocks (wake_darwin.m). Step 1 of
-// the Release order writes NULL via this setter, which closes the
-// race window for in-flight handlers between Release Step 1
-// and Step 4 (watchdog_stop) / Step 5 (wake_observer_remove).
+// `CFMachPortRef g_observed_tap` global that lives in watchdog_darwin.m and
+// is read by both the watchdog GCD handler AND the NSWorkspace
+// wake-observer blocks (wake_darwin.m). Every access on both ends goes
+// through `__atomic_*`. Release Step 1 writes NULL via this setter, which
+// makes any handler STARTING after that point a no-op; handlers already
+// in flight are handled by Step 2 (watchdog_stop drains them) rather than
+// by this write, which cannot reach a pointer already loaded.
 extern void eventtap_set_observed_tap(CFMachPortRef tap);
 
 // gesturetap_* is the session-level trackpad-gesture suppression tap
@@ -54,7 +62,7 @@ extern void eventtap_set_observed_tap(CFMachPortRef tap);
 // strict gesture-before-main uninstall order (see Releaser field docs).
 extern int  gesturetap_install_c(CFRunLoopRef loop);
 extern void gesturetap_disable_c(void);
-extern void gesturetap_uninstall_c(void);
+extern int  gesturetap_uninstall_c(void);
 
 // cf_to_void_ptr is the package-private C helper that converts a cgo
 // opaque pointer (CFMachPortRef) to a `void *` (which cgo maps to Go's
@@ -95,6 +103,50 @@ import (
 // the callback would weaken it. The Go→C direction (seq / snapshot below)
 // is unaffected: those run on the poller goroutine, which is an ordinary
 // Go-scheduled goroutine making an ordinary cgo call.
+
+// teardownUnclean latches the teardown outcome that makes the C-side statics
+// unsafe to reuse: a drain that timed out with a C-side callback still
+// possibly running. Two paths set it — the tap's own drain handshake when it
+// times out while the worker run loop is ALIVE (i.e. where
+// `eventtap_callback` could not be proven idle), and the watchdog's
+// cancel-handler drain in `StartWatchdog`'s stop closure. The argument below
+// is written for the first; see that closure for the second, which differs
+// only in WHICH stale writer the latch fences off.
+//
+// The C side answers such a timeout by touching nothing callback-visible
+// non-atomically — it leaks the mach port instead of releasing it and skips
+// its tail ring wipe — but it still nulls `g_worker_runloop` / `g_source`
+// and returns, so nothing in C remembers that a writer may be outstanding. A
+// later `installInternal` would then run `eventtap_wipe_ring()` (a memset of
+// the shared ring) and publish a fresh `g_tap` while that old callback is
+// mid-append: the memset would race the callback's pair of PLAIN stores —
+// the exact C data race the timeout handling exists to avoid — and the new
+// non-NULL `g_tap` would additionally defeat the old callback's post-enable
+// teardown re-check, which reads that same location and treats non-NULL as
+// "my tap is still current".
+//
+// So the latch is one-way and process-wide: once a teardown could not prove
+// the callback idle, this process may not install a tap again. That costs
+// nothing in production — `InstallAll` runs exactly once per process
+// (cmd/dndmode/main.go) and this path ends in an exit either way — and it
+// converts an unobservable data race into an explicit ErrTeardownUnclean.
+//
+// Deliberately NOT set on the worker-handshake rollback path, which is the
+// same distinction the WARN / DEBUG split at those two call sites already
+// draws: there the worker goroutine died before `CFRunLoopRun`, so the loop
+// dispatches no callbacks at all and a timeout means "nobody is servicing
+// blocks", not "a writer may be live".
+//
+// The watchdog path latches for the same shape of reason on a different
+// stale writer: a GCD probe handler that outlived its bounded cancel drain
+// re-reads `g_gesture_tap` inside `gesturetap_reenable` and can flip the
+// package-global `watchdogThresholdHit`, so a second session would inherit
+// both — a gesture port the stale handler never retained, and a threshold
+// notification carrying no session identity. Blocking re-install is what
+// makes those unreachable; the C-side generation and pointer-identity guards
+// in watchdog_darwin.m narrow the window but cannot close it, because the
+// deschedule can always land after the last check.
+var teardownUnclean atomic.Bool
 
 // seq returns the number of key presses the C callback has recorded since
 // Install. It is the poller's cheap per-tick probe: an unchanged value means
@@ -264,7 +316,7 @@ type Releaser struct {
 	//   - gestureDisableFn runs in Step 1 right after disableFn +
 	//     clearObservedFn — trackpad gestures recover together with the
 	//     keyboard even if later CF teardown fails;
-	//   - gestureUninstallFn runs at Step 2a, BEFORE uninstallFn: both tap
+	//   - gestureUninstallFn runs at Step 4, BEFORE uninstallFn: both tap
 	//     sources share the worker run loop, and uninstallFn ends with
 	//     CFRunLoopStop — after that the worker thread exits and the loop
 	//     ref dangles, so the gesture source must leave the loop first.
@@ -279,6 +331,15 @@ type Releaser struct {
 	// further key press can be recorded — the ring holds the tail of what
 	// the user typed, ending with the unlock code itself, and there is no
 	// reason to leave it resident for the rest of the process lifetime.
+	//
+	// "Both taps are disabled" is necessary but not sufficient: a callback
+	// dispatched before the disable landed is still running, a queued mach
+	// message can produce another one after any handshake this side could
+	// wait on, and both write the ring with plain stores. The production
+	// closure therefore does not memset from the Go goroutine at all — it
+	// calls eventtap_wipe_ring_on_worker(), which performs the wipe on the
+	// worker thread where the callback cannot run concurrently with it. See
+	// the comment at the closure and the full contract in tap_darwin.m.
 	//
 	// Release is the ONLY permitted call site. Calling it from the poller
 	// would make the poller a second writer to the ring while the tap is
@@ -297,12 +358,17 @@ type Releaser struct {
 	// through `InstallAll`; `Install` is kept for the smoke-test path that
 	// exercises tap + poller without the watchdog/wake composites.
 	//
-	// order: watchdogStop runs at Step 4 (after Step 3
-	// CFRelease completes), wakeStop runs at Step 5 (last). Between Step 1
-	// and Step 4, the watchdog GCD handler may still be in-flight on the
-	// HIGH queue — the g_observed_tap=NULL atomic write at Step 1 turns
-	// any such in-flight invocation into a no-op via the snapshot guard in
-	// watchdog_darwin.m. Same for wake observer (Step 1 → Step 5 window).
+	// Order: BOTH run at Step 2 — after the Step 1 disables, before every
+	// CFRelease in Steps 4-5. They are the two subsystems that call
+	// CGEventTapEnable on the taps, so leaving them running across the
+	// teardown is what makes a freed mach port reachable; the Step 1
+	// g_observed_tap NULL write narrows that window but cannot close it,
+	// because a handler that already loaded the pointer never re-reads it.
+	// watchdogStop drains in-flight GCD handlers synchronously (see
+	// StartWatchdog); wakeStop relies on main-thread confinement (see the
+	// extern comment in wake_darwin.m). An earlier revision ran these at
+	// Steps 4-5, i.e. after the CFReleases — the exact inversion
+	// StartWatchdog's docstring calls unsafe.
 	watchdogStop func()
 	wakeStop     func()
 
@@ -341,41 +407,47 @@ func (r *Releaser) Name() string { return "eventtap" }
 //  1. disableFn — CGEventTapEnable(tap, false) — keyboard recovers
 //     immediately even if any subsequent step fails.
 //     clearObservedFn — eventtap_set_observed_tap(NULL) — atomic write
-// that closes the window: any in-flight watchdog GCD
-//     handler or wake-observer notification block running between Step 1
-//     and Step 4-5 reads g_observed_tap → sees NULL → returns immediately
-//     without touching the (about-to-be-freed at Step 3) mach port.
-// Step 1 — both calls happen here under the same mutex.
-//     close(stopPoller) + <-pollerDone — the unlock-code poller exits its
+//     that turns any watchdog GCD handler or wake-observer block STARTING
+//     from here on into a no-op. It is a guard, not a lifetime mechanism:
+//     a handler that already loaded the pointer is unaffected by a later
+//     store, which is what Step 2 exists for.
+//     gestureDisableFn — same for the session-level gesture tap, so
+//     trackpad gestures recover together with the keyboard.
+//  2. watchdogStop, then wakeStop — the self-healers come down BEFORE
+//     anything is released, because both exist to call CGEventTapEnable on
+//     ports the steps below free. watchdogStop cancels the GCD source and
+//     BLOCKS until its cancel handler has run (libdispatch schedules that
+//     only after the last event-handler invocation returns), so afterwards
+//     no handler is running and none can start. wakeStop removes the two
+//     NSWorkspace observers; their blocks are main-queue and this function
+//     runs on the main goroutine, so none can be in flight. Both are nil
+//     for a plain installTapOnly Releaser (smoke tests) and skipped.
+//     This ordering is the inversion fix: these two used to run LAST,
+//     after the CFReleases, contradicting StartWatchdog's own docstring.
+//  3. close(stopPoller) + <-pollerDone — the unlock-code poller exits its
 //     ticker loop within pollInterval (10ms) and is drained to a full
-//     stop. This MUST run here, still inside Step 1 and BEFORE
-//     wipeRingFn, not at the end of Release: the poller is the ring's
-//     only reader, and a memset landing between eventtap_snapshot's
-//     ACQUIRE load and its memcpy would hand the poller a run of zeroed
-//     records (keycode 0 is kVK_ANSI_A). Draining first also keeps
-//     `-race` quiet — a goroutine still reading the C ring after Release
-//     returns would be flagged. Skipped if the channels are nil (unit-test
-//     constructors that exercise only the disable/uninstall path).
-//     wipeRingFn — eventtap_wipe_ring() — closes Step 1 once both taps
-//     are down, nothing can record another key press and the ring's
-//     reader is gone; the recorded keystrokes (which end with the unlock
-//     code) stop being resident.
-//  2. uninstallFn — CFRunLoopRemoveSource → CFRelease(source) →
+//     stop. This MUST run BEFORE wipeRingFn, not at the end of Release:
+//     the poller is the ring's only reader, and a memset landing between
+//     eventtap_snapshot's ACQUIRE load and its memcpy would hand the
+//     poller a run of zeroed records (keycode 0 is kVK_ANSI_A). Draining
+//     first also keeps `-race` quiet — a goroutine still reading the C
+//     ring after Release returns would be flagged. Skipped if the channels
+//     are nil (unit-test constructors that exercise only the
+//     disable/uninstall path).
+//     wipeRingFn — eventtap_wipe_ring_on_worker() — runs once both taps
+//     are down and the ring's reader is gone; the recorded keystrokes
+//     (which end with the unlock code) stop being resident. The wipe is
+//     performed BY the worker thread rather than by this goroutine,
+//     because the tap source is still attached here and a callback
+//     dispatched from an already-queued mach message would otherwise
+//     overlap the memset.
+//  4. gestureUninstallFn — CFRunLoopRemoveSource → drain → CFRelease of
+//     the gesture source + tap. MUST precede step 5, whose CFRunLoopStop
+//     ends the worker loop both sources share.
+//  5. uninstallFn — CFRunLoopRemoveSource → drain → CFRelease(source) →
 //     CGEventTapEnable(tap, false) [defensive] → CFRelease(tap) →
-//     CFRunLoopStop(worker_runloop). The C-side helper
-// `eventtap_uninstall_c` bundles Steps 2 + 3 of atomically; Go
-//     calls a single function (the C-side comment in tap_darwin.m
-//     enumerates the sub-steps).
-//  3. (subsumed in Step 2 — see above).
-// 4. watchdogStop — stop closure. Cancels the GCD
-//     dispatch_source_t timer AND closes the watchdog Go-side poller's
-//     stop channel. After this returns, no future watchdog handler can
-//     fire; any in-flight handler has already short-circuited via Step 1's
-//     NULL write. Skipped if nil (set only by InstallAll, not by plain
-// Install — keeps smoke-test surface intact).
-// 5. wakeStop — stop closure. Removes both NSWorkspace
-//     observers (DidWake + SessionDidBecomeActive) and re-NULLs
-//     g_observed_tap defensively. Skipped if nil (same rationale).
+//     CFRunLoopStop(worker_runloop), all bundled in the C-side
+//     `eventtap_uninstall_c` (its comment enumerates the sub-steps).
 func (r *Releaser) Release() error {
 	// Fast path: hint flag. Cheap Load — once released is durably set
 	// (after the winner stored it under mu), any repeat caller skips
@@ -412,6 +484,44 @@ func (r *Releaser) Release() error {
 	if r.gestureDisableFn != nil {
 		r.gestureDisableFn()
 	}
+
+	// --- Step 2: stop the self-healers, BEFORE anything is released. ---
+	//
+	// Both of them exist to call CGEventTapEnable on the two taps, so both
+	// must be provably gone before the CF teardown below frees the mach
+	// ports they hold pointers to. The g_observed_tap NULL write above is a
+	// guard, not a lifetime mechanism: it stops a handler that has not read
+	// the pointer yet and does nothing for one that read it a microsecond
+	// earlier and was then descheduled — an already-loaded pointer is not
+	// affected by a later store.
+	//
+	// watchdogStop therefore drains: it cancels the GCD source and blocks
+	// until the source's cancel handler has run, which libdispatch schedules
+	// only after the last event-handler invocation has returned. wakeStop
+	// removes the two NSWorkspace observers; its blocks run on the main
+	// queue and this whole function runs on the main goroutine, so no block
+	// can be in flight while we are here (see the extern comment in
+	// wake_darwin.m).
+	//
+	// This ordering is also what StartWatchdog's docstring has always
+	// promised — "stop() first, then the tap Releaser; inverted order is
+	// unsafe (a GCD handler in-flight may still call CGEventTapIsEnabled on
+	// a freed port)". The composite Release used to run these two LAST, at
+	// Steps 4-5 after the CFReleases, which is exactly the inversion that
+	// docstring warns about.
+	//
+	// Both are nil for a plain installTapOnly Releaser (smoke tests) — only
+	// InstallAll wires them.
+	if r.watchdogStop != nil {
+		r.watchdogStop()
+		r.watchdogStop = nil
+	}
+	if r.wakeStop != nil {
+		r.wakeStop()
+		r.wakeStop = nil
+	}
+
+	// --- Step 3: drain the ring's reader, then wipe the ring. ---
 	// Stop the unlock-code poller BEFORE the wipe below. The wipe is the
 	// only place in the process that writes the ring from outside the tap
 	// callback, so it must not overlap the one goroutine that reads it:
@@ -459,7 +569,7 @@ func (r *Releaser) Release() error {
 		r.wipeRingFn()
 	}
 
-	// --- Step 2a: gesture tap teardown MUST precede the main uninstall.
+	// --- Step 4: gesture tap teardown MUST precede the main uninstall.
 	// uninstallFn ends with CFRunLoopStop on the SHARED worker run loop;
 	// once the worker goroutine unwinds, the loop ref the gesture source
 	// is attached to dangles (see gesturetap_uninstall_c ordering
@@ -468,31 +578,17 @@ func (r *Releaser) Release() error {
 		r.gestureUninstallFn()
 	}
 
-	// --- Steps 2 + 3: CFRunLoopRemoveSource CFRelease(source+tap)
-	// + CFRunLoopStop, bundled in eventtap_uninstall_c. ---
+	// --- Step 5: CFRunLoopRemoveSource → drain → CFRelease(source+tap)
+	// + CFRunLoopStop, bundled in eventtap_uninstall_c. Safe to free the
+	// mach ports here precisely because Step 2 established that no watchdog
+	// handler and no wake block can still be holding them. ---
 	if r.uninstallFn != nil {
 		r.uninstallFn()
 	}
 
-	// --- Step 4: stop the watchdog GCD timer + its poller goroutine.
-	// In-flight handlers between Step 1 and here are already no-ops via
-	// the g_observed_tap snapshot guard in watchdog_darwin.m. ---
-	if r.watchdogStop != nil {
-		r.watchdogStop()
-		r.watchdogStop = nil
-	}
-
-	// --- Step 5: remove NSWorkspace wake / session-active observers.
-	// In-flight main-queue blocks are already no-ops via the
-	// g_observed_tap snapshot guard in wake_darwin.m. ---
-	if r.wakeStop != nil {
-		r.wakeStop()
-		r.wakeStop = nil
-	}
-
-	// (The unlock-code poller was already stopped and drained at the end of
-	// Step 1, before the ring wipe — see the comment there for why it
-	// cannot be left running across a memset of the ring it reads.)
+	// (The unlock-code poller was already stopped and drained at Step 3,
+	// before the ring wipe — see the comment there for why it cannot be
+	// left running across a memset of the ring it reads.)
 
 	// Drop references so a hypothetical re-call (which short-circuits via
 	// `released.Load()` anyway) has nothing to invoke. The C-side state
@@ -617,6 +713,17 @@ func installInternal(steps []hotkey.Spec, sink chan<- struct{}, log *slog.Logger
 		return nil, zero, ErrEmptyUnlockCode
 	}
 
+	// Refuse to reuse C-side state a previous teardown could not quiesce.
+	// Checked here — before `eventtap_install_c`, whose FIRST act is the
+	// `eventtap_wipe_ring()` memset — because that memset is the write that
+	// would race a still-live callback's plain ring stores. See the
+	// `teardownUnclean` doc comment for why the latch is one-way and why
+	// this costs nothing in production.
+	if teardownUnclean.Load() {
+		var zero C.CFMachPortRef
+		return nil, zero, ErrTeardownUnclean
+	}
+
 	// Pre-mask every step's modifiers with the user-intentional mask so the
 	// matcher compares pre-masked against pre-masked.
 	// matcher.UserIntentionalMask is the single source of truth for which
@@ -651,6 +758,27 @@ func installInternal(steps []hotkey.Spec, sink chan<- struct{}, log *slog.Logger
 		return nil, zero, fmt.Errorf("%w: rc=%d (likely Accessibility revoked, SecureEventInput active, or kernel out of mach ports)",
 			ErrTapInstallFailed, int(rc))
 	}
+
+	// Poller baseline, sampled HERE and nowhere else.
+	//
+	// `eventtap_install_c` above zeroed the ring and its counter, and the
+	// tap source it created has NOT been added to any run loop yet — the
+	// worker goroutine below does that. So this is the last instant in the
+	// whole install path at which the counter is provably quiescent, and
+	// the value read is provably 0.
+	//
+	// It is read here rather than inside `pollSequence` because the poller
+	// goroutine starts at the END of this function: between the worker's
+	// `CFRunLoopAddSource` and the poller's first statement lie the gesture
+	// tap install, the channel and closure setup, the `go` statement, and
+	// an unbounded scheduling delay. A `seq()` taken at the far end of that
+	// gap would treat every press recorded inside it as belonging to a
+	// previous session, and a full unlock code typed there would be
+	// swallowed with no diagnostic — the mode is silent on a failed match
+	// by design, so the only symptom would be a machine that did not
+	// unlock. Sampling before the tap can fire removes the gap instead of
+	// narrowing it.
+	baseSeq := seq()
 
 	// Worker goroutine: locks an OS thread, captures its CFRunLoop, adds
 	// the tap source to it, then blocks on CFRunLoopRun until Release calls
@@ -740,7 +868,18 @@ func installInternal(steps []hotkey.Spec, sink chan<- struct{}, log *slog.Logger
 	if hs.rc != 0 {
 		// Worker run-loop registration failed. Tear down the
 		// already-created tap so the kernel-side mach port doesn't leak.
-		C.eventtap_uninstall_c(cTap)
+		//
+		// The teardown rc is checked, not discarded: a non-zero means the
+		// drain handshake timed out and eventtap_uninstall_c deliberately
+		// left the source + tap RETAINED instead of releasing them (see its
+		// return-value docblock). That is the exact opposite of the "doesn't
+		// leak" this call was made for, so it must not pass silently. DEBUG
+		// matches uninstallFn below and the reachability here: on this path
+		// the worker goroutine died before CFRunLoopRun, so it services no
+		// blocks and the timeout is the EXPECTED outcome rather than a fault.
+		if rc := C.eventtap_uninstall_c(cTap); rc != 0 {
+			log.Debug("eventtap: teardown drain timed out during worker-handshake rollback; tap left retained rather than released")
+		}
 		var zero C.CFMachPortRef
 		if hs.rc == workerPanicSentinel {
 			// distinguish goroutine panic from C-side rc!= 0.
@@ -768,9 +907,25 @@ func installInternal(steps []hotkey.Spec, sink chan<- struct{}, log *slog.Logger
 	// path above — eventtap_uninstall_c tears down the main tap and stops
 	// the worker loop; the failed gesture install cleaned its own state.
 	if rc := C.gesturetap_install_c(hs.loop); rc != 0 {
-		C.eventtap_uninstall_c(cTap)
+		// Unlike the handshake-failure path above, the worker here is ALIVE
+		// and inside CFRunLoopRun, so a drain timeout is not the expected
+		// outcome — it means a live callback could not be proven idle and
+		// the main tap's source + mach port were left retained. WARN rather
+		// than DEBUG for that reason, and the rc is folded into the returned
+		// error so the diagnostic survives even at a log level that drops
+		// the line.
+		rollbackNote := ""
+		if urc := C.eventtap_uninstall_c(cTap); urc != 0 {
+			log.Warn("eventtap: teardown drain timed out during gesture-install rollback; main tap left retained rather than released")
+			rollbackNote = "; rollback drain timed out, main tap left retained"
+			// Worker loop alive + unprovable callback ⇒ the C-side statics
+			// must not be reused. Unlike the handshake-rollback site above
+			// (worker dead, nothing dispatches), a timeout here really can
+			// mean a live writer. See the `teardownUnclean` doc comment.
+			teardownUnclean.Store(true)
+		}
 		var zero C.CFMachPortRef
-		return nil, zero, fmt.Errorf("%w: gesture tap rc=%d (session-level dock-gesture suppression)", ErrTapInstallFailed, int(rc))
+		return nil, zero, fmt.Errorf("%w: gesture tap rc=%d (session-level dock-gesture suppression)%s", ErrTapInstallFailed, int(rc), rollbackNote)
 	}
 
 	stopPoller := make(chan struct{})
@@ -795,7 +950,32 @@ func installInternal(steps []hotkey.Spec, sink chan<- struct{}, log *slog.Logger
 		C.eventtap_set_observed_tap(zero)
 	}
 	uninstallFn := func() {
-		C.eventtap_uninstall_c(cTap)
+		// rc == 1 means the post-detach drain handshake timed out, so the C
+		// side deliberately left the source + tap retained rather than
+		// CFRelease them under a callback it could not prove idle, and
+		// SKIPPED its tail ring wipe for the same reason (see
+		// eventtap_uninstall_c). Two consequences, both worth a line: a
+		// leaked mach port, and the recorded keystrokes — which end with the
+		// unlock code the user just typed — left resident in process memory
+		// for the remainder of the process lifetime.
+		//
+		// WARN, not DEBUG. This closure is only ever constructed AFTER the
+		// worker handshake succeeded, i.e. the worker goroutine is alive and
+		// inside CFRunLoopRun, so a loop that services blocks in
+		// microseconds failing to service one in 100ms is a genuine fault,
+		// not the expected outcome. (The install-rollback call site, where
+		// the worker died before CFRunLoopRun and a timeout IS expected, is
+		// a different call site with its own DEBUG line.) Release still
+		// returns nil: there is nothing the caller can do about it, and the
+		// process is on its way out either way.
+		if rc := C.eventtap_uninstall_c(cTap); rc != 0 {
+			log.Warn("eventtap: teardown drain timed out; tap left retained rather than released and the keystroke ring left resident")
+			// Third consequence, and the one the C side cannot express on
+			// its own: a callback that could not be proven idle may still be
+			// appending to the ring, so no later install may memset it or
+			// publish a new g_tap. See the `teardownUnclean` doc comment.
+			teardownUnclean.Store(true)
+		}
 	}
 	// Gesture-tap closures capture NOTHING — the C side owns the canonical
 	// state via the gesturetap_darwin.m statics (same file-scope keying as
@@ -805,13 +985,61 @@ func installInternal(steps []hotkey.Spec, sink chan<- struct{}, log *slog.Logger
 		C.gesturetap_disable_c()
 	}
 	gestureUninstallFn := func() {
-		C.gesturetap_uninstall_c()
+		// Same contract as uninstallFn above, including the level: this
+		// closure too exists only on a path where the worker loop is alive
+		// and servicing blocks, so a timeout is a fault rather than the
+		// expected outcome. The gesture tap records nothing, so the only
+		// consequence here is the leaked source + mach port.
+		if rc := C.gesturetap_uninstall_c(); rc != 0 {
+			log.Warn("eventtap: gesture-tap teardown drain timed out; tap left retained rather than released")
+			// The gesture tap records nothing, but its drain runs the SAME
+			// handshake against the SAME worker loop the main tap's callback
+			// runs on — and it runs FIRST in Release. A timeout here is
+			// therefore evidence that loop is not servicing blocks, which is
+			// exactly the state in which the main callback cannot be proven
+			// idle either. Latch on it rather than waiting for the main
+			// tap's own timeout a step later.
+			teardownUnclean.Store(true)
+		}
 	}
 	// wipeRingFn captures nothing — the ring is a file-scope static in
 	// tap_darwin.m, keyed by file scope exactly like the gesture-tap
 	// closures above. Release invokes it at the end of Step 1.
+	//
+	// The wipe runs ON the worker thread, not here. Release has already
+	// stopped the ring's READER (the poller) by the time this is called, but
+	// the WRITER is a tap callback on the worker thread and the tap source is
+	// still attached to the worker loop at Step 1 — CGEventTapEnable(tap,
+	// false) carries no drain guarantee, and a mach message already queued on
+	// the tap port can produce a callback after any handshake this side could
+	// wait on. A memset issued from this goroutine would therefore be racing
+	// a pair of plain stores: a real C data race, which no later clean wipe
+	// can retroactively undo.
+	//
+	// eventtap_wipe_ring_on_worker sidesteps it instead of narrowing the
+	// window: the callback is a run-loop callout and the wipe is a block on
+	// that same run loop, so the THREAD serialises them and they cannot
+	// overlap at all. A callback dispatched after the block can still
+	// repopulate the ring, which is not a race and not read by anyone, and
+	// the airtight wipe inside eventtap_uninstall_c (source detached, drain
+	// confirmed) mops it up moments later.
+	//
+	// rc == 1 means the run-loop handshake timed out and the ring was NOT
+	// wiped here. Deliberately no fallback memset: falling back would
+	// re-introduce precisely the data race this call exists to avoid. The
+	// wipe at the tail of eventtap_uninstall_c is the second chance, but it
+	// is NOT unconditional — it too is skipped when that call's own drain
+	// times out, for the same data-race reason. A timeout in both places
+	// leaves the secret resident, which is why the uninstall path logs its
+	// timeout at WARN.
+	//
+	// Cost on the normal path is a run-loop wake round-trip — microseconds,
+	// and it delays only the wipe: both taps were disabled several statements
+	// earlier, so the user's keyboard is already back.
 	wipeRingFn := func() {
-		C.eventtap_wipe_ring()
+		if rc := C.eventtap_wipe_ring_on_worker(); rc != 0 {
+			log.Debug("eventtap: early ring wipe deferred to uninstall (worker handshake timed out)")
+		}
 	}
 
 	r := &Releaser{
@@ -842,7 +1070,7 @@ func installInternal(steps []hotkey.Spec, sink chan<- struct{}, log *slog.Logger
 	snapshotFn := newSnapshotFn()
 	go func() {
 		defer close(pollerDone)
-		pollSequence(stopPoller, seq, snapshotFn, seqMatcher, sink, log)
+		pollSequence(stopPoller, baseSeq, seq, snapshotFn, seqMatcher, sink, log)
 	}()
 
 	return r, cTap, nil
@@ -854,11 +1082,17 @@ func installInternal(steps []hotkey.Spec, sink chan<- struct{}, log *slog.Logger
 // `Release` follows the verbatim order:
 //
 //	Step 1: eventtap_enable(tap, 0) + eventtap_set_observed_tap(NULL)
-//	        + unlock-code poller close/drain + eventtap_wipe_ring
-//	Step 2: CFRunLoopRemoveSource  ┐
-//	Step 3: CFRelease(source+tap)  ┘  (both bundled in eventtap_uninstall_c)
-//	Step 4: watchdog_stop          (dispatch_source_cancel + Go poller drain)
-//	Step 5: wake_observer_remove   (NSWorkspace observers + g_observed_tap=NULL)
+//	        + gesturetap_disable_c
+//	Step 2: watchdog_stop          (cancel + synchronous cancel-handler drain)
+//	        wake_observer_remove   (NSWorkspace observers + g_observed_tap=NULL)
+//	Step 3: unlock-code poller close/drain + eventtap_wipe_ring_on_worker
+//	Step 4: gesturetap_uninstall_c (gesture source off the shared worker loop)
+//	Step 5: CFRunLoopRemoveSource → drain → CFRelease(source+tap)
+//	        + CFRunLoopStop        (bundled in eventtap_uninstall_c)
+//
+// The healers (Step 2) come down BEFORE the CFReleases (Steps 4-5), not
+// after: both call CGEventTapEnable on the ports those steps free, and the
+// Step 1 NULL write cannot stop a handler that already loaded the pointer.
 //
 // calls this from cmd/dndmode/main.go Step 16 (after controller,
 // before sup.Wait). The single returned Releaser is pushed onto

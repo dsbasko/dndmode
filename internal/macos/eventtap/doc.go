@@ -48,7 +48,13 @@
 //  2. The poller goroutine (poller.go) ticks every `pollInterval` (10ms)
 //     and probes `seq()` — a bare acquire-load through cgo. Unchanged
 //     counter (the steady state on an idle machine) means the tick ends
-//     there, before the ring memcpy.
+//     there, before the ring memcpy. Its starting point is a baseline
+//     PARAMETER, sampled by Install right after the ring was zeroed and
+//     before the tap source joins any run loop — the last instant at which
+//     the counter is provably quiescent. Sampling it inside the goroutine
+//     instead would discard everything typed between the tap going live and
+//     the goroutine being scheduled, and a code typed there would be
+//     swallowed with no diagnostic.
 //  3. On a changed counter it calls `snapshot()`, which memcpys the whole
 //     ring into a reused Go buffer and returns the press count that copy
 //     describes, then runs `matchAny` — pure Go, allocation-free — over
@@ -125,20 +131,93 @@
 //     window that could contain it. This holds only while the callback is
 //     the SOLE writer — which is why `eventtap_wipe_ring` (the Release-path
 //     clear of the ring and its counter) may be called ONLY after both taps
-//     are disabled, and never from the poller.
+//     are disabled, and never from the poller. Disabling is necessary but
+//     NOT sufficient: `CGEventTapEnable(tap, false)` carries no documented
+//     callback-drain guarantee, so an already-dispatched callback keeps
+//     running and would both race the memset and repopulate the ring after
+//     it. The two wipes that can have a live worker loop therefore reach it
+//     differently, because the tap source is attached at one of them and
+//     detached at the other:
+//     the uninstall-time wipe runs after `CFRunLoopRemoveSource` plus a
+//     confirmed `eventtap_drain_worker_callbacks` handshake — with the
+//     source off the loop, "no callback is running" also means "none can
+//     start", so the drain is conclusive;
+//     the Release Step 1 wipe cannot rely on a drain at all (a mach message
+//     already queued on the still-attached tap port can produce a callback
+//     after any handshake) and instead runs AS a block on the worker loop
+//     via `eventtap_wipe_ring_on_worker`. The callback is a run-loop callout
+//     on that same thread and a queued block is executed by it, so the two
+//     are serialised by the thread and cannot overlap. Both helpers report a
+//     handshake timeout to their caller rather than swallowing it, and both
+//     answer it the same way: on a timeout NOTHING callback-visible is
+//     touched non-atomically. `eventtap_uninstall_c` skips the CFReleases
+//     (leaking the mach port instead of freeing one a live callback may be
+//     executing against) AND skips its tail wipe (the callback's ring append
+//     is a pair of plain stores, so an overlapping memset is a data race,
+//     not a benign one); `eventtap_wipe_ring_on_worker` simply does not
+//     wipe, with no direct-memset fallback. The one write that still happens
+//     on the timeout path is `g_tap = NULL`, and it — like every access to
+//     `g_tap` and `g_gesture_tap`, including the callbacks' self-heal reads
+//     — goes through `__atomic_*`, which is what makes it well-defined
+//     rather than a race. The Go side logs the timeout at WARN on the
+//     teardown paths where the worker loop is alive (a loop that services
+//     blocks in microseconds failing to service one in 100ms is a fault),
+//     and at DEBUG on the install-rollback path where the worker died
+//     before `CFRunLoopRun` and a timeout is the expected outcome.
+//     It also LATCHES those WARN paths (`teardownUnclean` in tap_darwin.go):
+//     the C side keeps no record that a writer may still be outstanding, so
+//     a later install would run `eventtap_wipe_ring`'s memset against a
+//     callback still appending with plain stores and publish a fresh
+//     non-NULL `g_tap` that the same callback's post-enable re-check would
+//     read as "my tap is still current". Once set, this process refuses to
+//     install a tap again (`ErrTeardownUnclean`) — free in production,
+//     where `InstallAll` runs once and every latching path exits anyway.
 //   - The watchdog timer runs on a GCD high-priority dispatch queue
 //     via `dispatch_source_t` (`DISPATCH_SOURCE_TYPE_TIMER`). It calls into
 //     Go via `//export eventtap_watchdog_failed` — the package's only
 //     `//export`, and it is NOT reachable from the tap callback — after
 //     `watchdogState` has accumulated 5 consecutive
 //     `CGEventTapIsEnabled == false` probes (5 × 5s = 25s wall-clock).
-//     Healthy probes reset the counter.
+//     Healthy probes reset the counter. `watchdog_stop` nils the source
+//     before its BOUNDED drain, so a handler can outlive that wait; two
+//     structural properties — not the generation check, which is one read at
+//     the top and can be descheduled past — keep such a handler from
+//     disturbing its own session's teardown. Its failure counter is
+//     `__block`-local to that session, so its arithmetic reaches storage
+//     nobody reads; and every tap access compares `g_observed_tap` against
+//     the session's own retained `tap` by pointer IDENTITY, so a freshly
+//     published pointer reads as "not mine" rather than as proof that the
+//     stale tap is still current. The session generation (`g_watchdog_gen`)
+//     remains as a cheap early-out on top of both. What those C-side guards
+//     cannot cover is a LATER session, because two things the handler does
+//     re-read process-global state after its last check: `gesturetap_reenable`
+//     loads `g_gesture_tap` fresh, and `eventtap_watchdog_failed` flips a
+//     latch carrying no session identity. So a timed-out drain latches
+//     `teardownUnclean` on the Go side and this process refuses to install
+//     again — a second session, and with it both effects, becomes
+//     unreachable rather than merely narrow. `StartWatchdog` re-checks that
+//     same latch on entry, so the refusal is a property of the watchdog
+//     constructor and not merely of the one install path that calls it.
+//     Symmetrically, the Go-side `stop` closure JOINS its threshold poller
+//     rather than only signalling it, so the package-global latches that the
+//     next `StartWatchdog` resets have no in-flight reader.
 //   - The wake observer (`wake_darwin.m`) attaches to NSWorkspace
 //     notifications `NSWorkspaceDidWakeNotification` +
 //     `NSWorkspaceSessionDidBecomeActiveNotification` and calls
 //     `CGEventTapEnable(tap, true)` from the AppKit notification thread.
 //     Re-enable is idempotent — calling it on an already-enabled tap is a
 //     no-op per Apple's documentation.
+//   - Both of those subsystems exist to re-enable the taps, which makes
+//     their teardown ORDER part of the memory-safety argument rather than a
+//     matter of taste: `Releaser.Release` stops them (watchdog first, then
+//     the wake observers) BEFORE it CFReleases either tap, and
+//     `watchdog_stop` waits for its source's cancel handler so "stopped"
+//     means "no handler is running and none can start". The shared
+//     `g_observed_tap` NULL write earlier in Release is a guard for
+//     handlers that have not started yet; it cannot reach one that already
+//     loaded the pointer, which is why the ordering — plus a CFRetain the
+//     watchdog holds on the tap for the lifetime of its source — is what
+//     actually rules out a use-after-free.
 //
 // # Synthetic NSEventTypeApplicationDefined subtype reservation
 //

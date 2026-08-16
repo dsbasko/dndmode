@@ -11,13 +11,14 @@ package eventtap
 #include <CoreGraphics/CoreGraphics.h>
 
 extern int  watchdog_start(CFMachPortRef tap);
-extern void watchdog_stop(void);
+extern int  watchdog_stop(void);
 */
 import "C"
 
 import (
 	"fmt"
 	"log/slog"
+	"sync"
 	"sync/atomic"
 	"time"
 	"unsafe"
@@ -221,13 +222,67 @@ func startWatchdog(tap unsafe.Pointer) error {
 }
 
 // stopWatchdog wires the Go-side cgo bridge into `watchdog_stop`
-// (watchdog_darwin.m), which cancels and nils the dispatch_source_t.
-// Called by Releaser.Release as part of the LIFO teardown chain.
+// (watchdog_darwin.m), which cancels the dispatch_source_t AND waits for
+// any in-flight handler invocation to finish. Called by Releaser.Release as
+// part of the LIFO teardown chain, BEFORE either tap is released.
 //
-// Idempotent — safe to call when no watchdog has been started.
-func stopWatchdog() {
-	C.watchdog_stop()
+// Returns true when the drain was established (no handler is running and
+// none can start again), false when the bounded wait expired first. The
+// caller surfaces a false at WARN: it is the one signal that the ordering
+// guarantee the rest of the teardown chain leans on did not hold this time.
+// It is not a fatal condition for the CURRENT teardown — watchdog_start
+// CFRetains BOTH the main tap and the gesture tap for the source's lifetime
+// and drops those references only from the cancel handler, so a late handler
+// dereferences live mach ports regardless — so nothing aborts on it. The
+// caller does latch `teardownUnclean` on a false, which forbids any LATER
+// install in this process: a stale handler is harmless against its own
+// session's state but not against a second session's, and no C-side guard
+// can cover a deschedule that lands after its last check. See the WARN site
+// in StartWatchdog's stop closure for the two cross-session effects.
+//
+// Idempotent — safe to call when no watchdog has been started (returns
+// true: no source means no handler).
+func stopWatchdog() bool {
+	return C.watchdog_stop() == 0
 }
+
+// watchdogLifecycle serialises a watchdog session's OPEN against its CLOSE.
+// Held for the whole of `StartWatchdog` and for the whole of the `stop`
+// closure it returns, so the two can never interleave.
+//
+// It exists because the `teardownUnclean` guard in StartWatchdog is a
+// check-then-act, and the act it guards against becomes available BEFORE the
+// latch that forbids it is set. `watchdog_stop` nils `g_watchdog` — freeing
+// the C-side "already started" slot — and only THEN performs its bounded
+// cancel-handler wait; the Go side latches `teardownUnclean` after that wait
+// reports a timeout. A concurrent `StartWatchdog` landing inside that window
+// reads the latch as false, finds the C slot free, and opens a second session
+// while a handler of the first is still in flight — precisely the state the
+// latch was added to make impossible. The stale handler's
+// `eventtap_watchdog_failed()` flips a package-global latch carrying no
+// session identity, so the fresh poller would read that trip as its own and
+// drive main.go into a spurious abnormal exit; `gesturetap_reenable()` would
+// likewise act on the new session's port, which the stale handler never
+// retained. Both are the effects documented on `g_watchdog_gen` as
+// "structurally unreachable because no second session can exist" — this mutex
+// is what keeps that sentence true when Start and stop run on different
+// goroutines.
+//
+// Scope is the COMPLETE transition, not just the drain: StartWatchdog's latch
+// resets and poller spawn are as much a part of opening a session as
+// `watchdog_start` is, and stop's poller close+join is as much a part of
+// closing one as `watchdog_stop` is. A mutex around only the C calls would
+// leave the previous poller's `CompareAndSwap` racing the next session's
+// `Store(false)`.
+//
+// Deadlock-free and bounded: neither critical section blocks on the other,
+// `pollWatchdogThreshold` never touches this mutex, and the two waits inside
+// (poller join <= watchdogPollInterval, cancel drain <=
+// DND_WATCHDOG_DRAIN_TIMEOUT_NS) are both bounded, so a contending
+// StartWatchdog waits at most ~600ms. No lock-order inversion with
+// `Releaser.mu`: Release takes its own mutex and then this one via the stop
+// closure, and StartWatchdog never takes Releaser.mu at all.
+var watchdogLifecycle sync.Mutex
 
 // StartWatchdog installs the GCD watchdog timer and spawns the Go-side
 // threshold poller goroutine. Returns a `stop` closure that tears down
@@ -252,27 +307,77 @@ func stopWatchdog() {
 //
 // The returned `stop` closure does:
 //
-//  1. Close the poller's internal stop channel — the goroutine exits its
-//     ticker loop on the next iteration (<= 100ms).
-//  2. Call `stopWatchdog()` — cancels the GCD source and nils the global
-//     in watchdog_darwin.m. After this returns, the timer block will not
-//     fire again (an in-flight invocation may still complete on the GCD
-//     queue, but it sees `g_watchdog == nil` is irrelevant — the handler
-//     captured `tap` by value, and the defensive null-check in the block
-//     covers the freed-tap race).
+//  1. Close the poller's internal stop channel and then WAIT for the
+//     goroutine to exit (<= 100ms, one ticker period). The wait is not
+//     cosmetic: the poller's latches and sink are package-globals that the
+//     next StartWatchdog resets and reuses, so a goroutine still in flight
+//     after stop returned could consume the new session's threshold signal
+//     or flip the exit-code latch it just cleared. Mirrors the tap
+//     Releaser's own stopPoller/pollerDone pair.
+//  2. Call `stopWatchdog()` — cancels the GCD source, nils the global in
+//     watchdog_darwin.m, and BLOCKS until the source's cancel handler has
+//     run. libdispatch invokes that handler only after the last event
+//     handler has returned, so once this closure returns true no handler is
+//     running and none can start again. A false means the bounded wait
+//     expired instead; it is logged at WARN and latches `teardownUnclean`
+//     (so this process may not install a tap — and therefore may not open a
+//     second watchdog session — again), but nothing aborts, because the
+//     CFRetains watchdog_start holds on the main tap AND on the gesture tap
+//     keep both ports alive for a late handler either way.
 //
 // IMPORTANT: the closure does NOT release the underlying tap port —
-// that ownership stays with `tap.Install`'s Releaser. main.go
-// composes both: `stop()` first, then `tapReleaser.Release()`. Inverted
-// order is unsafe (GCD handler in-flight may still call CGEventTapIsEnabled
-// on a freed port).
+// that ownership stays with the Releaser built by `installInternal`.
+// `Releaser.Release` runs this closure BEFORE the CF teardown of either
+// tap, which is what makes "handler drained" mean "safe to CFRelease".
+// Inverted order is unsafe (a GCD handler in-flight may still call
+// CGEventTapIsEnabled on a freed port) — it is also what the composite
+// Release used to do, and fixing it is why this closure now drains.
+//
+// Returns ErrTeardownUnclean — before touching either latch or the C side
+// — when a previous teardown in this process could not prove its callback
+// idle. `installInternal` already refuses on the same latch, so in the
+// composed path this check never fires; it is here because `StartWatchdog`
+// is exported and therefore is its own entry point into a fresh watchdog
+// session, and the two things a session opens (the `watchdogThresholdHit` /
+// `watchdogTripped` reset below, and the GCD source in `watchdog_start`)
+// are exactly the state a stale handler from the previous session can still
+// reach. Guarding the constructor itself, rather than only its one current
+// caller, keeps that argument true of the function instead of true of the
+// call graph.
+//
+// That guard is a check-then-act, so it is not self-sufficient: the C side
+// frees its session slot BEFORE the bounded drain whose timeout sets the
+// latch, leaving a window in which the latch reads false and a second session
+// is nonetheless installable. `watchdogLifecycle` closes it by serialising
+// this whole function against the whole `stop` closure — see that mutex's doc
+// comment for the two cross-session effects a Start inside the window would
+// re-open.
 //
 // Safe to call from any goroutine, but expected to run from main (Install
-// chain).
+// chain). A call concurrent with a `stop` in progress does not race — it
+// blocks on `watchdogLifecycle` until that teardown has finished writing its
+// verdict, then sees the settled latch.
 func StartWatchdog(tap unsafe.Pointer, sink chan<- struct{}, log *slog.Logger) (stop func(), err error) {
 	if log == nil {
 		log = slog.Default()
 	}
+
+	// Held across the ENTIRE open — guard, latch resets, `watchdog_start`,
+	// poller spawn — so no `stop` closure can be mid-teardown while any of
+	// it runs. Without it the guard below is a check-then-act against a
+	// window `watchdog_stop` deliberately opens: it frees the C-side session
+	// slot before its bounded drain, and `teardownUnclean` is only latched
+	// after that drain reports a timeout. See the mutex's doc comment.
+	watchdogLifecycle.Lock()
+	defer watchdogLifecycle.Unlock()
+
+	// Checked BEFORE the latch resets below: clearing `watchdogTripped` is
+	// itself observable (main.go maps it to the abnormal exit code), so a
+	// rejected Start must leave both latches exactly as it found them.
+	if teardownUnclean.Load() {
+		return nil, ErrTeardownUnclean
+	}
+
 	// Reset latch on every fresh Start — supports test fixtures and the
 	// theoretical Stop-then-Start cycle, even though production has a
 	// single Start per process lifetime (Install runs once). Reset
@@ -288,16 +393,100 @@ func StartWatchdog(tap unsafe.Pointer, sink chan<- struct{}, log *slog.Logger) (
 	}
 
 	stopPoller := make(chan struct{})
-	go pollWatchdogThreshold(stopPoller, &watchdogThresholdHit, sink, log)
+	pollerDone := make(chan struct{})
+	go func() {
+		defer close(pollerDone)
+		pollWatchdogThreshold(stopPoller, &watchdogThresholdHit, sink, log)
+	}()
 
 	stop = func() {
+		// Held across the ENTIRE close, for the same reason StartWatchdog
+		// holds it across the entire open: the two halves of this closure
+		// (poller join, C-side drain) each publish state the next session
+		// resets and reuses, and the `teardownUnclean` store below is the
+		// only thing standing between a timed-out drain and a second
+		// session. Taking the mutex here rather than around `stopWatchdog`
+		// alone is what makes "no Start can observe the latch before this
+		// closure has finished writing it" a property of the code and not of
+		// the caller. See the mutex's doc comment.
+		watchdogLifecycle.Lock()
+		defer watchdogLifecycle.Unlock()
+
 		// Stop the poller FIRST so it cannot observe a stale latch flip
 		// between watchdog_stop and the close below. (Even if the GCD
 		// block managed to flip the latch after we stop the C side, the
 		// poller goroutine is already on its way out — a benign late
 		// Store(true) just goes nowhere.)
 		close(stopPoller)
-		stopWatchdog()
+		// Then JOIN it, mirroring what the tap Releaser does with its own
+		// poller (tap_darwin.go Step 3). Closing the channel only asks the
+		// goroutine to leave; it can still be between its ticker wake-up and
+		// its CompareAndSwap, and every piece of state it touches from there
+		// is package-global and reused by the NEXT StartWatchdog:
+		// `watchdogThresholdHit` (whose CAS it would consume, swallowing the
+		// new session's threshold trip), `watchdogTripped` (which the new
+		// StartWatchdog just cleared, and which main.go maps to the abnormal
+		// exit code), and `sink` (the PREVIOUS supervisor's channel). Waiting
+		// here makes "stop returned" mean the goroutine is gone, which is the
+		// only thing that makes those globals safe to reset.
+		//
+		// Bounded by watchdogPollInterval (100ms) and deadlock-free: the
+		// poller takes no locks and its only send is non-blocking.
+		<-pollerDone
+		if !stopWatchdog() {
+			// Latch the process as un-reinstallable, exactly as the tap's
+			// own drain-timeout paths do — see the `teardownUnclean`
+			// docstring in tap_darwin.go, which this case now shares.
+			//
+			// A timeout here means a GCD handler of this session may still
+			// be in flight with no bound on when it resumes. Two of the
+			// things such a handler does are safe against its OWN session
+			// (watchdog_start CFRetains both ports for the source's
+			// lifetime, and its failure counter is `__block`-local) but not
+			// against a LATER one, because both reach state that a restart
+			// republishes:
+			//
+			//   - `gesturetap_reenable()` loads `g_gesture_tap` fresh at
+			//     call time, so a stale handler that resumed after a
+			//     re-Install would enable — and could dereference — the NEW
+			//     session's gesture port, which it never retained.
+			//   - `eventtap_watchdog_failed()` flips a package-global latch
+			//     carrying no session identity, so a stale handler reaching
+			//     its fifth local failure would trip the NEW session's
+			//     poller into a spurious watchdog exit.
+			//
+			// Neither is reachable from a C-side guard: both windows open
+			// after the handler's last generation / identity check, and no
+			// single check can cover a deschedule that lands behind it. What
+			// closes them is that both need a second session to exist at
+			// all, and this latch guarantees none can: `installInternal`
+			// refuses with ErrTeardownUnclean and is the only caller of
+			// `gesturetap_install_c`, and `StartWatchdog` re-checks the same
+			// latch itself, so the exported constructor cannot open a second
+			// watchdog session behind installInternal's back either. The
+			// stale handler is then left with the ports it retained and a
+			// latch whose poller was already joined above.
+			//
+			// The store below happens under `watchdogLifecycle`, which this
+			// closure took on entry. That is what makes the latch a real
+			// barrier rather than a late announcement: the C-side session
+			// slot fell free inside `stopWatchdog` (it nils `g_watchdog`
+			// before its bounded wait), so between there and here a
+			// concurrent `StartWatchdog` would have found both the guard
+			// false and the slot available. Holding the mutex across the
+			// whole closure means any such Start is still parked at the lock
+			// and will read the latch already set.
+			//
+			// WARN, not DEBUG: the teardown chain that runs after this
+			// closure CFReleases both taps on the strength of "no handler
+			// can be running", and this line is the only place that
+			// assumption is ever observably violated. Both ports stay alive
+			// for a late handler either way (only the source's cancel
+			// handler drops those retains), so this is a diagnostic plus a
+			// latch, not a failure the caller must act on.
+			teardownUnclean.Store(true)
+			log.Warn("eventtap watchdog: cancel-handler drain timed out; a probe may still be in flight, tap is not reinstallable in this process")
+		}
 	}
 	return stop, nil
 }

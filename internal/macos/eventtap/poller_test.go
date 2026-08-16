@@ -251,7 +251,7 @@ func TestMatchAny_TableDriven(t *testing.T) {
 			ring, to := newRing(tt.start, mustEvents(t, tt.typed))
 			tail := make([]matcher.KeyEvent, m.Len())
 
-			if got := matchAny(ring, tt.start, to, tail, m); got != tt.want {
+			if got := matchAny(ring, tt.start, tt.start, to, tail, m); got != tt.want {
 				t.Errorf("matchAny(code=%q, typed=%q, [%d,%d)) = %v, want %v",
 					tt.code, tt.typed, tt.start, to, got, tt.want)
 			}
@@ -273,10 +273,61 @@ func TestMatchAny_ExactLengthHistory(t *testing.T) {
 	if to != uint64(m.Len()) {
 		t.Fatalf("fixture: to = %d, want %d", to, m.Len())
 	}
-	if !matchAny(ring, 0, to, tail, m) {
+	if !matchAny(ring, 0, 0, to, tail, m) {
 		t.Error("matchAny = false for a code entered as the first keystrokes " +
 			"of the session; the `end+1 < l` guard must not skip the first " +
 			"complete window")
+	}
+}
+
+// TestMatchAny_WindowSpanningBaseline pins the floor the baseline puts
+// under the window START, not just under the window end. A poller re-armed
+// over a ring that still holds a previous tap's keystrokes is handed `base`
+// = the press count at rearm; a window that begins below it splices stale
+// records onto fresh ones and must never match, however convincing the
+// concatenation looks.
+//
+// The fixture is the exact failure it prevents: `s w o r` recorded before
+// the rearm and a single `d` after it. Every record is genuinely in the
+// ring, the five are consecutive, and the concatenation IS the unlock
+// code — only the baseline separates them.
+//
+// Production never reaches this case (Install samples the baseline over a
+// freshly zeroed ring, so `base` is 0 and the floor is inert), which is
+// precisely why it needs a test: nothing else would notice if the guarantee
+// pollSequence documents stopped holding.
+func TestMatchAny_WindowSpanningBaseline(t *testing.T) {
+	t.Parallel()
+
+	const code = "s w o r d"
+	// base is the press count at rearm: the first four presses predate it,
+	// the fifth is the only fresh one.
+	const base uint64 = 4
+
+	m := mustSequence(t, code)
+	tail := make([]matcher.KeyEvent, m.Len())
+	ring, to := newRing(0, mustEvents(t, code))
+
+	if matchAny(ring, base, base, to, tail, m) {
+		t.Errorf("matchAny(base=%d) = true for a window starting at 0 — four "+
+			"of the five records predate the baseline and must not be "+
+			"spliced onto the fresh one", base)
+	}
+
+	// Control: the same ring over the same range DOES match when the
+	// baseline says every record belongs to this session. Without it the
+	// assertion above would also pass if matchAny had simply gone deaf.
+	if !matchAny(ring, 0, base, to, tail, m) {
+		t.Error("matchAny(base=0) = false for the same ring and range — the " +
+			"fixture must be a real match that only the baseline suppresses")
+	}
+
+	// And the floor suppresses spliced windows, not the poller: a code typed
+	// entirely after the baseline still matches.
+	fresh, freshTo := newRing(base, mustEvents(t, code))
+	if !matchAny(fresh, base, base, freshTo, tail, m) {
+		t.Error("matchAny = false for a code typed entirely after the " +
+			"baseline; a re-armed poller must still unlock")
 	}
 }
 
@@ -291,7 +342,7 @@ func TestMatchAny_EmptyRange(t *testing.T) {
 	ring, to := newRing(0, mustEvents(t, "s w o r d"))
 	tail := make([]matcher.KeyEvent, m.Len())
 
-	if matchAny(ring, to, to, tail, m) {
+	if matchAny(ring, 0, to, to, tail, m) {
 		t.Errorf("matchAny with from == to == %d = true, want false "+
 			"(no new keystrokes to consider)", to)
 	}
@@ -344,7 +395,7 @@ func TestMatchAny_LagDropsAgedOutEvents(t *testing.T) {
 		tail := make([]matcher.KeyEvent, m.Len())
 		ring := buildStream(t, 100) // recycled long before the snapshot
 
-		if matchAny(ring, 0, to, tail, m) {
+		if matchAny(ring, 0, 0, to, tail, m) {
 			t.Error("matchAny = true for a code that aged out of the ring; " +
 				"the clamp must keep the poller from reading recycled slots")
 		}
@@ -357,7 +408,7 @@ func TestMatchAny_LagDropsAgedOutEvents(t *testing.T) {
 		tail := make([]matcher.KeyEvent, m.Len())
 		ring := buildStream(t, to-5) // the newest five records
 
-		if !matchAny(ring, 0, to, tail, m) {
+		if !matchAny(ring, 0, 0, to, tail, m) {
 			t.Error("matchAny = false for a code sitting in the newest records; " +
 				"the clamp must not discard live history")
 		}
@@ -377,7 +428,7 @@ func TestMatchAny_DoesNotAllocate(t *testing.T) {
 	tail := make([]matcher.KeyEvent, m.Len())
 
 	if got := testing.AllocsPerRun(100, func() {
-		matchAny(ring, 0, to, tail, m)
+		matchAny(ring, 0, 0, to, tail, m)
 	}); got != 0 {
 		t.Errorf("matchAny allocated %v times per run, want 0", got)
 	}
@@ -398,7 +449,6 @@ func TestMatchAny_DoesNotAllocate(t *testing.T) {
 type fakeRing struct {
 	mu        sync.Mutex
 	events    []matcher.KeyEvent
-	seqCalls  int
 	snapCalls int
 }
 
@@ -411,7 +461,6 @@ func (f *fakeRing) push(evs ...matcher.KeyEvent) {
 func (f *fakeRing) seq() uint64 {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	f.seqCalls++
 	return uint64(len(f.events))
 }
 
@@ -431,29 +480,15 @@ func (f *fakeRing) snapshotCount() int {
 	return f.snapCalls
 }
 
-func (f *fakeRing) seqCount() int {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	return f.seqCalls
-}
-
-// waitStarted blocks until the poller has taken its initial sequence
-// reading. pollSequence seeds lastSeq from seq() before entering the loop,
-// so a push() racing that read would be classified as pre-existing input and
-// never matched — the test would then fail for a reason that has nothing to
-// do with the code under test.
-func (f *fakeRing) waitStarted(t *testing.T) {
-	t.Helper()
-	deadline := time.Now().Add(20 * pollInterval)
-	for time.Now().Before(deadline) {
-		if f.seqCount() > 0 {
-			return
-		}
-		time.Sleep(pollInterval / 10)
-	}
-	t.Fatalf("pollSequence did not read the sequence counter within %v of starting",
-		20*pollInterval)
-}
+// There is deliberately no waitStarted helper here any more. It used to
+// block until the poller had taken its initial seq() reading, because
+// pollSequence seeded lastSeq itself and a push() racing that read would be
+// misclassified as pre-existing input. The baseline is now a parameter,
+// sampled by the caller BEFORE the goroutine starts, so no push can race it
+// and there is nothing to wait for. Reintroducing such a helper would be a
+// sign the parameter had been turned back into an in-goroutine read — which
+// is precisely the production race (a code typed before the poller is
+// scheduled, silently swallowed) that moving it out closed.
 
 // discardLogger keeps test output clean while still exercising every
 // log.Debug / log.Info call site (a nil logger would too, but through
@@ -469,6 +504,13 @@ func discardLogger() *slog.Logger {
 //
 // stop() is idempotent (sync.Once) so a test can assert on shutdown timing
 // itself without the cleanup closing an already-closed channel.
+//
+// The baseline is sampled here, synchronously, before the goroutine is
+// launched — the same discipline Install follows (it reads the counter while
+// the tap source is not yet attached to a run loop). That is what makes
+// "everything pushed before startPoller is pre-existing, everything pushed
+// after is this session's input" a deterministic property of these tests
+// rather than a race against the Go scheduler.
 func startPoller(t *testing.T, f *fakeRing, m *matcher.Sequence, sink chan struct{}) (stop func(), done chan struct{}) {
 	t.Helper()
 
@@ -476,10 +518,12 @@ func startPoller(t *testing.T, f *fakeRing, m *matcher.Sequence, sink chan struc
 	var once sync.Once
 	stop = func() { once.Do(func() { close(stopCh) }) }
 
+	baseSeq := f.seq()
+
 	done = make(chan struct{})
 	go func() {
 		defer close(done)
-		pollSequence(stopCh, f.seq, f.snapshot, m, sink, discardLogger())
+		pollSequence(stopCh, baseSeq, f.seq, f.snapshot, m, sink, discardLogger())
 	}()
 
 	t.Cleanup(func() {
@@ -492,7 +536,6 @@ func startPoller(t *testing.T, f *fakeRing, m *matcher.Sequence, sink chan struc
 		}
 	})
 
-	f.waitStarted(t)
 	return stop, done
 }
 
@@ -583,7 +626,7 @@ func TestPollSequence_StopChannel_StopsPolling(t *testing.T) {
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		pollSequence(stop, f.seq, f.snapshot, m, sink, discardLogger())
+		pollSequence(stop, 0, f.seq, f.snapshot, m, sink, discardLogger())
 	}()
 
 	time.Sleep(3 * pollInterval)
@@ -617,10 +660,9 @@ func TestPollSequence_FullSinkBuffer_DoesNotBlock(t *testing.T) {
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		pollSequence(make(chan struct{}), f.seq, f.snapshot, m, sink, discardLogger())
+		pollSequence(make(chan struct{}), 0, f.seq, f.snapshot, m, sink, discardLogger())
 	}()
 
-	f.waitStarted(t)
 	f.push(mustEvents(t, "s w o r d")...)
 
 	select {
@@ -655,10 +697,14 @@ func TestPollSequence_NoKeystrokes_SkipsSnapshot(t *testing.T) {
 	}
 }
 
-// TestPollSequence_PreExistingKeystrokes_NotReplayed pins the initial
-// lastSeq = seq() read: records that predate the goroutine belong to a
-// previous tap and must not be matched. Without it, re-arming a tap over a
-// live ring would unlock instantly off stale input.
+// TestPollSequence_PreExistingKeystrokes_NotReplayed pins the baseline
+// parameter: records below it belong to a previous tap and must not be
+// matched. Without it, re-arming a tap over a live ring would unlock
+// instantly off stale input.
+//
+// startPoller samples the baseline synchronously, so the five records pushed
+// below are unambiguously beneath it — the assertion no longer depends on
+// beating the scheduler.
 func TestPollSequence_PreExistingKeystrokes_NotReplayed(t *testing.T) {
 	t.Parallel()
 
@@ -676,6 +722,46 @@ func TestPollSequence_PreExistingKeystrokes_NotReplayed(t *testing.T) {
 	case <-sink:
 		t.Error("sink received a signal for keystrokes that predate the poller")
 	default:
+	}
+}
+
+// TestPollSequence_KeystrokesBeforeGoroutineStart_StillMatch is the twin of
+// the test above, pinning the same boundary from the other side: records at
+// or above the baseline belong to THIS session and must match even when
+// every one of them landed before the poller goroutine ran a single
+// statement.
+//
+// This is the shape Install produces. The baseline is sampled while the tap
+// source is not yet attached to any run loop; the callback goes live and the
+// poller goroutine starts several steps later (gesture-tap install, channel
+// and closure setup, the `go` statement, scheduling). Anything typed in that
+// gap — up to and including the whole unlock code — sits above the baseline
+// and must still unlock. Seeding lastSeq from seq() inside the goroutine
+// instead would classify all of it as pre-existing and swallow the code with
+// no diagnostic whatsoever, because a failed match is silent by design.
+func TestPollSequence_KeystrokesBeforeGoroutineStart_StillMatch(t *testing.T) {
+	t.Parallel()
+
+	f := &fakeRing{}
+	m := mustSequence(t, "s w o r d")
+	sink := make(chan struct{}, 1)
+
+	// Baseline first, on an empty ring — exactly as Install does — and only
+	// then the entire code, all of it before pollSequence starts.
+	baseSeq := f.seq()
+	f.push(mustEvents(t, "s w o r d")...)
+
+	stopCh := make(chan struct{})
+	var once sync.Once
+	t.Cleanup(func() { once.Do(func() { close(stopCh) }) })
+	go pollSequence(stopCh, baseSeq, f.seq, f.snapshot, m, sink, discardLogger())
+
+	select {
+	case <-sink:
+	case <-time.After(20 * pollInterval):
+		t.Fatalf("sink did not receive within %v — a code entered between the "+
+			"baseline sample and the poller's first tick must still match",
+			20*pollInterval)
 	}
 }
 
@@ -824,10 +910,10 @@ func TestMatchAny_ToBeforeFrom(t *testing.T) {
 
 	// The code IS in the ring and would match over [0, cur) — the point is
 	// that an inverted range must not consult it at all.
-	if !matchAny(ring, 0, cur, tail, m) {
+	if !matchAny(ring, 0, 0, cur, tail, m) {
 		t.Fatal("precondition failed: the code is not in the ring")
 	}
-	if matchAny(ring, cur, 0, tail, m) {
+	if matchAny(ring, 0, cur, 0, tail, m) {
 		t.Errorf("matchAny(ring, %d, 0, …) = true, want false — a counter "+
 			"reset must collapse the range, not replay the whole ring", cur)
 	}

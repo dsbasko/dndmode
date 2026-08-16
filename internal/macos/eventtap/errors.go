@@ -45,6 +45,34 @@ var ErrTapInstallFailed = errors.New("eventtap: CGEventTapCreate returned NULL (
 // before CGEventTapCreate so no mach port is created on this path.
 var ErrEmptyUnlockCode = errors.New("eventtap: unlock code has no steps")
 
+// ErrTeardownUnclean is returned by InstallAll / installTapOnly — and by
+// StartWatchdog, which re-checks the latch so the exported constructor is
+// fenced off in its own right and not merely by its one current caller —
+// when an EARLIER teardown in this process could not prove a C-side callback
+// idle and the C-side statics are therefore not safe to reuse. Two drains
+// can leave that state behind:
+//
+//   - the tap's own drain handshake, timing out on a path where the worker
+//     run loop was alive (`eventtap_callback` may still be running);
+//   - the watchdog's cancel-handler drain in `StartWatchdog`'s stop closure,
+//     timing out with a GCD probe handler still in flight.
+//
+// See the `teardownUnclean` latch in tap_darwin.go for the full argument;
+// the short form for the first is that installing again would memset the
+// shared keystroke ring under a callback that may still be appending to it
+// with plain stores, and would publish a `g_tap` that makes that callback's
+// own teardown re-check read as "still current". For the second it is that a
+// stale watchdog handler re-reads `g_gesture_tap` and writes a session-less
+// threshold latch, so a second session would inherit a gesture port that
+// handler never retained and a threshold trip that is not its own.
+//
+// Not reachable in production: `InstallAll` runs once per process and the
+// only paths that can set the latch already end in an exit. It exists so the
+// unreachable case is an explicit, testable error rather than a silent data
+// race, and it is checked before CGEventTapCreate so no mach port is created
+// on this path.
+var ErrTeardownUnclean = errors.New("eventtap: previous teardown could not prove the tap callback idle; tap is not reinstallable in this process")
+
 // Watchdog signalling contract (note):
 //
 // The watchdog has observed `CGEventTapIsEnabled == false` in 5 consecutive

@@ -27,11 +27,22 @@ static id g_session_token = nil;
 // window for BOTH subsystems in a single atomic write. See the docstring
 // above the definition in watchdog_darwin.m for full rationale.
 //
-// `volatile` is mandatory here too: this file's blocks run on
-// `[NSOperationQueue mainQueue]` while the writer runs on the goroutine
-// that drives Release (typically also main, but cross-thread invariants
-// are defended unconditionally).
-extern volatile CFMachPortRef g_observed_tap;
+// Accessed through `__atomic_*` (RELAXED) on both ends, exactly as in the
+// defining file — `volatile`, which this declaration used to carry, forbids
+// register caching but is not a memory-model guarantee, so a volatile
+// load racing the Release-path store is still a C data race.
+//
+// LIFETIME here rests on thread confinement rather than on the retain the
+// watchdog takes: these blocks run on `[NSOperationQueue mainQueue]`, i.e.
+// on the main thread, and `wake_observer_remove` is main-thread-only by
+// AppKit contract, so `Releaser.Release` — which calls it — necessarily
+// runs on that same thread. A block therefore cannot be mid-flight while
+// Release executes: the thread is inside Release. A block enqueued before
+// the observers were removed but not yet started runs after Release
+// returns, reads NULL, and no-ops. Should Release ever be moved off the
+// main goroutine, this argument collapses and these blocks would need the
+// same retain-based lifetime the watchdog handler has.
+extern CFMachPortRef g_observed_tap;
 
 // gesturetap_reenable lives in gesturetap_darwin.m. Called from both
 // observer blocks after their g_observed_tap NULL-guard: sleep / fast user
@@ -77,14 +88,14 @@ int wake_observer_install(CFMachPortRef tap) {
                                     queue:[NSOperationQueue mainQueue]
                                usingBlock:^(NSNotification *n) {
         (void)n;
-        // guard: snapshot g_observed_tap BEFORE
-        // any CGEventTapEnable call. Between Release Step 1 (NULL write)
-        // and Step 5 (wake_observer_remove), this block may still fire
-        // from a pending main-queue dispatch. Snapshot pattern ensures
-        // either we no-op safely (snap == NULL) or we hold a local that
-        // remained valid throughout — same rationale as the watchdog
-        // handler in watchdog_darwin.m.
-        CFMachPortRef tap_snap = g_observed_tap;
+        // guard: snapshot g_observed_tap BEFORE any CGEventTapEnable call.
+        // Between Release Step 1 (NULL write) and the wake-observer removal
+        // this block may still fire from a pending main-queue dispatch, and
+        // a NULL snapshot is what makes that a no-op instead of a re-enable
+        // of a tap being torn down. See the extern declaration above for why
+        // the snapshot stays VALID (main-thread confinement) as opposed to
+        // merely non-NULL.
+        CFMachPortRef tap_snap = __atomic_load_n(&g_observed_tap, __ATOMIC_RELAXED);
         if (tap_snap == NULL) {
             return;
         }
@@ -102,7 +113,7 @@ int wake_observer_install(CFMachPortRef tap) {
         // factored into a helper because Objective-C blocks capturing
         // function pointers across notification names obscure stack
         // traces, and a 4-line snapshot pattern is its own documentation.
-        CFMachPortRef tap_snap = g_observed_tap;
+        CFMachPortRef tap_snap = __atomic_load_n(&g_observed_tap, __ATOMIC_RELAXED);
         if (tap_snap == NULL) {
             return;
         }
@@ -116,7 +127,14 @@ int wake_observer_install(CFMachPortRef tap) {
     // returns — idempotent re-write. For a wake-observer-only caller
     // (none in production v1.0, but the API stays callable in isolation
     // for smoke tests / future refactors) this line is the sole writer.
-    g_observed_tap = tap;
+    //
+    // ATOMIC, like every other access to this global. Not decoration even
+    // here: InstallAll runs StartWatchdog BEFORE this function, and
+    // watchdog_start has already called dispatch_resume, so the GCD handler
+    // is armed and its RELAXED atomic load can be concurrent with this
+    // store. The 5s first-fire delay makes a collision improbable, not
+    // impossible — and improbable UB is still UB.
+    __atomic_store_n(&g_observed_tap, tap, __ATOMIC_RELAXED);
 
     return 0;
 }
@@ -142,9 +160,10 @@ void wake_observer_remove(void) {
         g_session_token = nil;
     }
     // Defence-in-depth: Release Step 1 already wrote NULL via
-    // eventtap_set_observed_tap (BEFORE Step 5 reaches here), so this
-    // assignment is a redundant re-NULL — kept so the wake-observer
-    // teardown is self-contained for any caller exercising it in
-    // isolation (smoke tests; unit tests).
-    g_observed_tap = NULL;
+    // eventtap_set_observed_tap (BEFORE the teardown chain reaches here),
+    // so this is a redundant re-NULL — kept so the wake-observer teardown
+    // is self-contained for any caller exercising it in isolation (smoke
+    // tests; unit tests). Atomic for the same reason every other access to
+    // this global is.
+    __atomic_store_n(&g_observed_tap, NULL, __ATOMIC_RELAXED);
 }

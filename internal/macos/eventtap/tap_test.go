@@ -24,9 +24,12 @@ type releaserTestDeps struct {
 	gestureDisableCalls   atomic.Int64
 	gestureUninstallCalls atomic.Int64
 	wipeRingCalls         atomic.Int64
+	watchdogStopCalls     atomic.Int64
+	wakeStopCalls         atomic.Int64
 
 	// callOrder records the sequence of "disable" / "clear-observed" /
-	// "gesture-disable" / "wipe-ring" / "gesture-uninstall" / "uninstall"
+	// "gesture-disable" / "watchdog-stop" / "wake-stop" / "wipe-ring" /
+	// "gesture-uninstall" / "uninstall"
 	// strings, in the order the fake
 	// closures were invoked. Slice append is NOT goroutine-safe in general,
 	// but in the Release path the closures are invoked from the same
@@ -81,6 +84,18 @@ func newReleaserTestDeps(t *testing.T) *releaserTestDeps {
 	d.releaser.wipeRingFn = func() {
 		d.wipeRingCalls.Add(1)
 		d.callOrder = append(d.callOrder, "wipe-ring")
+	}
+	// watchdogStop / wakeStop are the two self-healers. Production wires
+	// them in InstallAll; they are faked here so their POSITION is pinned —
+	// both must run before ANY uninstall closure, because both call
+	// CGEventTapEnable on ports the uninstall closures CFRelease.
+	d.releaser.watchdogStop = func() {
+		d.watchdogStopCalls.Add(1)
+		d.callOrder = append(d.callOrder, "watchdog-stop")
+	}
+	d.releaser.wakeStop = func() {
+		d.wakeStopCalls.Add(1)
+		d.callOrder = append(d.callOrder, "wake-stop")
 	}
 	return d
 }
@@ -153,10 +168,18 @@ func TestReleaser_Release_IsIdempotent(t *testing.T) {
 //     (both taps disabled) rather than waiting for the CF teardown, which
 //     can be slow or fail outright. Wiping any earlier — while a tap is
 //     still live — would make the wiper a second writer to the ring and
-//     break the single-writer premise eventtap_snapshot relies on.
+//     break the single-writer premise eventtap_snapshot relies on;
+//  4. watchdog-stop and wake-stop BEFORE both uninstalls — the two
+//     self-healers exist to call CGEventTapEnable on the taps, so they must
+//     be provably gone before the uninstall closures CFRelease those mach
+//     ports. The g_observed_tap NULL write at step 1 narrows that window
+//     but cannot close it: a handler that already loaded the pointer never
+//     re-reads it. This is the invariant StartWatchdog's docstring states
+//     ("stop() first, then the tap Releaser; inverted order is unsafe") and
+//     that the composite Release violated by running both LAST.
 //
 // The fake closures append their tags to callOrder; the test asserts the
-// exact six-step sequence.
+// exact eight-step sequence.
 func TestReleaser_Release_DisableBeforeUninstall(t *testing.T) {
 	t.Parallel()
 
@@ -165,13 +188,18 @@ func TestReleaser_Release_DisableBeforeUninstall(t *testing.T) {
 		t.Fatalf("Release: %v", err)
 	}
 
-	want := []string{"disable", "clear-observed", "gesture-disable", "wipe-ring", "gesture-uninstall", "uninstall"}
+	want := []string{
+		"disable", "clear-observed", "gesture-disable",
+		"watchdog-stop", "wake-stop",
+		"wipe-ring",
+		"gesture-uninstall", "uninstall",
+	}
 	if len(d.callOrder) != len(want) {
 		t.Fatalf("callOrder = %v, want %v (len mismatch)", d.callOrder, want)
 	}
 	for i := range want {
 		if d.callOrder[i] != want[i] {
-			t.Errorf("callOrder[%d] = %q, want %q (disable-first, wipe-after-disable, gesture-before-main)", i, d.callOrder[i], want[i])
+			t.Errorf("callOrder[%d] = %q, want %q (disable-first, healers-before-uninstall, wipe-after-disable, gesture-before-main)", i, d.callOrder[i], want[i])
 		}
 	}
 }
@@ -474,6 +502,66 @@ func TestInstall_EmptyUnlockCode_Rejected(t *testing.T) {
 	}
 }
 
+// TestInstall_AfterUncleanTeardown_Rejected pins the second package-boundary
+// guard: once a teardown's drain handshake has timed out on a path where the
+// worker run loop was alive, the C-side tap statics may not be reused.
+//
+// What the guard prevents is not a leak but a data race. `eventtap_install_c`
+// opens with `eventtap_wipe_ring()` — a memset of the shared keystroke ring —
+// and the callback that the timed-out drain could not prove idle appends to
+// that same ring with PLAIN stores. The C side answers a timeout by touching
+// nothing callback-visible non-atomically, but it keeps no record that a
+// writer may still be outstanding, so only the Go side can refuse the next
+// install. Publishing a fresh non-NULL `g_tap` is the second half: the old
+// callback's post-enable teardown re-check reads that location and treats
+// non-NULL as "my tap is still current", so it would leave itself enabled.
+//
+// Like the empty-code guard above, the check runs BEFORE CGEventTapCreate —
+// no Accessibility grant, no GUI session, and it must fail rather than skip.
+//
+// NOT t.Parallel: it mutates the process-global latch.
+func TestInstall_AfterUncleanTeardown_Rejected(t *testing.T) {
+	prev := teardownUnclean.Load()
+	t.Cleanup(func() { teardownUnclean.Store(prev) })
+	teardownUnclean.Store(true)
+
+	sink := make(chan struct{}, 1)
+	// Non-empty on purpose: the empty-code guard is checked first, so a
+	// zero-step slice here would pass this test for the wrong reason.
+	steps := []hotkey.Spec{{Modifiers: 0, KeyCode: 0x00}}
+
+	r, err := InstallAll(steps, sink, nil)
+	if !errors.Is(err, ErrTeardownUnclean) {
+		t.Errorf("InstallAll after unclean teardown: error = %v, want ErrTeardownUnclean", err)
+	}
+	if r != nil {
+		t.Error("InstallAll after unclean teardown returned a non-nil Releaser alongside the error")
+		_ = r.Release()
+	}
+
+	r, err = installTapOnly(steps, sink, nil)
+	if !errors.Is(err, ErrTeardownUnclean) {
+		t.Errorf("installTapOnly after unclean teardown: error = %v, want ErrTeardownUnclean", err)
+	}
+	if r != nil {
+		t.Error("installTapOnly after unclean teardown returned a non-nil Releaser alongside the error")
+		_ = r.Release()
+	}
+
+	// A guard that bailed out after starting the poller would show up here.
+	select {
+	case <-sink:
+		t.Error("rejected install still signalled the exit sink")
+	default:
+	}
+
+	// The latch is one-way within the process: nothing in the reject path may
+	// clear it, or the very next install would proceed into the memset.
+	if !teardownUnclean.Load() {
+		t.Error("teardownUnclean was cleared by a rejected install; the latch must stay set")
+	}
+}
+
 // TestReleaser_Release_StopsLivePoller wires a REAL pollSequence goroutine to
 // a Releaser, which no other test does: newReleaserTestDeps pre-closes
 // pollerDone, so every ordering/idempotency test above returns from the
@@ -502,9 +590,8 @@ func TestReleaser_Release_StopsLivePoller(t *testing.T) {
 
 	go func() {
 		defer close(pollerDone)
-		pollSequence(stopPoller, f.seq, f.snapshot, m, sink, discardLogger())
+		pollSequence(stopPoller, 0, f.seq, f.snapshot, m, sink, discardLogger())
 	}()
-	f.waitStarted(t)
 
 	// Keystrokes that do NOT complete the code: the poller must still be
 	// inside its loop when Release arrives, not already returned on a match.

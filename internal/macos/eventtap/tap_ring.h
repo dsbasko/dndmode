@@ -45,4 +45,29 @@ typedef struct {
     uint16_t keycode;
 } dnd_keyrec_t;
 
+// The two writer-quiescence primitives that guard the ring. Both are DEFINED
+// in tap_darwin.m; they are declared HERE, next to the storage they protect,
+// because three translation units need them and a hand-copied prototype in
+// any of them could drift silently — C does not diagnose a declaration that
+// disagrees with a definition in another file, and the resulting call would
+// misread the return value at runtime. With one prototype in a shared
+// header, the definition in tap_darwin.m, the call in gesturetap_darwin.m
+// and the cgo bridge in tap_darwin.go all fail to COMPILE on a mismatch.
+//
+// eventtap_drain_worker_callbacks blocks (bounded) until the tap callback is
+// known not to be executing on the worker thread, and — unlike a bare
+// CGEventTapEnable(tap, false), which carries no documented drain guarantee
+// — is the only thing that makes "no callback is running" checkable.
+// Returns 0 when that is established (block executed, or no worker loop
+// exists so no callback can be dispatched at all) and 1 on timeout, i.e.
+// "unknown, assume a callback may be live". Callers MUST act on the 1: it
+// is what separates a safe CFRelease from a use-after-free.
+//
+// eventtap_wipe_ring_on_worker clears the ring FROM the worker thread, where
+// the wipe is serialised against the callback by the thread itself rather
+// than merely racing it narrowly. Returns 0 when the ring was wiped and 1
+// when the handshake timed out and nothing was wiped.
+int eventtap_drain_worker_callbacks(void);
+int eventtap_wipe_ring_on_worker(void);
+
 #endif  // DNDMODE_TAP_RING_H

@@ -3,6 +3,7 @@
 package eventtap
 
 import (
+	"errors"
 	"io"
 	"log/slog"
 	"sync/atomic"
@@ -421,5 +422,186 @@ func TestWatchdog_PollThreshold_SinkFull_DoesNotDeadlock(t *testing.T) {
 	// single source of truth for the exit-code branch.
 	if !watchdogTripped.Load() {
 		t.Errorf("watchdogTripped=false after full-sink trip, want true (latch is the source of truth)")
+	}
+}
+
+// TestStartWatchdog_AfterUncleanTeardown_Rejected pins the guard that makes
+// `teardownUnclean` a property of the watchdog constructor rather than of its
+// current call graph.
+//
+// `installInternal` already refuses on this latch, and it is today the only
+// caller of `StartWatchdog` — but `StartWatchdog` is exported, so "no second
+// watchdog session can open after an unclean drain" was an invariant of the
+// call graph, not of the function. That distinction matters here more than
+// anywhere else in the package: a session that opens after a timed-out cancel
+// drain inherits a GCD handler with no bound on when it resumes, and that
+// handler's `eventtap_watchdog_failed()` flips a package-global latch carrying
+// no session identity — so the fresh poller would read a stale trip as its own
+// and drive main.go into a spurious abnormal exit, i.e. an unlock nobody asked
+// for.
+//
+// The check must also run BEFORE the two latch resets: clearing
+// `watchdogTripped` is observable (main.go maps it to the exit code), so a
+// rejected Start has to leave both latches exactly as it found them.
+//
+// NOT t.Parallel: it mutates process-global latches.
+func TestStartWatchdog_AfterUncleanTeardown_Rejected(t *testing.T) {
+	prevTeardown := teardownUnclean.Load()
+	prevTripped := watchdogTripped.Load()
+	prevHit := watchdogThresholdHit.Load()
+	t.Cleanup(func() {
+		teardownUnclean.Store(prevTeardown)
+		watchdogTripped.Store(prevTripped)
+		watchdogThresholdHit.Store(prevHit)
+	})
+
+	// Seed both latches true so a reset is observable as a cleared latch.
+	watchdogTripped.Store(true)
+	watchdogThresholdHit.Store(true)
+	teardownUnclean.Store(true)
+
+	sink := make(chan struct{}, 1)
+
+	// A nil tap on purpose, for two reasons. It keeps the test honest about
+	// ordering: the latch check has to come before startWatchdog's own
+	// `tap == nil` guard for ErrTeardownUnclean to be what comes back. And it
+	// keeps the FAILURE clean — a bogus non-nil pointer would reach
+	// `watchdog_start` if the guard were ever removed and take the whole test
+	// binary down with a SIGSEGV inside cgo instead of reporting which
+	// assertion broke.
+	stop, err := StartWatchdog(nil, sink, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	if !errors.Is(err, ErrTeardownUnclean) {
+		t.Errorf("StartWatchdog after unclean teardown: error = %v, want ErrTeardownUnclean", err)
+	}
+	if stop != nil {
+		t.Error("StartWatchdog after unclean teardown returned a non-nil stop closure alongside the error")
+		stop()
+	}
+
+	// Latch resets must not have happened — they are the first observable
+	// effect of a session that was supposed to be refused.
+	if !watchdogTripped.Load() {
+		t.Error("rejected StartWatchdog cleared watchdogTripped; the reject path must not touch it")
+	}
+	if !watchdogThresholdHit.Load() {
+		t.Error("rejected StartWatchdog cleared watchdogThresholdHit; the reject path must not touch it")
+	}
+
+	// A guard that bailed out after spawning the poller would show up here.
+	select {
+	case <-sink:
+		t.Error("rejected StartWatchdog still signalled the exit sink")
+	default:
+	}
+
+	// One-way within the process: nothing on the reject path may clear it.
+	if !teardownUnclean.Load() {
+		t.Error("teardownUnclean was cleared by a rejected StartWatchdog; the latch must stay set")
+	}
+}
+
+// TestStartWatchdog_SerialisesAgainstStopTeardown pins the mutex that turns
+// the `teardownUnclean` guard from a check-then-act into a barrier.
+//
+// The guard alone is not enough, and the gap is not hypothetical ordering
+// pedantry — it is baked into the teardown sequence. `watchdog_stop` nils
+// `g_watchdog` (freeing the C-side "already started" slot) BEFORE its bounded
+// cancel-handler wait, and the Go side latches `teardownUnclean` only after
+// that wait reports a timeout. Between those two instants a concurrent
+// `StartWatchdog` finds the latch false AND the slot free, and opens a second
+// session while a handler of the first is still in flight — which is exactly
+// the state that lets a stale `eventtap_watchdog_failed()` trip the fresh
+// poller's session-less latch and unlock a machine nobody unlocked.
+//
+// What is actually asserted: with `watchdogLifecycle` held by someone else,
+// StartWatchdog neither returns nor performs its FIRST observable act (the
+// latch resets). That is the whole claim — the lock is taken before any
+// state is touched, not somewhere in the middle. Directly driving a real
+// stop closure into its drain window would need a live CGEventTap and
+// Accessibility, so the mutex is exercised from the side that pure Go can
+// reach; the stop closure's own Lock is one statement and reviewed as such.
+//
+// NOT t.Parallel: it mutates process-global latches and the lifecycle mutex.
+func TestStartWatchdog_SerialisesAgainstStopTeardown(t *testing.T) {
+	prevTeardown := teardownUnclean.Load()
+	prevTripped := watchdogTripped.Load()
+	prevHit := watchdogThresholdHit.Load()
+	t.Cleanup(func() {
+		teardownUnclean.Store(prevTeardown)
+		watchdogTripped.Store(prevTripped)
+		watchdogThresholdHit.Store(prevHit)
+	})
+
+	// Latch state a rejected-or-parked Start must leave untouched, and a
+	// running one is guaranteed to clear — so "did StartWatchdog get past
+	// the lock?" is observable without waiting for its return value.
+	watchdogTripped.Store(true)
+	watchdogThresholdHit.Store(true)
+	// Deliberately NOT set: this test is about the window in which the latch
+	// is still false and a second session is therefore still permitted. With
+	// it set, StartWatchdog would bail on the guard and prove nothing about
+	// ordering.
+	teardownUnclean.Store(false)
+
+	// Stand in for a stop closure that is inside `stopWatchdog` — the C slot
+	// already free, the verdict not yet written.
+	watchdogLifecycle.Lock()
+	unlocked := false
+	unlock := func() {
+		if !unlocked {
+			unlocked = true
+			watchdogLifecycle.Unlock()
+		}
+	}
+	// Releasing from a different goroutine than the one that acquired is
+	// legal for sync.Mutex (no owner tracking); the cleanup exists so a
+	// failed assertion cannot wedge every later test in the package.
+	t.Cleanup(unlock)
+
+	sink := make(chan struct{}, 1)
+	// Nil tap for the same reason as the rejection test: StartWatchdog's own
+	// `startWatchdog` nil-guard returns before any C call, so a Start that
+	// DOES get through the lock fails loudly instead of taking the test
+	// binary down inside cgo.
+	done := make(chan error, 1)
+	go func() {
+		stop, err := StartWatchdog(nil, sink, slog.New(slog.NewTextHandler(io.Discard, nil)))
+		if stop != nil {
+			stop()
+		}
+		done <- err
+	}()
+
+	// Generous enough that a StartWatchdog which does not take the mutex is
+	// certain to have finished, short enough to stay a cheap unit test.
+	select {
+	case err := <-done:
+		unlock()
+		t.Fatalf("StartWatchdog returned (%v) while the lifecycle mutex was held; it must serialise against an in-progress teardown", err)
+	case <-time.After(100 * time.Millisecond):
+	}
+
+	// The parked Start must not have touched a thing. A Lock placed after
+	// the latch resets — or after the guard — would show up right here.
+	if !watchdogTripped.Load() {
+		t.Error("watchdogTripped cleared while the lifecycle mutex was held; StartWatchdog must take the lock before its latch resets")
+	}
+	if !watchdogThresholdHit.Load() {
+		t.Error("watchdogThresholdHit cleared while the lifecycle mutex was held; StartWatchdog must take the lock before its latch resets")
+	}
+
+	// Hand the session over, exactly as a completed stop closure would.
+	unlock()
+
+	select {
+	case err := <-done:
+		if err == nil {
+			t.Error("StartWatchdog(nil tap) returned a nil error; the nil-tap guard regressed")
+		}
+		if errors.Is(err, ErrTeardownUnclean) {
+			t.Errorf("StartWatchdog rejected on a latch this test left false: %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("StartWatchdog did not return after the lifecycle mutex was released; the lock is never dropped (deadlock)")
 	}
 }
