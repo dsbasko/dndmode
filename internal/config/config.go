@@ -52,7 +52,7 @@ const (
 	// WeakUnlockSteps is the recommended length threshold: anything shorter is
 	// accepted but reported by IsWeakUnlockCode, which main.go surfaces as a
 	// --debug-only warning. At an alphabet of ~36 a 6-step code needs ~2.2e9
-	// keypresses to exhaust — 690 days at 100/sec — while 4 steps fall in
+	// keypresses to exhaust — 250 days at 100/sec — while 4 steps fall in
 	// under 5 hours.
 	WeakUnlockSteps = 6
 
@@ -186,7 +186,7 @@ type Config struct {
 	// outcome only through the process exit code. `debug: true` un-silences the
 	// full console output. Rationale: with overlay_style `none` or `glass` the
 	// terminal stays visible while dndmode is active, so the startup banner would
-	// otherwise leak the unlock hotkey to a bystander — the security stance
+	// otherwise leak the unlock code to a bystander — the security stance
 	// is "reveal nothing" unless the operator explicitly opts into
 	// debugging. The --debug CLI flag is the per-run equivalent; either source
 	// enables output. Absent key => false via the Go zero value; yaml.Strict()
@@ -479,7 +479,7 @@ const defaultConfigTemplate = `# dndmode configuration
 #   1 step      : allowed only WITH modifiers (the legacy hotkey shape). Weak.
 #   2-3 steps   : REJECTED — too weak to be worth the illusion of a passphrase.
 #   4-32 steps  : accepted. 6 or more is STRONGLY recommended: at 6 steps a
-#                 brute force needs ~690 days at 100 keypresses/sec, at 4 it
+#                 brute force needs ~250 days at 100 keypresses/sec, at 4 it
 #                 needs under 5 hours.
 # Change the default below before you rely on it — it ships the same chord on
 # every machine.
@@ -519,7 +519,7 @@ unlock_code: %s
 #   none   : awake-only mode. NO overlay, NO input blocking, NO Focus, NO audio
 #            mute — dndmode just holds the machine awake (like caffeinate).
 #            Needs no Accessibility permission; exit with Ctrl-C only (there is
-#            no hotkey because there is no event tap to observe it).
+#            no unlock code because there is no event tap to observe it).
 # Per-run override: --style <value>. For glass the radius can be appended:
 #   --style glass:24 overrides glass_blur for this run only (--style glass uses
 #   the glass_blur value below, or its default).
@@ -572,7 +572,7 @@ unlock_code: %s
 #   false : SILENT (default). Nothing is printed to stdout / stderr; outcome is
 #           reported through the exit code only. This is a security default —
 #           in 'none' / 'glass' mode the terminal stays visible, so a startup
-#           banner would otherwise leak the unlock hotkey to a bystander.
+#           banner would otherwise leak the unlock code to a bystander.
 #   true  : un-silence the full startup / cleanup banners and debug logging.
 # Per-run equivalent: the --debug flag (either source enables output).
 # debug: false

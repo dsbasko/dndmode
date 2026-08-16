@@ -11,14 +11,14 @@
 trackpad at the HID level, keeps the Mac awake, and silences it - all while your
 background processes keep running untouched. You step away, the machine looks and
 behaves as if it is locked, and the long job you left running (an AI agent in YOLO
-mode, a build, a render) never gets interrupted. You come back, type your hotkey,
-and everything is exactly where you left it.
+mode, a build, a render) never gets interrupted. You come back, type your unlock
+code, and everything is exactly where you left it.
 
 It is a foreground CLI. No daemon, no launchd, no menu-bar icon. You run it, you
 watch it, you end it.
 
 ```bash
-dndmode            # lock now, run until the unlock hotkey
+dndmode            # lock now, run until the unlock code is typed
 dndmode --timer 1h # lock now, auto-unlock after an hour
 ```
 
@@ -64,7 +64,7 @@ to leave the laptop. Two bad options remain:
   keyboard, click a dialog, or read what is on screen.
 
 `dndmode` is the third option: the job keeps running at full speed, and the machine
-is covered and inert to input until you return and enter your hotkey. It is a
+is covered and inert to input until you return and type your unlock code. It is a
 soft-lock for cooperative spaces (home, office, a coworking desk), not
 hardware-grade protection - see the [threat model](#threat-model).
 
@@ -86,10 +86,16 @@ overlay within 250 ms. The system cursor is hidden while the shield is up.
 primary tap sits at `kCGHIDEventTap`; its callback returns `NULL` for all 15
 intercepted event types (key down/up, modifier changes, every mouse button, drag,
 move, scroll, and system-defined media keys), so nothing reaches WindowServer.
-Cmd+Tab, Cmd+Q, and the rest are dead. Exactly one event passes the filter: a
-key-down that matches your configured unlock hotkey, which is turned into an
-internal exit signal and is itself swallowed so it never leaks into the app
-underneath. A second tap at `kCGSessionEventTap` swallows the trackpad gesture
+Cmd+Tab, Cmd+Q, and the rest are dead. **No event passes the filter, ever** - not
+even the keys of your unlock code. Instead, the callback appends each key-down to
+a 64-entry in-memory ring (modifier flags plus the physical key code, nothing
+else), and a Go goroutine polls that ring every 10 ms and checks whether the
+*tail* of what you typed equals your unlock code. When it does, the session ends.
+Because matching happens after the fact rather than in the interception path,
+there is no "correct key" that behaves differently from a wrong one, and no
+keystroke ever surfaces in the app underneath. Held-down keys are dropped before
+they reach the ring, so leaning on a key cannot be used to sweep the code space.
+A second tap at `kCGSessionEventTap` swallows the trackpad gesture
 stream (the session-level gesture and dock-control events WindowServer synthesizes
 past the HID tap point), so three- and four-finger swipes for Mission Control,
 App Exposé and Space switching, and the Launchpad pinch die before the Dock sees
@@ -204,13 +210,18 @@ ad-hoc signed locally), so none require an Apple Developer ID.
    Then a second shortcut that turns it **Off**, saved as `dndmode-off`. With the
    default `focus: false` you can skip this entirely.
 5. Run `dndmode` again. With `--debug` you will see `dndmode: active. press Ctrl-C.`.
-   The default hotkey `Ctrl+Option+Cmd+X` ends the lock.
+   The default unlock code `Ctrl+Option+Cmd+X` ends the lock.
 
-> **Change your hotkey before you rely on it.** The generated config ships with
-> the well-known default `Ctrl+Option+Cmd+X`. Anyone who knows that default can
-> unlock the shield, so open `~/.config/dndmode/config.yml` and set `hotkey` to a
-> private combination first (grammar and key list are in
-> [Configuration](#configuration)).
+> **Change your unlock code before you rely on it.** The generated config ships
+> with the well-known default `Ctrl+Option+Cmd+X` - a code of exactly one step,
+> which is the shape that motivated unlock codes in the first place: a single
+> combination falls to someone walking the keyboard "like a piano" with the
+> modifiers held. Anyone who knows the default can unlock the shield outright.
+> Open `~/.config/dndmode/config.yml` and set `unlock_code` to a private
+> sequence of **6 or more steps** (`unlock_code: s w o r d f i s h`); the
+> grammar, the key list, and the length table are in
+> [Configuration](#configuration). Running with the default is accepted, but
+> `--debug` prints a warning about it on every start.
 
 ## Usage
 
@@ -219,7 +230,8 @@ session ends.
 
 **End a session, any of:**
 
-- Press the unlock hotkey (default `Ctrl+Option+Cmd+X`).
+- Type the unlock code (default `Ctrl+Option+Cmd+X`). There is no prompt and no
+  feedback - just type it; the shield ends the moment the tail matches.
 - Press `Ctrl-C` (or send `SIGTERM`/`SIGHUP`) in the terminal running dndmode.
 - Set a deadline with `--timer` and let it expire.
 
@@ -242,7 +254,9 @@ A few notes on behavior:
 - **Quiet by default.** dndmode prints nothing to stdout or stderr and reports
   outcome only through its [exit code](#exit-codes). This is a security default:
   with `glass` or `none` the terminal stays visible while dndmode runs, and a
-  printed banner would leak your unlock hotkey to anyone watching. Pass `--debug`
+  printed banner would leak your unlock code to anyone watching. Even under
+  `--debug` the banner prints only the *number* of steps and which config key
+  they came from - never the code itself. Pass `--debug`
   (or set `debug: true`) to turn output back on when a run exits non-zero and you
   need to see why.
 - **Invalid flag values** (`--timer 5x`, `--mute banana`, `--style neon`) exit with
@@ -251,31 +265,61 @@ A few notes on behavior:
 ## Configuration
 
 The config file lives at `~/.config/dndmode/config.yml` and is created with defaults
-on first run. Only `hotkey` is written as an active key; every other setting is shown
-commented at its default, so uncommenting a line only ever overrides. The default
-`hotkey` is `Ctrl+Option+Cmd+X` — change it to a private combination, since it is the
-only secret that ends a locked session.
+on first run. Only `unlock_code` is written as an active key; every other setting is
+shown commented at its default, so uncommenting a line only ever overrides. The
+default `unlock_code` is `Ctrl+Option+Cmd+X` — change it to a private sequence, since
+it is the only secret that ends a locked session.
 
 ```yaml
 # dndmode configuration
 # Location: ~/.config/dndmode/config.yml  (auto-created on first run)
 #
-# Every field except 'hotkey' is OPTIONAL. Uncomment a line and change its
+# Every field except 'unlock_code' is OPTIONAL. Uncomment a line and change its
 # value to override the default shown next to it. Unknown keys are REJECTED
 # (strict parsing): a typo aborts startup with an error pointing at the line.
 # Most fields also have a per-run CLI flag that overrides the file for that
 # launch only.
 
-# --- hotkey (REQUIRED) -------------------------------------------------------
-# Key combination that unlocks and exits the locked state.
-# Grammar: "<mod>+<mod>+...+<key>" — one or more modifiers plus exactly one key.
+# --- unlock_code (REQUIRED) --------------------------------------------------
+# The secret that unlocks and exits the locked state. It is a SEQUENCE of
+# steps typed one after another — a passphrase, not a single chord.
+#
+# Grammar: steps separated by spaces; each step is "(<mod>+)*<key>".
 #   Modifiers (case-insensitive): ctrl, option, cmd, shift, fn
 #   Keys: a-z, 0-9, f1-f12, space, return (alias enter), tab, escape (alias
 #         esc), delete, forwarddelete, left, right, up, down,
 #         and the punctuation - = [ ] ; ' , . / \ backtick
-# Matched by PHYSICAL key position, so RU / AZERTY layouts behave identically.
-# Modifier-only combinations are rejected (you must include one real key).
-hotkey: Ctrl+Option+Cmd+X
+#   Modifiers inside a step are OPTIONAL, so both 's' and 'ctrl+s' are steps.
+#   A literal space is only a SEPARATOR; the space key itself is 'space'.
+#
+# Examples:
+#   unlock_code: s w o r d f i s h     # a passphrase
+#   unlock_code: ctrl+s w o r d cmd+z  # mixed
+#   unlock_code: Ctrl+Option+Cmd+X     # a single chord = a code of length 1
+#
+# Length rules (dndmode matches the TAIL of everything typed, so every single
+# keypress is a fresh attempt — short codes fall fast):
+#   1 step      : allowed only WITH modifiers (the legacy hotkey shape). Weak.
+#   2-3 steps   : REJECTED — too weak to be worth the illusion of a passphrase.
+#   4-32 steps  : accepted. 6 or more is STRONGLY recommended: at 6 steps a
+#                 brute force needs ~250 days at 100 keypresses/sec, at 4 it
+#                 needs under 5 hours.
+# Change the default below before you rely on it — it ships the same chord on
+# every machine.
+#
+# Matched by PHYSICAL key position, not by the character produced: on a RU
+# layout 'unlock_code: s w o r d' is typed with the keys ы ц о р в.
+# Every step is matched EXACTLY: a modifier you happen to be holding (e.g. Cmd)
+# breaks a step declared without it. CapsLock, NumPad and Fn-lock bits are
+# ignored, so CapsLock can never lock you out.
+unlock_code: Ctrl+Option+Cmd+X
+
+# --- hotkey (DEPRECATED) -----------------------------------------------------
+# The pre-sequence single-combination key. Still read, so upgrading does not
+# break an existing config, but setting BOTH it and unlock_code is an error
+# (an ambiguous unlock secret is not resolvable). Migrate by renaming the key:
+# any value valid here is valid as a 1-step unlock_code.
+# hotkey: Ctrl+Option+Cmd+X
 
 # --- overlay_style -----------------------------------------------------------
 # Look of the full-screen shield that covers every attached display.
@@ -298,7 +342,7 @@ hotkey: Ctrl+Option+Cmd+X
 #   none   : awake-only mode. NO overlay, NO input blocking, NO Focus, NO audio
 #            mute — dndmode just holds the machine awake (like caffeinate).
 #            Needs no Accessibility permission; exit with Ctrl-C only (there is
-#            no hotkey because there is no event tap to observe it).
+#            no unlock code because there is no event tap to observe it).
 # Per-run override: --style <value>. For glass the radius can be appended:
 #   --style glass:24 overrides glass_blur for this run only (--style glass uses
 #   the glass_blur value below, or its default).
@@ -351,15 +395,81 @@ hotkey: Ctrl+Option+Cmd+X
 #   false : SILENT (default). Nothing is printed to stdout / stderr; outcome is
 #           reported through the exit code only. This is a security default —
 #           in 'none' / 'glass' mode the terminal stays visible, so a startup
-#           banner would otherwise leak the unlock hotkey to a bystander.
+#           banner would otherwise leak the unlock code to a bystander.
 #   true  : un-silence the full startup / cleanup banners and debug logging.
 # Per-run equivalent: the --debug flag (either source enables output).
 # debug: false
 ```
 
-The hotkey is matched by physical key position, so it behaves the same on a US,
-Russian, or AZERTY layout. Caps Lock and the numeric-keypad flag are ignored during
-matching, so a stray Caps Lock can never lock you out.
+### The unlock code
+
+`unlock_code` is a **sequence of steps typed one after another** - a passphrase,
+not a single chord. dndmode watches the tail of everything you type and ends the
+session the moment that tail equals your code. There is no prompt, no progress
+indicator, no "wrong code" feedback, and no way to reset a half-typed attempt -
+you just keep typing until it matches.
+
+**Grammar.** Steps are separated by spaces; each step is `(<mod>+)*<key>`.
+Modifiers inside a step are optional, so both `s` and `ctrl+s` are valid steps.
+A literal space is only a separator - the space *key* is written `space`.
+
+| Part | Accepted values |
+| --- | --- |
+| Modifiers (case-insensitive, optional per step) | `ctrl`, `option`, `cmd`, `shift`, `fn` |
+| Keys | `a`-`z`, `0`-`9`, `f1`-`f12`, `space`, `return` (alias `enter`), `tab`, `escape` (alias `esc`), `delete`, `forwarddelete`, `left`, `right`, `up`, `down`, and the punctuation `-` `=` `[` `]` `;` `'` `,` `.` `/` `\` `` ` `` |
+
+```yaml
+unlock_code: s w o r d f i s h     # a passphrase — the recommended shape
+unlock_code: ctrl+s w o r d cmd+z  # modifiers on some steps, bare keys on others
+unlock_code: Ctrl+Option+Cmd+X     # a single chord = a code of length 1
+```
+
+**Length rules.** Every keypress is a fresh match attempt, so short codes fall
+fast. The numbers below assume an alphabet of ~36 (letters and digits) and an
+automated typist at 100 keypresses/second.
+
+| Steps | Status | Time to exhaust |
+| --- | --- | --- |
+| 1 | Accepted **only with modifiers** - the legacy `hotkey` shape. Weak. | minutes, by hand |
+| 2-3 | **Rejected** at startup (exit `1`) - too weak to be worth the illusion of a passphrase | ~8 minutes at 3 steps |
+| 4-5 | Accepted, warned about under `--debug` | ~5 hours at 4 steps, ~7 days at 5 |
+| **6-32** | Accepted, **recommended** | ~250 days at 6 steps, centuries at 8 |
+
+Codes longer than 32 steps are rejected. A 1-step code without modifiers is
+rejected too: a bare key would unlock on the first thing a bystander types.
+
+**Which key is in effect.** `unlock_code` and the deprecated `hotkey` resolve
+through one table, and setting both is a startup error - an ambiguous unlock
+secret is not resolvable.
+
+| `unlock_code` | `hotkey` | Result |
+| --- | --- | --- |
+| set | absent | Used. The normal path. |
+| absent | set | Used as a 1-step code; `--debug` prints a deprecation warning. |
+| set | set | **Error**, exit `1`. Delete the `hotkey` line. |
+| absent | absent | **Error**, exit `1`. |
+
+Migration is a rename: any value valid as `hotkey` is valid as `unlock_code`.
+
+**Three things that will trip you up:**
+
+- **Steps are physical key positions, not characters.** The code is matched by
+  key position so it behaves identically on a US, Russian, or AZERTY layout -
+  but that also means `unlock_code: s w o r d` is typed on a Russian layout with
+  the keys **ы ц о р в**. Pick your code by where your fingers go, not by what
+  appears on screen.
+- **A stray modifier breaks a step.** Each step is matched exactly. A step
+  written without modifiers matches only a press with *no* modifiers held, so if
+  you are resting on Cmd or Shift when you type it, that step does not count and
+  the tail resets. Write the modifier into the step (`cmd+s`) if you intend to
+  hold it.
+- **Holding a key does not help.** Auto-repeat presses are dropped before they
+  reach the matcher, so a held key contributes exactly one step. Genuine double
+  letters (`hello`) are unaffected - auto-repeat only engages well past the speed
+  of a real double tap.
+
+Caps Lock, the numeric-keypad flag, and the other system-set modifier bits are
+stripped before matching, so a stray Caps Lock can never lock you out.
 
 The YAML parser is strict about unknown keys but not about values: a misspelled key
 (`overaly_style`) is rejected on load, while a bad value (`overlay_style: blak`) is
@@ -440,7 +550,7 @@ audio, and does not touch Focus - so it needs no Accessibility permission. It on
 holds a system-awake assertion for as long as it runs. Under the hood it runs
 `caffeinate -d -i -s -w <pid>` (the `-d` is dropped when `allow_display_sleep: true`);
 `-w <pid>` ties the assertion to dndmode's lifetime so it self-releases even after a
-`kill -9`. There is no hotkey in this mode - there is no event tap to observe one -
+`kill -9`. There is no unlock code in this mode - there is no event tap to observe one -
 so you exit with `Ctrl-C` or `--timer`.
 
 ## Exit codes
@@ -450,8 +560,8 @@ only thing it tells you.
 
 | Code | Meaning |
 | --- | --- |
-| `0` | Clean exit via the hotkey, a signal, or `--timer` expiry. |
-| `1` | Config error: bad YAML, an invalid hotkey, or an invalid flag value. |
+| `0` | Clean exit via the unlock code, a signal, or `--timer` expiry. |
+| `1` | Config error: bad YAML, an invalid or ambiguous unlock code, or an invalid flag value. |
 | `2` | Platform error: not arm64, macOS < 14, IOKit/Cocoa failure, or (in `none` mode) an unexpected `caffeinate` death. |
 | `3` | Interrupted while waiting for Accessibility / Input Monitoring grants. |
 | `4` | Secure Event Input is held by another app, or the input tap was silently disabled and the watchdog gave up. |
@@ -481,6 +591,11 @@ only thing it tells you.
 - Malware running as root.
 - Sustained physical access.
 - Remote SSH / VNC sessions - the target is the local console only.
+- A short unlock code against someone willing to sit and type. Matching is on the
+  tail of the keystroke stream, so every keypress is a fresh attempt and there is
+  no lockout or rate limit. A 1-step code (the shipped default) or a 4-step one
+  is minutes-to-hours of effort; see the length table under
+  [Configuration](#the-unlock-code).
 
 ### Per-layer coverage
 
@@ -587,8 +702,8 @@ Rough layout:
 
 ```
 cmd/dndmode/          CLI entry point, startup pipeline, LIFO teardown
-internal/config/      YAML config + hotkey string parser
-internal/matcher/     pure-Go hotkey matching model
+internal/config/      YAML config + unlock-code sequence parser
+internal/matcher/     pure-Go sliding-window unlock-code matcher
 internal/macos/
   cocoa/              per-screen shield windows and overlay styles
   eventtap/           CGEventTap input lock + watchdog + wake re-arm
