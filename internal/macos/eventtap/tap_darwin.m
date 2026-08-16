@@ -28,9 +28,14 @@
 // recording the press, because macOS sets those bits
 // independently of user intent. Drift between this constant
 // and `matcher.UserIntentionalMask` would silently break the unlock code for
-// users with CapsLock or NumPad toggled — `TestUserIntentionalMask_MatchesMatcherPackage`
-// in tap_test.go pins both to the same hex literal so any future divergence
-// trips a unit-test rather than locking a customer out at runtime.
+// users with CapsLock or NumPad toggled. Two tests keep the twins honest:
+// `TestUserIntentionalMask_MatchesMatcherPackage` (tap_test.go) pins the Go
+// constant to a hex literal, and
+// `TestUserIntentionalMask_CSourcePinsExactlyFourBits` (nosplit_gold_test.go)
+// greps THIS definition for exactly the four names below. Dropping an
+// OR-term here is the fail-deadly direction — the callback would record a
+// zero bit the Go side still demands, making the unlock code unenterable —
+// so it fails a unit-test rather than locking a customer out at runtime.
 //
 // kCGEventFlagMaskSecondaryFn is EXCLUDED on purpose: macOS raises it for
 // every key of the function-key group (F1-F12, arrows, Forward Delete,
@@ -254,26 +259,33 @@ uint64_t eventtap_snapshot(dnd_keyrec_t *out) {
 // moment the tap goes down, rather than at `eventtap_uninstall_c` several
 // CoreFoundation teardown steps later.
 //
-// CALL SITE CONTRACT: only where no tap callback can be running — install
-// (before the tap exists), Release Step 1 (after `eventtap_enable(tap,
-// false)` in tap_darwin.go) and the tail of `eventtap_uninstall_c` (after
-// the tap is released). Those three are the ONLY call sites and they are
-// the only implementation of "clear the ring": a fourth open-coded memset
-// that forgets the counter reset would hand the poller a run of
-// `{flags: 0, keycode: 0}` records, and keycode 0 is kVK_ANSI_A.
+// CALL SITE CONTRACT: only where neither a tap callback NOR the poller can
+// be running — install (before the tap exists), Release Step 1 (after
+// `eventtap_enable(tap, false)` AND after the poller goroutine has been
+// closed and joined in tap_darwin.go) and the tail of
+// `eventtap_uninstall_c` (after the tap is released). Those three are the
+// ONLY call sites and they are the only implementation of "clear the ring":
+// a fourth open-coded memset that forgets the counter reset would hand the
+// poller a run of `{flags: 0, keycode: 0}` records, and keycode 0 is
+// kVK_ANSI_A.
 //
 // It MUST NOT be called from the
 // poller: the poller runs concurrently with a live tap, so calling it there
 // would introduce a SECOND writer to the ring and destroy the single-writer
 // premise the whole correctness argument for `eventtap_snapshot` rests on.
 //
-// The counter reset is not cosmetic. It is what keeps the poller — which is
-// still ticking between Step 1 and the `close(stopPoller)` at Step 6 — from
-// ever examining the wiped slots: its `lastSeq` is already past zero, so the
-// half-open range [lastSeq, cur) it would consider collapses to empty and
-// `matchAny` iterates zero times. Without the reset, a wiped ring reads as a
-// run of `{flags: 0, keycode: 0}` records, and keycode 0 is kVK_ANSI_A — an
-// unlock code of bare `a` steps could spuriously match on the zeroes.
+// Both halves of the contract matter, and the READER half is the one that is
+// easy to get wrong. Resetting the counter is NOT sufficient on its own:
+// `eventtap_snapshot` takes its ACQUIRE load of `g_seq` and then memcpys the
+// ring as two separate steps, so a wipe landing between them returns the
+// pre-wipe count over post-wipe (zeroed) storage. The poller would then walk
+// [lastSeq, cur) across a run of `{flags: 0, keycode: 0}` records — keycode
+// 0 being kVK_ANSI_A — and an unlock code of bare `a` steps could spuriously
+// match during teardown. The counter reset closes the case where the poller
+// snapshots strictly AFTER the wipe (its `lastSeq` is past zero, so the
+// half-open range collapses to empty and `matchAny` iterates zero times);
+// draining the poller before the wipe is what closes the interleaved case.
+// Keep both.
 //
 // The tap is already disabled here, so at most one in-flight callback can
 // still be running; a record it writes concurrently with this memset is

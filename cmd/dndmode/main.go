@@ -258,7 +258,7 @@ func run() int {
 	// EVERY user-facing console write — stdout banners, stderr diagnostics, the
 	// slog logger, and the panic trace below — is routed through outW/errW and
 	// suppressed while debugOn is false. debugOn starts false (SILENT default: a
-	// visible terminal under overlay_style none/glass must never leak the unlock
+	// visible terminal under overlay_style none/glass must never leak the
 	// unlock code — security stance) and is raised by the --debug flag (Step 1)
 	// then `debug: true` in config (Step 5). Both writers hold &debugOn, so
 	// raising it un-gates everything written afterwards; it is never lowered

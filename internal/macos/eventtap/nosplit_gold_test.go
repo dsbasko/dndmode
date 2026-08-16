@@ -70,6 +70,19 @@ var (
 	// the test for documenting history accurately.
 	blockCommentRe = regexp.MustCompile(`(?s)/\*.*?\*/`)
 	lineCommentRe  = regexp.MustCompile(`(?m)//.*$`)
+
+	// userIntentionalMaskRe captures the INITIALISER of the C-side
+	// USER_INTENTIONAL_MASK — everything between `=` and the terminating
+	// `;`. It is applied to comment-stripped source: the constant's own
+	// docblock spells out every kCGEventFlagMask* name (including the
+	// SecondaryFn one it excludes) to explain the choice, and matching
+	// those would invert the test's verdict.
+	userIntentionalMaskRe = regexp.MustCompile(`(?s)static\s+const\s+uint64_t\s+USER_INTENTIONAL_MASK\s*=\s*([^;]*);`)
+
+	// flagMaskNameRe harvests the CGEventFlags constant names out of that
+	// initialiser. Names rather than numbers: the .m file ORs the SDK
+	// symbols, so a hex comparison would pin the wrong artefact.
+	flagMaskNameRe = regexp.MustCompile(`kCGEventFlagMask\w+`)
 )
 
 // readTapSource returns the contents of tap_darwin.m, failing the test if it
@@ -237,4 +250,78 @@ func goExportNames(t *testing.T) []string {
 		}
 	}
 	return names
+}
+
+// TestUserIntentionalMask_CSourcePinsExactlyFourBits closes the other half of
+// the drift hole that TestUserIntentionalMask_MatchesMatcherPackage leaves
+// open. That test pins the GO side against a hex literal; the C side used to
+// be "enforced by code-review", which is not enforcement at all.
+//
+// The two directions of drift are NOT symmetric, which is why this matters:
+//
+//   - C mask WIDER than the Go mask is harmless. MatchTail masks every
+//     recorded event with matcher.UserIntentionalMask a second time, so a
+//     stray bit the callback let through is stripped before comparison.
+//   - C mask NARROWER than the Go mask is fail-DEADLY. Drop
+//     kCGEventFlagMaskControl here and the callback records flags=0 for
+//     ctrl+s; the Go side compares that against ModCtrl and never matches.
+//     The unlock code becomes unenterable — and the failure surfaces as a
+//     shielded machine that will not come back, on a tool whose entire
+//     security stance is to stay silent about wrong input.
+//
+// Nothing else in the build catches the narrowing direction: removing a term
+// from an OR-sum compiles, links, and passes every other test in this
+// package. So the constant is pinned the same way the nosplit invariant is —
+// as a gold test over the source text, since a Go test cannot read a C
+// constant without cgo (and _test.go files cannot import "C" at all).
+func TestUserIntentionalMask_CSourcePinsExactlyFourBits(t *testing.T) {
+	src := stripCComments(readTapSource(t))
+
+	m := userIntentionalMaskRe.FindStringSubmatch(src)
+	if m == nil {
+		t.Fatalf("%s: could not locate the `static const uint64_t "+
+			"USER_INTENTIONAL_MASK = …;` definition.\n\n"+
+			"Either the constant was renamed or its form changed. Do not delete "+
+			"this test to make it pass: it is the only thing standing between a "+
+			"dropped OR-term and a machine that can never be unshielded. Update "+
+			"userIntentionalMaskRe to match the new form instead.", tapSourcePath)
+	}
+
+	want := map[string]bool{
+		"kCGEventFlagMaskShift":     true,
+		"kCGEventFlagMaskControl":   true,
+		"kCGEventFlagMaskAlternate": true,
+		"kCGEventFlagMaskCommand":   true,
+	}
+
+	got := map[string]bool{}
+	for _, name := range flagMaskNameRe.FindAllString(m[1], -1) {
+		got[name] = true
+	}
+
+	for name := range want {
+		if !got[name] {
+			t.Errorf("%s: USER_INTENTIONAL_MASK is MISSING %s.\n\n"+
+				"This is the fail-deadly direction: the callback will record a "+
+				"zero bit where the Go side expects one, so every step of the "+
+				"unlock code that uses this modifier stops matching and the "+
+				"shield can no longer be dismissed. Restore the OR-term.",
+				tapSourcePath, name)
+		}
+	}
+	for name := range got {
+		if !want[name] {
+			t.Errorf("%s: USER_INTENTIONAL_MASK contains unexpected %s.\n\n"+
+				"matcher.UserIntentionalMask (the Go twin, pinned by "+
+				"TestUserIntentionalMask_MatchesMatcherPackage) carries exactly "+
+				"Shift|Control|Alternate|Command. Adding a bit here without "+
+				"adding it there is survivable — MatchTail re-masks — but the "+
+				"two constants are documented as bit-for-bit twins and a "+
+				"one-sided edit means one of the two docblocks is now lying. "+
+				"In particular kCGEventFlagMaskSecondaryFn must NOT come back: "+
+				"macOS raises it for the whole function-key group, so honouring "+
+				"it makes a bare `up` or `f1` step unmatchable.",
+				tapSourcePath, name)
+		}
+	}
 }

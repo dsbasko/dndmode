@@ -398,13 +398,49 @@ func (r *Releaser) Release() error {
 	if r.gestureDisableFn != nil {
 		r.gestureDisableFn()
 	}
-	// Closing Step 1: with both taps disabled there is no writer left for
-	// the keystroke ring, so wipe it. Deliberately here and not later —
-	// the whole point is to shorten the window in which the just-typed
-	// unlock code is readable in process memory, and the CF teardown below
-	// can take arbitrarily long (or fail outright). eventtap_uninstall_c
-	// calls eventtap_wipe_ring again at Step 2; that repetition is
-	// intentional belt-and-braces, both are cheap.
+	// Stop the unlock-code poller BEFORE the wipe below. The wipe is the
+	// only place in the process that writes the ring from outside the tap
+	// callback, so it must not overlap the one goroutine that reads it:
+	// eventtap_snapshot takes its ACQUIRE load of g_seq and then memcpys
+	// the ring in two separate steps, and a memset landing between them
+	// hands the poller a zeroed window still labelled with the old count.
+	// Every zeroed record reads as {flags: 0, keycode: 0} — keycode 0 is
+	// kVK_ANSI_A — so a code of bare `a` steps would "match" during
+	// teardown and log a spurious exit signal. Draining the reader first
+	// makes the single-writer premise eventtap_snapshot documents hold for
+	// the wipe as well, at a cost of at most one pollInterval (10ms).
+	//
+	// Ordering within Step 1 is deliberate: both taps are already disabled
+	// above, so input has ALREADY recovered — this wait delays only the
+	// wipe and the CF teardown, never the user's keyboard.
+	//
+	// The channels may be nil in unit-test constructors that exercise only
+	// the disable/uninstall path; the production Install path always
+	// populates them.
+	if r.stopPoller != nil {
+		// Close-only signalling: idempotency is irrelevant because
+		// Release itself is already serialised by the mutex + released
+		// guard, so this close runs exactly once per Releaser instance.
+		close(r.stopPoller)
+	}
+	if r.pollerDone != nil {
+		// Wait for the goroutine to actually exit. Under `-race`, a
+		// still-running goroutine reading the C ring after Release
+		// returns would be flagged. The poller's loop returns within
+		// pollInterval (10ms) of stopPoller close, so this wait is
+		// bounded. It cannot deadlock: the poller never takes this
+		// mutex, and its only send (to `sink`) is non-blocking.
+		<-r.pollerDone
+	}
+
+	// Closing Step 1: with both taps disabled and the poller drained there
+	// is neither a writer nor a reader left for the keystroke ring, so wipe
+	// it. Deliberately here and not later — the whole point is to shorten
+	// the window in which the just-typed unlock code is readable in process
+	// memory, and the CF teardown below can take arbitrarily long (or fail
+	// outright). eventtap_uninstall_c calls eventtap_wipe_ring again at
+	// Step 2; that repetition is intentional belt-and-braces, both are
+	// cheap.
 	if r.wipeRingFn != nil {
 		r.wipeRingFn()
 	}
@@ -440,23 +476,9 @@ func (r *Releaser) Release() error {
 		r.wakeStop = nil
 	}
 
-	// Stop the unlock-code poller goroutine. The channel may be nil in
-	// unit-test constructors that exercise only the disable/uninstall
-	// path; the production Install path always populates it.
-	if r.stopPoller != nil {
-		// Close-only signalling: idempotency is irrelevant because
-		// Release itself is already serialised by the mutex + released
-		// guard, so this close runs exactly once per Releaser instance.
-		close(r.stopPoller)
-	}
-	if r.pollerDone != nil {
-		// Wait for the goroutine to actually exit. Under `-race`, a
-		// still-running goroutine reading the C ring after Release
-		// returns would be flagged. The poller's loop returns within
-		// pollInterval (10ms) of stopPoller close, so this wait is
-		// bounded.
-		<-r.pollerDone
-	}
+	// (The unlock-code poller was already stopped and drained at the end of
+	// Step 1, before the ring wipe — see the comment there for why it
+	// cannot be left running across a memset of the ring it reads.)
 
 	// Drop references so a hypothetical re-call (which short-circuits via
 	// `released.Load()` anyway) has nothing to invoke. The C-side state

@@ -19,6 +19,24 @@ func quietLogger() *slog.Logger {
 	return slog.New(slog.NewTextHandler(io.Discard, nil))
 }
 
+// childReapBudget is how long a test waits for a stub child to be forked,
+// exec'd, exited and reaped before declaring the lifecycle broken.
+//
+// It is generous on purpose. The work being waited on is ~0.5s when this
+// package runs alone, but `go test ./...` runs a dozen package binaries
+// concurrently — several of them cgo/Cocoa-heavy — and fork+exec of a
+// freshly written script contends badly under that load: the same wait
+// measured over 5s during a full-suite run while passing in 0.5s in
+// isolation. A 5s budget therefore failed deterministically in `go test
+// ./...` and passed every time the package was run on its own, which reads
+// as a product bug and is not one.
+//
+// 30s keeps the test meaningful — a child that genuinely never dies still
+// fails it — while putting the threshold far outside the scheduling noise.
+// Do not tune this down to make the suite finish sooner: the timeout is only
+// ever paid on an actual failure.
+const childReapBudget = 30 * time.Second
+
 // writeStub creates an executable stub at a temp path and points binPath at it
 // for the duration of the test. body is the shell script body. The stub lets
 // the Start/Release lifecycle run hermetically without depending on the real
@@ -122,7 +140,7 @@ func TestProcess_Release_AfterSelfExit(t *testing.T) {
 	// Wait for the child to exit on its own.
 	select {
 	case <-p.Done():
-	case <-time.After(5 * time.Second):
+	case <-time.After(childReapBudget):
 		t.Fatal("self-exiting stub never finished")
 	}
 
@@ -146,8 +164,8 @@ func TestProcess_CtxCancel_KillsChild(t *testing.T) {
 
 	select {
 	case <-p.Done():
-	case <-time.After(5 * time.Second):
-		t.Fatal("child not reaped within 5s after ctx cancel")
+	case <-time.After(childReapBudget):
+		t.Fatalf("child not reaped within %s after ctx cancel", childReapBudget)
 	}
 }
 

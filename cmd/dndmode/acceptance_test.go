@@ -1552,7 +1552,10 @@ func TestAcceptance_Phase5_NoMockRuntimeFile_Regression(t *testing.T) {
 //     IOPM orphan + Focus On remain).
 //  4. Verify runtime.json still on disk post-Wait.
 //  5. Fork subprocess B (same tmpHome → reads the SAME runtime.json).
-//  6. Expect stderr B contains "recovery: released orphan assertion".
+//  6. Expect stderr B to show the dead-PID branch ran — either
+//     "recovery: released orphan assertion" or, far more commonly, the
+//     best-effort "recovery: release stored assertion failed" (the kernel
+//     reclaims a dead process's IOPM assertions before B gets there).
 //  7. Expect "active. press Ctrl-C." → recovery succeeded.
 //  8. Re-read runtime.json; assert snapshot.PID == cmdB.Process.Pid
 //     (MANDATORY t.Fatalf on mismatch — NOT a skip).
@@ -1627,9 +1630,25 @@ func TestAcceptance_CrashScenario(t *testing.T) {
 		t.Fatalf("B did not activate after recovery: stdout=%s stderr=%s",
 			stdoutB.String(), stderrB.String())
 	}
-	if !strings.Contains(stderrB.String(), "recovery: released orphan assertion") {
-		t.Errorf("stderr B missing recovery log line (RecoverFromCrash dead-PID branch did not fire): %s",
-			stderrB.String())
+	// The property under test is that the dead-PID branch RAN, not which way
+	// the assertion release happened to go. Both outcomes prove it ran, and
+	// which one you get is not up to dndmode: macOS reclaims a process's IOPM
+	// assertions when it dies, so by the time B looks at A's stored
+	// AssertionID the kernel has usually already released it and
+	// IOPMAssertionRelease answers with an IOKit error. Asserting only on the
+	// success line made this test fail on any machine where the kernel won
+	// that race — i.e. every machine, deterministically — while the code was
+	// behaving exactly as designed (recovery.go treats the release as
+	// best-effort and documents CleanupOrphans as the real mechanism for
+	// genuine orphans).
+	stderrBText := stderrB.String()
+	const (
+		releasedLine = "recovery: released orphan assertion"
+		failedLine   = "recovery: release stored assertion failed"
+	)
+	if !strings.Contains(stderrBText, releasedLine) && !strings.Contains(stderrBText, failedLine) {
+		t.Errorf("stderr B has neither %q nor %q (RecoverFromCrash dead-PID branch did not fire at all): %s",
+			releasedLine, failedLine, stderrBText)
 	}
 
 	// MANDATORY PID-match: re-read runtime.json and assert

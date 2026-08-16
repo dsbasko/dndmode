@@ -364,3 +364,52 @@ func TestManager_Path_ReturnsConstructorPath(t *testing.T) {
 		t.Errorf("Path() = %q, want %q", got, td.path)
 	}
 }
+
+// TestManager_WriteAfterReleaseReArmsDeletion pins the Release-then-Write
+// ordering that the crash-recovery path actually executes.
+//
+// cmd/dndmode/main.go constructs ONE Manager and uses it for both jobs:
+// RecoverFromCrash calls Release to delete the crashed session's
+// runtime.json, and Step 13.3 then calls Write to record the current
+// session. Release latches `released` so repeat callers are free; if Write
+// does not clear that latch, the Release at clean shutdown short-circuits
+// and the file this process just wrote survives its own exit.
+//
+// The consequence is not a stray file: the surviving snapshot carries a PID
+// that is dead by the time anyone reads it, so the NEXT start diagnoses a
+// crash that never happened and runs recovery against a stale assertion ID
+// and a stale Focus/mute state.
+//
+// The sequence below is deliberately Release → Write → Release rather than
+// Write → Release → Write: the first Release is the one that sets the latch,
+// and it must run against a path that does not exist yet (the
+// release-before-write idempotency case) exactly as recovery does when the
+// crashed file has already been cleaned.
+func TestManager_WriteAfterReleaseReArmsDeletion(t *testing.T) {
+	t.Parallel()
+	td := newTestDeps(t)
+
+	// Recovery's Release: no file yet, returns nil, latches released.
+	if err := td.mgr.Release(); err != nil {
+		t.Fatalf("first Release (recovery, file absent): %v", err)
+	}
+
+	// This session's snapshot.
+	if err := td.mgr.Write(canonicalSnapshot()); err != nil {
+		t.Fatalf("Write after Release: %v", err)
+	}
+	if _, err := os.Stat(td.path); err != nil {
+		t.Fatalf("runtime file missing right after Write: %v", err)
+	}
+
+	// Clean shutdown.
+	if err := td.mgr.Release(); err != nil {
+		t.Fatalf("second Release (clean shutdown): %v", err)
+	}
+	if _, err := os.Stat(td.path); !errors.Is(err, fs.ErrNotExist) {
+		t.Errorf("runtime file survived the post-Write Release: stat err = %v; "+
+			"want fs.ErrNotExist. Write must clear the `released` latch — "+
+			"otherwise every run that began with crash recovery leaves a "+
+			"runtime.json holding a dead PID behind.", err)
+	}
+}

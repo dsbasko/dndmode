@@ -125,6 +125,30 @@ func (m *Manager) Write(s Snapshot) error {
 		_ = os.Remove(tmpPath)
 		return fmt.Errorf("rename runtime temp file %q -> %q: %w", tmpPath, m.path, err)
 	}
+
+	// Re-arm Release. A Manager instance outlives a single file: main.go
+	// hands the SAME instance to RecoverFromCrash — which calls Release to
+	// delete the crashed session's runtime.json, latching released=true —
+	// and then calls Write to record the CURRENT session. Without this
+	// reset the latch survives, so the Release at clean shutdown takes the
+	// `released.Load()` fast path and returns nil WITHOUT removing the file
+	// it just wrote.
+	//
+	// The visible symptom is a runtime.json that outlives a clean exit
+	// carrying a now-dead PID, which makes the next start diagnose a crash
+	// that never happened and run recovery against a stale snapshot. It
+	// only reproduces on the recovery path (a plain run never calls Release
+	// before Write), which is why it survived: it needs a SIGKILL and a
+	// restart to show up. Pinned by TestAcceptance_CrashScenario and by
+	// TestManager_WriteAfterReleaseReArmsDeletion.
+	//
+	// Under mu, not a bare Store: a concurrent Release must not interleave
+	// its os.Remove with this reset and leave the flag disagreeing with
+	// what is on disk.
+	m.mu.Lock()
+	m.released.Store(false)
+	m.mu.Unlock()
+
 	return nil
 }
 

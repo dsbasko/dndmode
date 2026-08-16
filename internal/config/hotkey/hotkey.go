@@ -184,6 +184,14 @@ func ParseStep(s string) (Spec, error) {
 // ParseStep plus the legacy requirement of at least one modifier, and backs
 // the deprecated single-combination `hotkey` config key.
 //
+// The error text names `fn` unconditionally — not because the input was
+// inspected for it (that would leak a fragment of the secret; see ParseStep)
+// but because `fn` used to be a real modifier in this table and a config
+// written against that grammar is the likeliest way to reach this branch at
+// all. A `hotkey: fn+x` that worked before now lands here, and without the
+// hint the message ("need at least one modifier") reads as nonsense to
+// someone looking at a value that plainly contains one.
+//
 // Returns an error wrapping one of the sentinel errors (use errors.Is).
 func Parse(s string) (Spec, error) {
 	spec, err := ParseStep(s)
@@ -191,7 +199,9 @@ func Parse(s string) (Spec, error) {
 		return Spec{}, err
 	}
 	if spec.Modifiers == 0 {
-		return Spec{}, fmt.Errorf("%w: need at least one modifier and one key", ErrInvalidHotkey)
+		return Spec{}, fmt.Errorf("%w: need at least one modifier (ctrl, option, cmd, shift) "+
+			"and one key — note that 'fn' parses but is NOT a modifier, because macOS raises "+
+			"its bit for the whole function-key group on its own", ErrInvalidHotkey)
 	}
 	return spec, nil
 }

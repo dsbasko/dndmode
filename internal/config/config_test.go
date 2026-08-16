@@ -1361,3 +1361,63 @@ func TestLoader_Load_BooleanLookingScalars(t *testing.T) {
 		})
 	}
 }
+
+// TestLoader_Load_LeadingPunctuationNeedsQuoting pins the YAML edge the key
+// table walks straight into: `-`, `[`, `]`, `'` and backtick are documented
+// as valid unlock-code keys, but they are also YAML indicator characters, so
+// a code that STARTS with one is not a plain scalar at all.
+//
+// The failure this guards against is unusually unfriendly: the config never
+// reaches hotkey.ParseSequence, the error is a raw YAML parse message
+// pointing at a column, and startup is silent without --debug — so the user
+// sees exit 1 and nothing else while looking at a value that matches the
+// documented grammar character for character.
+//
+// The test therefore asserts BOTH halves: bare leading punctuation fails at
+// the YAML layer (which is why the template and README tell you to quote it),
+// and the quoted form round-trips intact. If a future goccy/go-yaml release
+// starts accepting the bare form, the "unquoted" subtests fail and the
+// quoting advice can be relaxed — that is the intended signal, not a
+// regression.
+func TestLoader_Load_LeadingPunctuationNeedsQuoting(t *testing.T) {
+	// Every documented punctuation key that is also a YAML indicator in
+	// first position. `=` `;` `,` `.` `/` `\` are deliberately absent:
+	// they parse bare, and pinning them here would claim a problem that
+	// does not exist.
+	indicators := []string{"-", "[", "]", "'", "`"}
+
+	for _, ch := range indicators {
+		t.Run("unquoted "+ch, func(t *testing.T) {
+			td := newTestDeps(t)
+			if err := os.MkdirAll(filepath.Dir(td.path), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(td.path, []byte("unlock_code: "+ch+" a b c d\n"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			if _, _, err := td.loader.Load(); err == nil {
+				t.Fatalf("Load() with a bare leading %q unexpectedly succeeded; "+
+					"if the YAML parser now accepts this, drop the quoting note from "+
+					"defaultConfigTemplate and README instead of deleting this test", ch)
+			}
+		})
+
+		t.Run("quoted "+ch, func(t *testing.T) {
+			td := newTestDeps(t)
+			if err := os.MkdirAll(filepath.Dir(td.path), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(td.path, []byte(`unlock_code: "`+ch+` a b c d"`+"\n"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			cfg, _, err := td.loader.Load()
+			if err != nil {
+				t.Fatalf("Load() with a quoted leading %q: %v (the quoting workaround "+
+					"documented in defaultConfigTemplate must work)", ch, err)
+			}
+			if want := ch + " a b c d"; cfg.UnlockCode != want {
+				t.Errorf("cfg.UnlockCode = %q, want %q", cfg.UnlockCode, want)
+			}
+		})
+	}
+}

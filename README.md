@@ -197,8 +197,23 @@ ad-hoc signed locally), so none require an Apple Developer ID.
 
 Configs written by earlier versions use a `hotkey:` key holding one chord. It
 still works - a single combination is just a 1-step unlock code - but it is
-deprecated, and `--debug` says so on every start. Nothing breaks on upgrade:
-the file is not rewritten and the chord keeps unlocking.
+deprecated, and `--debug` says so on every start. The file is not rewritten and
+the chord keeps unlocking.
+
+**One exception: `fn` is no longer a modifier.** It still parses, but it
+contributes nothing, because macOS raises the Fn bit for every F-key, arrow and
+Forward Delete on its own - a chord could demand it, but you could not withhold
+it, so a step written without it would be unmatchable on exactly those keys.
+Two consequences for an existing `hotkey:` value:
+
+| Old value | Now |
+| --- | --- |
+| `hotkey: ctrl+fn+x` | Loads, but unlocks on **Ctrl+X** - the Fn is not required any more |
+| `hotkey: fn+x` | **Startup error** (exit `1`) - no modifier is left, and a bare key must not unlock the shield |
+
+If your chord relies on `fn`, this is the moment to migrate it to a real
+`unlock_code` rather than to re-add a modifier. Run with `--debug` to see the
+error; startup is silent by default.
 
 Migrate by renaming the key, then lengthening the value:
 
@@ -447,7 +462,16 @@ A literal space is only a separator - the space *key* is written `space`.
 unlock_code: s w o r d f i s h     # a passphrase — the recommended shape
 unlock_code: ctrl+s w o r d cmd+z  # modifiers on some steps, bare keys on others
 unlock_code: Ctrl+Option+Cmd+X     # a single chord = a code of length 1
+unlock_code: "- a b c d"           # leading punctuation must be quoted (see below)
 ```
+
+**Quoting.** The value is a YAML scalar. If the code *starts* with `-`, `[`,
+`]`, `'` or `` ` ``, wrap it in double quotes - unquoted, YAML parses those as
+list or quote syntax and startup dies with a YAML error rather than a dndmode
+one. The same characters are fine bare anywhere after the first position. A
+` #` (space then hash) always starts a YAML comment and would silently cut the
+code short. Since startup is silent without `--debug`, a quoting mistake shows
+up only as exit `1`.
 
 **Length rules.** Every keypress is a fresh match attempt, so short codes fall
 fast. The numbers below assume an alphabet of ~36 (letters and digits) and an

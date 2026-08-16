@@ -207,8 +207,10 @@ func TestReleaser_Name_ReturnsEventtap(t *testing.T) {
 // Drift (e.g. a reviewer adding NumPad 0x200000 to the Go side without
 // updating the .m file) would silently produce an unlock code that never
 // matches on systems where the unmasked bit is set. This test pins the
-// constant on the Go side; the C side is enforced by code-review of
-// tap_darwin.m (which also lists the same 4 bits explicitly).
+// constant on the Go side only — test files cannot import "C", so the C
+// twin is unreachable from here. Its half is pinned textually by
+// TestUserIntentionalMask_CSourcePinsExactlyFourBits in nosplit_gold_test.go,
+// which greps tap_darwin.m for the same four kCGEventFlagMask* names.
 func TestUserIntentionalMask_MatchesMatcherPackage(t *testing.T) {
 	t.Parallel()
 

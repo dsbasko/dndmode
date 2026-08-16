@@ -275,9 +275,15 @@ func ValidateUnlockCode(steps []hotkey.Spec) error {
 // (never on the silent path — a warning is still a hint about the secret).
 //
 // Length 1 counts as weak DELIBERATELY, even though it is the shipped default:
-// a user who installed via brew and never opened config.yml would otherwise get
-// no signal at all that they are running with exactly the single-combination
-// hotkey whose brute-forceability motivated unlock codes in the first place.
+// the single-combination hotkey is exactly the shape whose brute-forceability
+// motivated unlock codes, so "it came from the template" must not exempt it.
+//
+// This does NOT reach a user who installed via brew and never passed --debug —
+// nothing does, by design: every console write is gated (see gatedWriter in
+// main.go) so a visible terminal under overlay_style none/glass cannot leak
+// hints about the secret. The warning is for the operator who is already
+// looking, not a first-run nag; the README carries the message for everyone
+// else.
 func IsWeakUnlockCode(steps []hotkey.Spec) bool {
 	return len(steps) < WeakUnlockSteps
 }
@@ -471,6 +477,14 @@ const defaultConfigTemplate = `# dndmode configuration
 #   'fn' is still accepted in a step but carries NO meaning: macOS raises the
 #   Fn bit for every F-key, arrow and Forward Delete on its own, so it cannot
 #   express intent. Write 'up', not 'fn+up'.
+#
+# QUOTING: this is a YAML value, so if the code STARTS with one of - [ ] '
+# or a backtick, wrap the whole value in double quotes — unquoted, YAML reads
+# those as list/quote syntax and startup fails with a parse error, not with a
+# dndmode message. Anywhere but the first character they are fine bare. Also
+# note that ' #' (space then hash) starts a YAML comment and would silently
+# truncate the rest of the code.
+#   unlock_code: "- a b c d"           # leading punctuation: quote it
 #
 # Examples:
 #   unlock_code: s w o r d f i s h     # a passphrase
