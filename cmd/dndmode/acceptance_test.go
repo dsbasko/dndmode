@@ -133,9 +133,9 @@ func (s *syncBuffer) String() string {
 // debug output gate: WITHOUT --debug (and without `debug: true` in config),
 // dndmode must emit NOTHING to stdout or stderr — most importantly it must never
 // print the startup banner (`dndmode: config=... unlock_code=...`), which would
-// reveal to a bystander that dndmode is running at all — and how long the code
-// is — when overlay_style is `none` or `glass` (the terminal stays visible
-// while active). It uses overlay_style=none so the run
+// reveal to a bystander that dndmode is running at all — and, via the strength
+// advisory, that the code is short — when overlay_style is `none` or `glass`
+// (the terminal stays visible while active). It uses overlay_style=none so the run
 // reaches its active state on ANY arm64 host without GUI/TCC/Shortcuts gates,
 // proven by the caffeinate child appearing; then SIGINT for a clean, silent exit.
 //
@@ -299,8 +299,8 @@ func TestAcceptance_DefaultConfigCreatedOnMissing(t *testing.T) {
 	if !strings.Contains(out, "dndmode: config=") {
 		t.Errorf("stdout missing 'dndmode: config=': %s", out)
 	}
-	if !strings.Contains(out, "unlock_code=1 step (source=unlock_code)") {
-		t.Errorf("stdout missing the unlock-code shape: %s", out)
+	if !strings.Contains(out, "unlock_code=ok (source=unlock_code)") {
+		t.Errorf("stdout missing the unlock-code source: %s", out)
 	}
 	if strings.Contains(out, "Ctrl+Option+Cmd+X") {
 		t.Errorf("banner LEAKS the unlock code value: %s", out)
@@ -370,9 +370,15 @@ func TestAcceptance_Banner_NeverPrintsUnlockCodeValue(t *testing.T) {
 	signalAndWait(t, cmd, syscall.SIGINT, 10*time.Second)
 
 	out := stdout.String()
-	// The SHAPE is reported: nine steps, resolved from the unlock_code key.
-	if !strings.Contains(out, "unlock_code=9 steps (source=unlock_code)") {
-		t.Errorf("stdout missing the unlock-code shape: %s", out)
+	// Only the SOURCE is reported. The length is deliberately NOT printed:
+	// under overlay_style glass the terminal stays readable while input is
+	// locked, and the exact width of the code collapses a brute force from
+	// "every length 1..32" to one fixed width.
+	if !strings.Contains(out, "unlock_code=ok (source=unlock_code)") {
+		t.Errorf("stdout missing the unlock-code source: %s", out)
+	}
+	if strings.Contains(out, "9 steps") {
+		t.Errorf("banner LEAKS the unlock-code length: %s", out)
 	}
 	// A 9-step code is above WeakUnlockSteps, so no strength advisory fires —
 	// its absence is what tells us the threshold is wired to the step COUNT.
@@ -702,7 +708,7 @@ func TestAcceptance_LegacyHotkeyOnly_StartsWithDeprecationWarning(t *testing.T) 
 	// The legacy key collapses to a code of length 1, and the banner names the
 	// key it came from — that source string is what makes the warning
 	// actionable ("this line, in this file").
-	if !strings.Contains(out, "unlock_code=1 step (source=hotkey)") {
+	if !strings.Contains(out, "unlock_code=ok (source=hotkey)") {
 		t.Errorf("banner does not report the legacy source: %s", out)
 	}
 	// A 1-step code is weak BY DESIGN of IsWeakUnlockCode — the shipped

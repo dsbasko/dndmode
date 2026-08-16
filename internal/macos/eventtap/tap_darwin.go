@@ -327,10 +327,11 @@ type Releaser struct {
 	gestureUninstallFn func()
 
 	// wipeRingFn clears the C-side keystroke ring (and its press counter).
-	// It runs at the END of Step 1, once BOTH taps are disabled and no
-	// further key press can be recorded — the ring holds the tail of what
-	// the user typed, ending with the unlock code itself, and there is no
-	// reason to leave it resident for the rest of the process lifetime.
+	// It runs at the END of Step 3, once BOTH taps are disabled (Step 1) and
+	// the poller — the ring's only reader — has been joined: the ring holds
+	// the tail of what the user typed, ending with the unlock code itself,
+	// and there is no reason to leave it resident for the rest of the
+	// process lifetime.
 	//
 	// "Both taps are disabled" is necessary but not sufficient: a callback
 	// dispatched before the disable landed is still running, a queued mach
@@ -534,7 +535,7 @@ func (r *Releaser) Release() error {
 	// makes the single-writer premise eventtap_snapshot documents hold for
 	// the wipe as well, at a cost of at most one pollInterval (10ms).
 	//
-	// Ordering within Step 1 is deliberate: both taps are already disabled
+	// Ordering within Step 3 is deliberate: both taps are already disabled
 	// above, so input has ALREADY recovered — this wait delays only the
 	// wipe and the CF teardown, never the user's keyboard.
 	//
@@ -557,14 +558,23 @@ func (r *Releaser) Release() error {
 		<-r.pollerDone
 	}
 
-	// Closing Step 1: with both taps disabled and the poller drained there
-	// is neither a writer nor a reader left for the keystroke ring, so wipe
-	// it. Deliberately here and not later — the whole point is to shorten
-	// the window in which the just-typed unlock code is readable in process
+	// Closing Step 3: the poller join above removed the ring's READER, so
+	// wipe it. It did NOT remove the writer — disabling a tap is not a
+	// drain, and a mach message already queued on the tap port can still
+	// produce a callback afterwards. That is why the wipe does not memset
+	// from this goroutine: wipeRingFn calls eventtap_wipe_ring_on_worker,
+	// which runs the memset as a run-loop block ON the worker thread, where
+	// it cannot overlap the callback's plain stores (see the contract in
+	// tap_darwin.m).
+	//
+	// Deliberately here and not later — the whole point is to shorten the
+	// window in which the just-typed unlock code is readable in process
 	// memory, and the CF teardown below can take arbitrarily long (or fail
-	// outright). eventtap_uninstall_c calls eventtap_wipe_ring again at
-	// Step 2; that repetition is intentional belt-and-braces, both are
-	// cheap.
+	// outright). eventtap_uninstall_c wipes again at Step 5, but only if its
+	// own drain succeeded (`if (drained == 0)` there): if BOTH this
+	// handshake and that drain time out, the ring stays resident and Step 5
+	// logs the "keystroke ring left resident" WARN. Two independent chances,
+	// not a guarantee.
 	if r.wipeRingFn != nil {
 		r.wipeRingFn()
 	}

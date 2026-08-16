@@ -95,9 +95,14 @@
 //
 //   - `InstallAll` and `Releaser.Release` MUST be called from the main
 //     goroutine (the one locked to OS thread #0 by
-//     `internal/runtimepin/init()`). The C side touches
-//     `CFRunLoopGetMain()` and AppKit notification center, both of which
-//     are main-thread-only APIs.
+//     `internal/runtimepin/init()`). The reason is the wake subsystem, not
+//     the tap: `wake_darwin.m` registers on `NSWorkspace`'s notification
+//     center and confines observer delivery to `[NSOperationQueue
+//     mainQueue]`, so its lifetime argument — an observer block can never
+//     run concurrently with `Release`, because the main thread is *inside*
+//     `Release` — only holds while both calls happen on that thread. (The
+//     tap's own run loop is NOT the main one: `tap_darwin.m` attaches the
+//     source to `CFRunLoopGetCurrent()` on the worker thread.)
 //   - The cgo callback `eventtap_callback` (`tap_darwin.m`) fires on a
 //     worker thread owned by the CGEventTap CFRunLoop. It MUST NOT allocate
 //     Go memory, block on a channel send, or call into Go AT ALL. It makes

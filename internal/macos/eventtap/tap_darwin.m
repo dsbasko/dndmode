@@ -346,7 +346,7 @@ uint64_t eventtap_snapshot(dnd_keyrec_t *out) {
 // `eventtap_uninstall_c` calls this AFTER `CFRunLoopRemoveSource`: there the
 // drain is airtight, and it also guarantees no callback is inside
 // `CGEventTapEnable(g_tap, true)` when the mach port is CFReleased on the
-// next line. That is also why the Release Step 1 wipe does NOT use this
+// next line. That is also why the Release Step 3 wipe does NOT use this
 // function on its own: with the source still attached a drain cannot rule
 // out a later callback, so that wipe runs ON the worker thread instead
 // (`eventtap_wipe_ring_on_worker` below), where the thread — not a
@@ -402,7 +402,7 @@ int eventtap_drain_worker_callbacks(void) {
 // be running — install (before the tap exists), the tail of
 // `eventtap_uninstall_c` (source detached, drain confirmed, tap released),
 // and the body of `eventtap_wipe_ring_on_worker`, which is how Release
-// Step 1 reaches it: ON the worker thread, where the callback cannot run
+// Step 3 reaches it: ON the worker thread, where the callback cannot run
 // concurrently because that same thread is what would run it. Those three
 // are the ONLY call sites and they are the only implementation of "clear
 // the ring": a fourth open-coded memset that forgets the counter reset
@@ -410,7 +410,7 @@ int eventtap_drain_worker_callbacks(void) {
 // keycode 0 is kVK_ANSI_A.
 //
 // Note what is NOT on that list: a plain call from the Go side while the tap
-// source is still attached to the worker loop. That was the Step 1 shape
+// source is still attached to the worker loop. That was the Step 3 shape
 // before, and it was unsound for a reason no drain can fix — a mach message
 // already queued on the tap port produces a callback the handshake did not
 // and could not wait for, whose ring append is a pair of PLAIN stores
@@ -438,7 +438,7 @@ int eventtap_drain_worker_callbacks(void) {
 // three sites, which is why this function does NOT try to satisfy it
 // itself: at install no loop exists yet, at the uninstall tail the source
 // is already detached and `eventtap_drain_worker_callbacks` has confirmed,
-// and at Step 1 the wrapper puts the call on the writer's own thread. A
+// and at Step 3 the wrapper puts the call on the writer's own thread. A
 // drain bolted on here would be a no-op at two sites and the wrong
 // mechanism at the third. Disabling the tap is NOT sufficient by itself —
 // Apple documents no callback-drain guarantee for CGEventTapEnable, so an
@@ -449,10 +449,10 @@ void eventtap_wipe_ring(void) {
     __atomic_store_n(&g_seq, 0, __ATOMIC_RELEASE);
 }
 
-// eventtap_wipe_ring_on_worker is the Release Step 1 wipe: it clears the
+// eventtap_wipe_ring_on_worker is the Release Step 3 wipe: it clears the
 // ring FROM the worker thread instead of from the caller's.
 //
-// Why not "drain, then memset here": at Step 1 the tap source is still
+// Why not "drain, then memset here": at Step 3 the tap source is still
 // attached to the worker loop. A drain proves no callback is running at the
 // instant it returns, but a mach message already queued on the tap port can
 // still be delivered afterwards — CFRunLoopPerformBlock enqueues work for a
@@ -477,8 +477,10 @@ void eventtap_wipe_ring(void) {
 // this early wipe is to shorten the window in which the just-typed unlock
 // code sits in process memory, and falling back to a direct memset would
 // re-introduce exactly the data race this function exists to remove. The
-// uninstall-time wipe a few CF calls later is unconditional, so the secret
-// is still cleared — just not as early.
+// uninstall-time wipe a few CF calls later is an independent second chance
+// — not a guarantee: it is itself gated on `drained == 0` there, so a run
+// where BOTH handshakes time out leaves the ring resident and logs a WARN.
+// Two chances beat one plus undefined behaviour.
 //
 // With no worker loop (install-rollback paths) the wipe is done inline and 0
 // returned: no loop means no callback can be dispatched, so there is no
@@ -752,8 +754,8 @@ int eventtap_uninstall_c(CFMachPortRef tap) {
     // drain confirmed, the callback is not running and cannot start again:
     // there is no writer left to race, which makes this the one wipe in the
     // process that is provably clean.
-    // This is hygiene, not correctness — Release Step 1 already wiped the
-    // ring, and the install-time rollback paths never recorded anything —
+    // This is hygiene, not correctness — Release Step 3 already attempted
+    // the wipe, and the install-time rollback paths never recorded anything —
     // but the ring holds the tail of what the user typed, including the
     // unlock code they just entered, and there is no reason to leave it
     // resident for the remainder of the process lifetime. Going through

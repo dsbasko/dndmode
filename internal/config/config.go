@@ -515,7 +515,15 @@ const defaultConfigTemplate = `# dndmode configuration
 # layout 'unlock_code: s w o r d' is typed with the keys ы ц о р в.
 # Every step is matched EXACTLY: a modifier you happen to be holding (e.g. Cmd)
 # breaks a step declared without it. CapsLock, NumPad and Fn bits are ignored,
-# so CapsLock can never lock you out and 'up' or 'f1' work as plain steps.
+# so CapsLock can never lock you out and 'up' or 'down' work as plain steps.
+#
+# AVOID f1-f12. With the macOS default "Use F1, F2, etc. keys as standard
+# function keys" turned OFF, the F-row is delivered as a system media key, NOT
+# as a key press — dndmode never sees it. A code containing 'f1' parses fine,
+# starts with no warning, and then CANNOT BE TYPED while locked unless you hold
+# Fn (or flip that switch in System Settings > Keyboard). The arrows and
+# forwarddelete are NOT affected: those are real key presses that merely carry
+# the Fn bit, which is stripped.
 unlock_code: %s
 
 # --- hotkey (DEPRECATED) -----------------------------------------------------

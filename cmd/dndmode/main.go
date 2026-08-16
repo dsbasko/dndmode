@@ -488,28 +488,31 @@ func run() int {
 	if created {
 		_, _ = fmt.Fprintf(outW, "dndmode: created default config at %s\n", cfgPath)
 	}
-	// The banner reports the SHAPE of the unlock code (step count + which key
-	// it came from), never its value: with overlay_style none/glass the
-	// terminal stays visible while dndmode is active, and stdout lands in
-	// scrollback / tmux besides — printing the secret here would contradict the
-	// reveal-nothing stance stated on gatedWriter.
-	stepWord := "steps"
-	if len(unlockSteps) == 1 {
-		stepWord = "step"
-	}
-	_, _ = fmt.Fprintf(outW, "dndmode: config=%s unlock_code=%d %s (source=%s) overlay_style=%s (%s)\n",
-		cfgPath, len(unlockSteps), stepWord, unlockSource, overlayStyle, styleSource)
+	// The banner confirms only THAT a code was resolved and which key it came
+	// from — never its value and never its length. With overlay_style glass the
+	// terminal stays visible while input is locked, and stdout lands in
+	// scrollback / tmux besides; the package convention is explicit that the
+	// length of the secret is part of the secret, because knowing it collapses
+	// a brute force from "every length 1..32" to one fixed width. Printing
+	// either here would contradict the reveal-nothing stance stated on
+	// gatedWriter.
+	_, _ = fmt.Fprintf(outW, "dndmode: config=%s unlock_code=ok (source=%s) overlay_style=%s (%s)\n",
+		cfgPath, unlockSource, overlayStyle, styleSource)
 	// Both advisories below ride the same gatedWriter as the banner, so they
 	// only ever reach a terminal the operator explicitly un-silenced. Neither
-	// names a step — only the shape of the code.
+	// names a step nor the code's length.
 	if unlockSource == config.UnlockSourceHotkey {
 		_, _ = fmt.Fprintf(outW,
 			"dndmode: the 'hotkey' config key is deprecated — rename it to 'unlock_code' (the same value is a 1-step code).\n")
 	}
 	if config.IsWeakUnlockCode(unlockSteps) {
+		// Phrased against the public WeakUnlockSteps threshold rather than the
+		// actual length: the threshold is already documented in the README and
+		// the config template, so naming it reveals nothing the reader could
+		// not look up, while "%d steps" would hand out the exact width.
 		_, _ = fmt.Fprintf(outW,
-			"dndmode: warning — the unlock code is %d %s; %d or more is strongly recommended (every keypress is a fresh match attempt).\n",
-			len(unlockSteps), stepWord, config.WeakUnlockSteps)
+			"dndmode: warning — the unlock code is short; %d steps or more is strongly recommended (every keypress is a fresh match attempt).\n",
+			config.WeakUnlockSteps)
 	}
 	switch overlayStyle {
 	case config.OverlayStyleGlass:

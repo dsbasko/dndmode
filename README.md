@@ -364,7 +364,15 @@ it is the only secret that ends a locked session.
 # layout 'unlock_code: s w o r d' is typed with the keys ы ц о р в.
 # Every step is matched EXACTLY: a modifier you happen to be holding (e.g. Cmd)
 # breaks a step declared without it. CapsLock, NumPad and Fn bits are ignored,
-# so CapsLock can never lock you out and 'up' or 'f1' work as plain steps.
+# so CapsLock can never lock you out and 'up' or 'down' work as plain steps.
+#
+# AVOID f1-f12. With the macOS default "Use F1, F2, etc. keys as standard
+# function keys" turned OFF, the F-row is delivered as a system media key, NOT
+# as a key press — dndmode never sees it. A code containing 'f1' parses fine,
+# starts with no warning, and then CANNOT BE TYPED while locked unless you hold
+# Fn (or flip that switch in System Settings > Keyboard). The arrows and
+# forwarddelete are NOT affected: those are real key presses that merely carry
+# the Fn bit, which is stripped.
 unlock_code: Ctrl+Option+Cmd+X
 
 # --- hotkey (DEPRECATED) -----------------------------------------------------
@@ -538,9 +546,20 @@ Caps Lock, the numeric-keypad flag, the Fn flag, and the other system-set
 modifier bits are stripped before matching, so a stray Caps Lock can never lock
 you out. The Fn one matters more than it looks: macOS raises that bit for every
 key of the function-key group - `f1`-`f12`, the arrows, `forwarddelete` -
-whether or not you are holding Fn. Because it is stripped, those keys work as
-plain steps (`unlock_code: s w up down` is fine) and `fn` in a step is accepted
-but means nothing.
+whether or not you are holding Fn. Because it is stripped, the arrows and
+`forwarddelete` work as plain steps (`unlock_code: s w up down` is fine) and
+`fn` in a step is accepted but means nothing.
+
+> **Do not put `f1`-`f12` in your unlock code.** Stripping the Fn *bit* is not
+> enough for the F-row, because on the macOS default - "Use F1, F2, etc. keys as
+> standard function keys" turned **off** in System Settings > Keyboard - the
+> F-row is not a key press at all. It is delivered as a system media event
+> (brightness, Mission Control, volume), which dndmode blocks but never records.
+> A code containing `f1` parses, validates and starts without a single warning,
+> and then cannot be typed: the only way in is to hold Fn for every F-step, or
+> to turn that setting on beforehand. Get it wrong and the screen stays locked
+> with no keyboard and no Ctrl-C - the way out is SSH from another machine or a
+> hard power-off.
 
 The YAML parser is strict about unknown keys but not about values: a misspelled key
 (`overaly_style`) is rejected on load, while a bad value (`overlay_style: blak`) is
