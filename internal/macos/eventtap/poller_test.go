@@ -678,3 +678,154 @@ func TestPollSequence_PreExistingKeystrokes_NotReplayed(t *testing.T) {
 	default:
 	}
 }
+
+// TestPollSequence_CodeSplitAcrossTicks is the shape production actually
+// sees. A human types at ~100-200ms per key against a 10ms tick, so the
+// unlock code arrives one keystroke per tick and no single snapshot ever
+// contains the whole thing — every other pollSequence test pushes the entire
+// stream in one go and therefore exercises only the "it all landed in one
+// window" case.
+//
+// What is under test is the carry-over of `lastSeq`: the window matchAny is
+// given must start where the previous tick stopped, not at the newest
+// record. If that carry-over broke, a code typed at human speed would never
+// match while every existing test stayed green.
+func TestPollSequence_CodeSplitAcrossTicks(t *testing.T) {
+	t.Parallel()
+
+	f := &fakeRing{}
+	m := mustSequence(t, "s w o r d")
+	sink := make(chan struct{}, 1)
+
+	startPoller(t, f, m, sink)
+
+	for _, step := range []string{"s", "w", "o", "r", "d"} {
+		f.push(mustEvents(t, step)...)
+		// Long enough for the poller to observe this keystroke on its own
+		// tick, so the next one lands in a separate snapshot.
+		time.Sleep(3 * pollInterval)
+	}
+
+	select {
+	case <-sink:
+	case <-time.After(20 * pollInterval):
+		t.Fatalf("sink did not receive within %v for a code typed one key per tick",
+			20*pollInterval)
+	}
+}
+
+// TestPollSequence_StrayKeyBetweenTicks_NoMatch is the negative twin: the
+// same one-key-per-tick delivery, but with a wrong key in the middle. It
+// pins that the cross-tick carry-over does not become a "collect the right
+// keys in any order" filter — the steps must still be consecutive.
+func TestPollSequence_StrayKeyBetweenTicks_NoMatch(t *testing.T) {
+	t.Parallel()
+
+	f := &fakeRing{}
+	m := mustSequence(t, "s w o r d")
+	sink := make(chan struct{}, 1)
+
+	startPoller(t, f, m, sink)
+
+	for _, step := range []string{"s", "w", "o", "z", "r", "d"} {
+		f.push(mustEvents(t, step)...)
+		time.Sleep(3 * pollInterval)
+	}
+
+	select {
+	case <-sink:
+		t.Error("sink received a signal for a code interrupted by a stray key")
+	default:
+	}
+}
+
+// TestPollSequence_RingOverflow_RecoversAndMatches drives the one branch of
+// pollSequence that no other test reaches: more than ringCap keystrokes
+// between two ticks, i.e. the poller falling far enough behind that the
+// oldest records were overwritten before it could read them.
+//
+// Two properties matter, and only the second is about the log line:
+//
+//  1. the aged-out records must NOT produce a match — the slots they
+//     occupied now hold newer keystrokes, and a window assembled across that
+//     boundary is fiction;
+//  2. the poller must keep working afterwards. `lastSeq` jumps forward by
+//     more than the ring holds, and a mistake there (clamping to a `from`
+//     above `to`, say) would leave the unlock code permanently dead with no
+//     symptom other than a machine that will not unlock.
+func TestPollSequence_RingOverflow_RecoversAndMatches(t *testing.T) {
+	t.Parallel()
+
+	f := &fakeRing{}
+	m := mustSequence(t, "s w o r d")
+	sink := make(chan struct{}, 1)
+
+	startPoller(t, f, m, sink)
+
+	// One burst larger than the ring, containing the code near its START so
+	// the records are guaranteed to be overwritten by the tail of the burst.
+	flood := mustEvents(t, "s w o r d")
+	for i := 0; i < ringCap+16; i++ {
+		flood = append(flood, mustEvents(t, "z")...)
+	}
+	f.push(flood...)
+
+	time.Sleep(5 * pollInterval)
+	select {
+	case <-sink:
+		t.Fatal("sink received a signal for keystrokes that aged out of the ring")
+	default:
+	}
+
+	// The poller survived the overflow: a code typed after it still matches.
+	f.push(mustEvents(t, "s w o r d")...)
+	select {
+	case <-sink:
+	case <-time.After(20 * pollInterval):
+		t.Fatalf("sink did not receive within %v after a ring overflow — the "+
+			"poller must recover, not go deaf", 20*pollInterval)
+	}
+}
+
+// TestClampFrom_CounterBehindCaller covers `to < from`, which is not a
+// hypothetical: Release wipes the ring (resetting the C counter to 0) at
+// Step 1 and only closes stopPoller at Step 6, so the poller can legitimately
+// tick in between and read a counter BELOW its own lastSeq.
+//
+// The range must collapse to empty. Anything else would hand matchAny a
+// window over the freshly-zeroed ring, and a zero record decodes as a bare
+// `a` press — an unlock code of `a`-only steps could then match on the
+// wipe itself.
+func TestClampFrom_CounterBehindCaller(t *testing.T) {
+	t.Parallel()
+
+	const l = 4
+	for _, to := range []uint64{0, 1, ringCap, ringCap * 4} {
+		from, dropped := clampFrom(100+to, to, l)
+		if from < to {
+			t.Errorf("clampFrom(%d, %d, %d) = (%d, %v), want from >= to so the "+
+				"half-open range [from, to) stays empty", 100+to, to, l, from, dropped)
+		}
+	}
+}
+
+// TestMatchAny_ToBeforeFrom is the same reset seen one layer up: matchAny
+// must iterate zero times rather than run away over a wrapped uint64 range.
+func TestMatchAny_ToBeforeFrom(t *testing.T) {
+	t.Parallel()
+
+	m := mustSequence(t, "s w o r d")
+	evs := mustEvents(t, "s w o r d")
+	ring, cur := newRing(0, evs)
+	tail := make([]matcher.KeyEvent, m.Len())
+
+	// The code IS in the ring and would match over [0, cur) — the point is
+	// that an inverted range must not consult it at all.
+	if !matchAny(ring, 0, cur, tail, m) {
+		t.Fatal("precondition failed: the code is not in the ring")
+	}
+	if matchAny(ring, cur, 0, tail, m) {
+		t.Errorf("matchAny(ring, %d, 0, …) = true, want false — a counter "+
+			"reset must collapse the range, not replay the whole ring", cur)
+	}
+}

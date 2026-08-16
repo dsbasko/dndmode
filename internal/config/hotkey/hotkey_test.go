@@ -103,15 +103,30 @@ func TestParse_Hotkey_Success(t *testing.T) {
 			},
 		},
 		{
-			name:       "fn modifier supported",
+			// `fn` parses but contributes no bit, so it cannot satisfy the
+			// legacy "at least one modifier" rule on its own. Accepting it
+			// here would mean `hotkey: fn+f1` unlocks the shield on a bare
+			// F1 press — a single keypress, which is exactly what that rule
+			// exists to forbid.
+			name:       "fn alone does not satisfy the legacy modifier requirement",
 			input:      "fn+f1",
+			setupMocks: func(td *testDeps) {},
+			validateResp: func(t *testing.T, got hotkey.Spec, err error) {
+				if !errors.Is(err, hotkey.ErrInvalidHotkey) {
+					t.Fatalf("err = %v, want ErrInvalidHotkey", err)
+				}
+			},
+		},
+		{
+			name:       "fn combined with a real modifier is accepted and dropped",
+			input:      "ctrl+fn+f1",
 			setupMocks: func(td *testDeps) {},
 			validateResp: func(t *testing.T, got hotkey.Spec, err error) {
 				if err != nil {
 					t.Fatalf("unexpected error: %v", err)
 				}
-				if got.Modifiers != hotkey.ModFn {
-					t.Errorf("Modifiers = %#x, want ModFn only", got.Modifiers)
+				if got.Modifiers != hotkey.ModCtrl {
+					t.Errorf("Modifiers = %#x, want ModCtrl only (fn must contribute no bit)", got.Modifiers)
 				}
 				if got.KeyCode != 0x7A {
 					t.Errorf("KeyCode = %#x, want 0x7A (kVK_F1)", got.KeyCode)
@@ -274,8 +289,8 @@ func TestParse_Hotkey_KeyCodeResolution(t *testing.T) {
 	}{
 		{name: "x → kVK_ANSI_X", input: "ctrl+x", wantCode: 0x07},
 		{name: "space → kVK_Space", input: "shift+space", wantCode: 0x31},
-		{name: "f1 → kVK_F1", input: "fn+f1", wantCode: 0x7A},
-		{name: "f12 → kVK_F12", input: "fn+f12", wantCode: 0x6F},
+		{name: "f1 → kVK_F1", input: "ctrl+f1", wantCode: 0x7A},
+		{name: "f12 → kVK_F12", input: "ctrl+f12", wantCode: 0x6F},
 		{name: "escape → kVK_Escape", input: "ctrl+escape", wantCode: 0x35},
 		{name: "esc alias → kVK_Escape", input: "ctrl+esc", wantCode: 0x35},
 		{name: "enter → kVK_Return", input: "ctrl+enter", wantCode: 0x24},

@@ -6,6 +6,7 @@ import (
 	"errors"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/dsbasko/dndmode/internal/config/hotkey"
 	"github.com/dsbasko/dndmode/internal/matcher"
@@ -18,13 +19,15 @@ import (
 // two-layer idempotency without invoking the real cgo bridge.
 type releaserTestDeps struct {
 	disableCalls          atomic.Int64
+	clearObservedCalls    atomic.Int64
 	uninstallCalls        atomic.Int64
 	gestureDisableCalls   atomic.Int64
 	gestureUninstallCalls atomic.Int64
 	wipeRingCalls         atomic.Int64
 
-	// callOrder records the sequence of "disable" / "gesture-disable" /
-	// "wipe-ring" / "gesture-uninstall" / "uninstall" strings, in the order the fake
+	// callOrder records the sequence of "disable" / "clear-observed" /
+	// "gesture-disable" / "wipe-ring" / "gesture-uninstall" / "uninstall"
+	// strings, in the order the fake
 	// closures were invoked. Slice append is NOT goroutine-safe in general,
 	// but in the Release path the closures are invoked from the same
 	// goroutine (mutex-serialised), so a plain slice is sufficient. The
@@ -58,6 +61,15 @@ func newReleaserTestDeps(t *testing.T) *releaserTestDeps {
 	// package) rather than widening newReleaserWithDeps: the production
 	// installInternal path sets these fields the same way, and existing
 	// callers of the seam stay source-compatible.
+	// clearObservedFn is part of Step 1 alongside disableFn: it writes NULL
+	// to g_observed_tap so the watchdog / wake handlers stop re-enabling the
+	// taps we are tearing down. Recorded here so its POSITION is pinned —
+	// firing it after the CF teardown would leave a window in which a
+	// watchdog tick re-enables a released tap.
+	d.releaser.clearObservedFn = func() {
+		d.clearObservedCalls.Add(1)
+		d.callOrder = append(d.callOrder, "clear-observed")
+	}
 	d.releaser.gestureDisableFn = func() {
 		d.gestureDisableCalls.Add(1)
 		d.callOrder = append(d.callOrder, "gesture-disable")
@@ -120,6 +132,9 @@ func TestReleaser_Release_IsIdempotent(t *testing.T) {
 	if got := d.wipeRingCalls.Load(); got != 1 {
 		t.Errorf("after 3 Release calls, wipeRingCalls = %d, want 1 (gate must block)", got)
 	}
+	if got := d.clearObservedCalls.Load(); got != 1 {
+		t.Errorf("after 3 Release calls, clearObservedCalls = %d, want 1 (gate must block)", got)
+	}
 }
 
 // TestReleaser_Release_DisableBeforeUninstall verifies two ordering
@@ -141,7 +156,7 @@ func TestReleaser_Release_IsIdempotent(t *testing.T) {
 //     break the single-writer premise eventtap_snapshot relies on.
 //
 // The fake closures append their tags to callOrder; the test asserts the
-// exact five-step sequence.
+// exact six-step sequence.
 func TestReleaser_Release_DisableBeforeUninstall(t *testing.T) {
 	t.Parallel()
 
@@ -150,7 +165,7 @@ func TestReleaser_Release_DisableBeforeUninstall(t *testing.T) {
 		t.Fatalf("Release: %v", err)
 	}
 
-	want := []string{"disable", "gesture-disable", "wipe-ring", "gesture-uninstall", "uninstall"}
+	want := []string{"disable", "clear-observed", "gesture-disable", "wipe-ring", "gesture-uninstall", "uninstall"}
 	if len(d.callOrder) != len(want) {
 		t.Fatalf("callOrder = %v, want %v (len mismatch)", d.callOrder, want)
 	}
@@ -177,31 +192,33 @@ func TestReleaser_Name_ReturnsEventtap(t *testing.T) {
 // TestUserIntentionalMask_MatchesMatcherPackage pins the bit-for-bit
 // equality between the Go-side `matcher.UserIntentionalMask` and the
 // C-side `USER_INTENTIONAL_MASK` constant in tap_darwin.m. Both must
-// produce 0x009E0000 (Shift|Control|Alternate|Command|SecondaryFn):
+// produce 0x001E0000 (Shift|Control|Alternate|Command):
 //
 //	Shift        = 0x00020000
 //	Control      = 0x00040000
 //	Alternate    = 0x00080000
 //	Command      = 0x00100000
-//	SecondaryFn  = 0x00800000
-//	OR-sum       = 0x009E0000
+//	OR-sum       = 0x001E0000
+//
+// SecondaryFn (0x00800000) is NOT part of the mask — macOS sets it for the
+// whole function-key group, so honouring it would make a bare `up` or `f1`
+// step unmatchable. See matcher.UserIntentionalMask's doc comment.
 //
 // Drift (e.g. a reviewer adding NumPad 0x200000 to the Go side without
-// updating the .m file) would silently produce a hotkey that never
+// updating the .m file) would silently produce an unlock code that never
 // matches on systems where the unmasked bit is set. This test pins the
 // constant on the Go side; the C side is enforced by code-review of
-// tap_darwin.m (which also lists the same 5 bits explicitly).
+// tap_darwin.m (which also lists the same 4 bits explicitly).
 func TestUserIntentionalMask_MatchesMatcherPackage(t *testing.T) {
 	t.Parallel()
 
 	const want hotkey.ModFlag = 0x00020000 | // Shift
 		0x00040000 | // Control
 		0x00080000 | // Alternate (Option)
-		0x00100000 | // Command
-		0x00800000 //   SecondaryFn (Fn)
+		0x00100000 //   Command
 
 	if got := matcher.UserIntentionalMask; got != want {
-		t.Errorf("matcher.UserIntentionalMask = 0x%08x, want 0x%08x (Shift|Control|Alternate|Command|SecondaryFn)",
+		t.Errorf("matcher.UserIntentionalMask = 0x%08x, want 0x%08x (Shift|Control|Alternate|Command)",
 			uint64(got), uint64(want))
 	}
 
@@ -217,12 +234,17 @@ func TestUserIntentionalMask_MatchesMatcherPackage(t *testing.T) {
 		{"ModCtrl", hotkey.ModCtrl},
 		{"ModOption", hotkey.ModOption},
 		{"ModCmd", hotkey.ModCmd},
-		{"ModFn", hotkey.ModFn},
 	}
 	for _, ind := range individual {
 		if ind.flag&want != ind.flag {
 			t.Errorf("%s = 0x%x is NOT within UserIntentionalMask 0x%x", ind.name, uint64(ind.flag), uint64(want))
 		}
+	}
+
+	if hotkey.ModFn&want != 0 {
+		t.Errorf("ModFn = 0x%x IS within UserIntentionalMask 0x%x; the system-set "+
+			"function-key bit must be stripped, not compared",
+			uint64(hotkey.ModFn), uint64(want))
 	}
 }
 
@@ -333,7 +355,8 @@ func TestSnapshot_FillsWholeBufferAndReusesIt(t *testing.T) {
 	}
 	before := &buf[0]
 
-	cur := snapshot(buf)
+	snapshotFn := newSnapshotFn()
+	cur := snapshotFn(buf)
 
 	if cur != 0 {
 		t.Errorf("snapshot returned %d, want 0 (no tap installed in this test "+
@@ -355,7 +378,7 @@ func TestSnapshot_FillsWholeBufferAndReusesIt(t *testing.T) {
 
 	// Second call on the same buffer: reuse must be safe and idempotent.
 	// The poller calls snapshot on every tick with the same slice.
-	if cur2 := snapshot(buf); cur2 != cur {
+	if cur2 := snapshotFn(buf); cur2 != cur {
 		t.Errorf("second snapshot returned %d, want %d (counter must not move without key presses)", cur2, cur)
 	}
 	if &buf[0] != before {
@@ -378,7 +401,7 @@ func TestSnapshot_ShortBuffer_Panics(t *testing.T) {
 		}
 	}()
 
-	snapshot(make([]matcher.KeyEvent, ringCap-1))
+	newSnapshotFn()(make([]matcher.KeyEvent, ringCap-1))
 }
 
 // TestSeq_NoTapInstalled_IsZero pins the other half of the poller's cgo
@@ -446,5 +469,86 @@ func TestInstall_EmptyUnlockCode_Rejected(t *testing.T) {
 	case <-sink:
 		t.Error("rejected install still signalled the exit sink")
 	default:
+	}
+}
+
+// TestReleaser_Release_StopsLivePoller wires a REAL pollSequence goroutine to
+// a Releaser, which no other test does: newReleaserTestDeps pre-closes
+// pollerDone, so every ordering/idempotency test above returns from the
+// poller-wait step instantly and neither of its two invariants is actually
+// exercised.
+//
+// Both are load-bearing at shutdown:
+//
+//   - close(stopPoller) must reach a goroutine that is genuinely blocked in
+//     its ticker select. If Release stopped signalling it, the goroutine
+//     would outlive the tap and keep calling into the C ring after
+//     eventtap_uninstall_c had freed it — the exact use-after-teardown the
+//     -race build is meant to catch, except nothing would be racing it.
+//   - <-pollerDone must actually return. A Release that blocks here never
+//     unwinds the LIFO cleanup chain, so the shield stays on screen and the
+//     machine is locked until the process is killed from another session.
+func TestReleaser_Release_StopsLivePoller(t *testing.T) {
+	t.Parallel()
+
+	stopPoller := make(chan struct{})
+	pollerDone := make(chan struct{})
+
+	f := &fakeRing{}
+	m := mustSequence(t, "s w o r d")
+	sink := make(chan struct{}, 1)
+
+	go func() {
+		defer close(pollerDone)
+		pollSequence(stopPoller, f.seq, f.snapshot, m, sink, discardLogger())
+	}()
+	f.waitStarted(t)
+
+	// Keystrokes that do NOT complete the code: the poller must still be
+	// inside its loop when Release arrives, not already returned on a match.
+	f.push(mustEvents(t, "s w o")...)
+
+	r := newReleaserWithDeps(func() {}, func() {}, stopPoller, pollerDone, nil)
+
+	released := make(chan error, 1)
+	go func() { released <- r.Release() }()
+
+	select {
+	case err := <-released:
+		if err != nil {
+			t.Fatalf("Release: %v", err)
+		}
+	case <-time.After(50 * pollInterval):
+		t.Fatalf("Release did not return within %v — it is stuck waiting on a "+
+			"poller that never got the stop signal", 50*pollInterval)
+	}
+
+	select {
+	case <-pollerDone:
+	default:
+		t.Error("Release returned while the poller goroutine was still running; " +
+			"the <-pollerDone wait must not be skipped")
+	}
+}
+
+// TestSnapshotFn_DoesNotAllocate pins the reason newSnapshotFn is a
+// constructor rather than a plain function. The staging
+// [ringCap]C.dnd_keyrec_t it copies the C ring into escapes to the heap
+// (`&cring[0]` crosses the cgo boundary), so declaring it inside the call
+// would put a 1 KiB allocation on the poller's tick — on the one path the
+// "no allocations in hot path" contract in matcher.go exists to protect.
+// Bound to the closure it is allocated once, at Install.
+//
+// The mirror of TestMatchAny_DoesNotAllocate, for the other half of the tick.
+//
+// NOT t.Parallel: it reads process-global C state.
+func TestSnapshotFn_DoesNotAllocate(t *testing.T) {
+	snapshotFn := newSnapshotFn()
+	buf := make([]matcher.KeyEvent, ringCap)
+
+	if got := testing.AllocsPerRun(100, func() {
+		snapshotFn(buf)
+	}); got != 0 {
+		t.Errorf("snapshot closure allocated %v times per call, want 0", got)
 	}
 }

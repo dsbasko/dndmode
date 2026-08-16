@@ -244,7 +244,7 @@ func ringTail(t *testing.T, n int) []matcher.KeyEvent {
 	t.Helper()
 
 	buf := make([]matcher.KeyEvent, ringCap)
-	cur := snapshot(buf)
+	cur := newSnapshotFn()(buf)
 	if cur < uint64(n) {
 		t.Fatalf("ring holds %d records, need the last %d", cur, n)
 	}

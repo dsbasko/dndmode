@@ -155,17 +155,23 @@ func TestSequence_MatchTail_SingleStep_CFG05(t *testing.T) {
 			want: true,
 		},
 		{
-			name: "Fn-bit in event but not in spec → false (Fn IS user-intentional)",
+			name: "Fn-bit in event but not in spec → still true (Fn is a system bit)",
 			spec: defaultSpec,
 			event: matcher.KeyEvent{
 				Modifiers: hotkey.ModCtrl | hotkey.ModOption | hotkey.ModCmd | hotkey.ModFn,
 				KeyCode:   kvkX,
 			},
-			want: false,
+			want: true,
 		},
 		{
-			name: "Fn-required spec matched by Fn-event → true",
-			spec: hotkey.Spec{Modifiers: hotkey.ModFn, KeyCode: kvkF1},
+			// The lockout guard, stated as a test: macOS raises SecondaryFn
+			// for every key of the function-key group whether or not the user
+			// holds Fn, so a step written as a bare `f1` MUST match the event
+			// that arrives carrying the bit. If this flips to false, an
+			// unlock code containing an F-key, an arrow or Forward Delete can
+			// never be entered and the machine stays shielded forever.
+			name: "bare F-key spec matched by Fn-decorated event → true",
+			spec: hotkey.Spec{Modifiers: 0, KeyCode: kvkF1},
 			event: matcher.KeyEvent{
 				Modifiers: hotkey.ModFn,
 				KeyCode:   kvkF1,
@@ -173,8 +179,8 @@ func TestSequence_MatchTail_SingleStep_CFG05(t *testing.T) {
 			want: true,
 		},
 		{
-			name: "Fn-spec rejected if event has Fn + extra mod → false",
-			spec: hotkey.Spec{Modifiers: hotkey.ModFn, KeyCode: kvkF1},
+			name: "bare F-key spec rejected if event has Fn + a real mod → false",
+			spec: hotkey.Spec{Modifiers: 0, KeyCode: kvkF1},
 			event: matcher.KeyEvent{
 				Modifiers: hotkey.ModFn | hotkey.ModCtrl,
 				KeyCode:   kvkF1,
@@ -182,8 +188,8 @@ func TestSequence_MatchTail_SingleStep_CFG05(t *testing.T) {
 			want: false,
 		},
 		{
-			name: "Fn-spec with CapsLock-bit on event → still true (system bit ignored)",
-			spec: hotkey.Spec{Modifiers: hotkey.ModFn, KeyCode: kvkF1},
+			name: "bare F-key spec with Fn + CapsLock on event → still true (both stripped)",
+			spec: hotkey.Spec{Modifiers: 0, KeyCode: kvkF1},
 			event: matcher.KeyEvent{
 				Modifiers: hotkey.ModFn | flagCapsLock,
 				KeyCode:   kvkF1,
@@ -518,14 +524,23 @@ func TestSequence_MatchTail_DoesNotMutateTail(t *testing.T) {
 // CGEventTap callback (which applies the same mask before writing a record
 // into the keystroke ring). Catches accidental refactor.
 func TestMatcher_UserIntentionalMask_Constant(t *testing.T) {
-	want := hotkey.ModCtrl | hotkey.ModOption | hotkey.ModCmd | hotkey.ModShift | hotkey.ModFn
+	want := hotkey.ModCtrl | hotkey.ModOption | hotkey.ModCmd | hotkey.ModShift
 	if matcher.UserIntentionalMask != want {
 		t.Errorf("UserIntentionalMask = %#x, want %#x", matcher.UserIntentionalMask, want)
 	}
 	// Numeric value check — catches if hotkey.Mod* constants change.
-	const wantNumeric uint64 = 0x040000 | 0x080000 | 0x100000 | 0x020000 | 0x800000
+	const wantNumeric uint64 = 0x040000 | 0x080000 | 0x100000 | 0x020000
 	if uint64(matcher.UserIntentionalMask) != wantNumeric {
 		t.Errorf("UserIntentionalMask numeric = %#x, want %#x (union of canonical kCGEventFlagMask* bits)",
 			uint64(matcher.UserIntentionalMask), wantNumeric)
+	}
+	// SecondaryFn must stay OUT: macOS sets it for the whole function-key
+	// group on its own, so honouring it would make a bare `up` / `f1` step
+	// unmatchable — a permanent lockout with no feedback. See the constant's
+	// doc comment for the full argument before re-adding it.
+	if matcher.UserIntentionalMask&hotkey.ModFn != 0 {
+		t.Error("UserIntentionalMask contains ModFn (SecondaryFn): the bit is system-set " +
+			"for F-keys, arrows and Forward Delete, so treating it as user intent locks " +
+			"those keys out of every unlock code")
 	}
 }

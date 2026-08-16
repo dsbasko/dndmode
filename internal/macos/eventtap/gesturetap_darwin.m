@@ -54,9 +54,10 @@ static CFRunLoopSourceRef g_gesture_source  = NULL;
 static CFRunLoopRef       g_gesture_runloop = NULL;
 
 // gesturetap_callback: self-heal on the two disable meta-events (same policy
-// as eventtap_callback), otherwise swallow EVERYTHING. No hotkey matching —
-// the unlock hotkey is a keyboard event and lives on the HID tap. Same
-// nosplit-style constraints as the main callback: no Go calls, no
+// as eventtap_callback), otherwise swallow EVERYTHING. Nothing is recorded
+// here — the unlock code is made of key presses, which eventtap_callback
+// appends to the keystroke ring on the HID tap for the poller to match in
+// Go. Same nosplit-style constraints as the main callback: no Go calls, no
 // allocation, no logging (silent-on-input security stance).
 static CGEventRef gesturetap_callback(CGEventTapProxy proxy,
                                       CGEventType type,

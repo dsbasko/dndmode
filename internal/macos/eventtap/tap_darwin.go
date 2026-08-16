@@ -104,9 +104,10 @@ func seq() uint64 {
 	return uint64(C.eventtap_seq())
 }
 
-// snapshot copies the C-side keystroke ring into buf and returns the press
-// count that copy describes — the `to` bound of the half-open range
-// [previous, to) the caller may safely consume.
+// newSnapshotFn returns the poller's snapshot function: it copies the C-side
+// keystroke ring into buf and returns the press count that copy describes —
+// the `to` bound of the half-open range [previous, to) the caller may safely
+// consume.
 //
 // buf MUST have room for ringCap records and is written in place: the poller
 // allocates it once, before its loop, and reuses it on every tick, so this
@@ -114,23 +115,36 @@ func seq() uint64 {
 // is a programming error, not a runtime condition — the C memcpy is sized
 // from DND_RING_CAP and would write past the end of a smaller Go slice, so
 // the length is checked here and panics rather than corrupting the heap.
-// The only caller passes `make([]matcher.KeyEvent, ringCap)`.
+// The only production caller passes `make([]matcher.KeyEvent, ringCap)`.
 //
-// The C records are copied into a local [ringCap]C.dnd_keyrec_t (stack, no
-// allocation) and converted field-by-field: the Go and C layouts are pinned
-// to the same widths by ring_guard_test.go, but converting explicitly rather
-// than reinterpreting the memory keeps the whole thing free of unsafe and
-// survives any future padding change in either language.
-func snapshot(buf []matcher.KeyEvent) uint64 {
-	if len(buf) < ringCap {
-		panic("eventtap: snapshot buffer shorter than ringCap")
+// The C records land in a staging [ringCap]C.dnd_keyrec_t and are converted
+// field-by-field: the Go and C layouts are pinned to the same widths by
+// ring_guard_test.go, but converting explicitly rather than reinterpreting
+// the memory keeps the whole thing free of unsafe and survives any future
+// padding change in either language.
+//
+// That staging array is why this is a constructor and not a plain function.
+// Declared inside the call it is 1 KiB that escapes to the heap on every
+// invocation (`&cring[0]` crosses the cgo boundary, so escape analysis has
+// to assume the worst) — an allocation on the one path that the "no
+// allocations in hot path" contract exists to protect. Bound to the closure
+// it is allocated once at Install time instead.
+//
+// The returned function is NOT safe for concurrent use: the staging array is
+// shared across calls. There is exactly one caller — the poller goroutine
+// created alongside it in installInternal.
+func newSnapshotFn() func(buf []matcher.KeyEvent) uint64 {
+	cring := new([ringCap]C.dnd_keyrec_t)
+	return func(buf []matcher.KeyEvent) uint64 {
+		if len(buf) < ringCap {
+			panic("eventtap: snapshot buffer shorter than ringCap")
+		}
+		cur := uint64(C.eventtap_snapshot(&cring[0]))
+		for i := range cring {
+			buf[i] = keyEventFromRecord(uint64(cring[i].flags), uint16(cring[i].keycode))
+		}
+		return cur
 	}
-	var cring [ringCap]C.dnd_keyrec_t
-	cur := uint64(C.eventtap_snapshot(&cring[0]))
-	for i := range cring {
-		buf[i] = keyEventFromRecord(uint64(cring[i].flags), uint16(cring[i].keycode))
-	}
-	return cur
 }
 
 // keyEventFromRecord is the field mapping between one C ring record and its
@@ -389,8 +403,8 @@ func (r *Releaser) Release() error {
 	// the whole point is to shorten the window in which the just-typed
 	// unlock code is readable in process memory, and the CF teardown below
 	// can take arbitrarily long (or fail outright). eventtap_uninstall_c
-	// memsets the ring again at Step 2; that repetition is intentional
-	// belt-and-braces, both are cheap.
+	// calls eventtap_wipe_ring again at Step 2; that repetition is
+	// intentional belt-and-braces, both are cheap.
 	if r.wipeRingFn != nil {
 		r.wipeRingFn()
 	}
@@ -779,13 +793,18 @@ func installInternal(steps []hotkey.Spec, sink chan<- struct{}, log *slog.Logger
 	// a match forwards a struct{} send to `sink` (non-blocking) and
 	// returns. It also exits cleanly when stopPoller is closed.
 	//
-	// `seq` and `snapshot` are passed as function values rather than called
-	// directly inside pollSequence: that keeps the poller itself free of
-	// cgo, so poller_test.go can drive the whole matching path against a
-	// fake ring without standing up a CGEventTap.
+	// `seq` and the snapshot closure are passed as function values rather
+	// than called directly inside pollSequence: that keeps the poller itself
+	// free of cgo, so poller_test.go can drive the whole matching path
+	// against a fake ring without standing up a CGEventTap.
+	//
+	// newSnapshotFn is called HERE, once, rather than per tick: it owns a
+	// staging buffer that must not be shared with any other goroutine, and
+	// this poller is its only user.
+	snapshotFn := newSnapshotFn()
 	go func() {
 		defer close(pollerDone)
-		pollSequence(stopPoller, seq, snapshot, seqMatcher, sink, log)
+		pollSequence(stopPoller, seq, snapshotFn, seqMatcher, sink, log)
 	}()
 
 	return r, cTap, nil

@@ -16,11 +16,12 @@
 //
 // macOS sets system-defined modifier bits in CGEventFlags
 // independently of user intent (CapsLock toggle = 0x10000, NumPad bit on
-// every numeric-pad key = 0x200000, NX_NONCOALSESCEDMASK = 0x100, etc.).
+// every numeric-pad key = 0x200000, SecondaryFn = 0x800000 on every key of
+// the function-key group, NX_NONCOALSESCEDMASK = 0x100, etc.).
 // These bits MUST be masked out before comparison — otherwise a user with
 // CapsLock toggled would be unable to enter the unlock code, leaving the
 // MacBook permanently locked. The UserIntentionalMask constant below names
-// exactly the 5 canonical user-intentional modifier bits that survive the
+// exactly the 4 canonical user-intentional modifier bits that survive the
 // mask.
 package matcher
 
@@ -28,16 +29,31 @@ import "github.com/dsbasko/dndmode/internal/config/hotkey"
 
 // UserIntentionalMask is the set of modifier bits that count as deliberate
 // user input. System bits outside this mask (CapsLock 0x10000,
-// NumPad 0x200000, Help 0x400000, NX_NONCOALSESCEDMASK 0x100, …) are
+// NumPad 0x200000, SecondaryFn 0x800000, Help 0x400000,
+// NX_NONCOALSESCEDMASK 0x100, …) are
 // stripped from the event's modifier flags before comparison against the
 // configured Spec. The CGEventTap callback applies the same mask before
 // writing a record into the keystroke ring, so the stripping happens twice
 // and is idempotent — the Go side does not trust the C side to have done it.
+//
+// SecondaryFn (Fn) is deliberately NOT in this mask, and its absence is a
+// lockout guard of exactly the same kind as the CapsLock one. macOS raises
+// that bit for the whole "function key group" — F1-F12, the arrow keys,
+// Forward Delete, Home/End/PageUp/PageDown — whether or not the physical Fn
+// key is held (NSEventModifierFlagFunction, same bit as
+// kCGEventFlagMaskSecondaryFn). Treating it as user intent would mean a
+// step declared as a bare `up` could never match the ↑ the user actually
+// presses: the event carries 0x800000, the Spec does not, and the exact
+// comparison in MatchTail rejects it — silently, forever, with the shield
+// up. Stripping the bit is the fail-safe direction: it matches whether or
+// not macOS decided to decorate the event, so no keyboard, layout or
+// firmware quirk can turn an accepted config into a locked-out machine.
+// The price is that Fn cannot be a distinguishing modifier at all
+// (hotkey.ParseStep therefore accepts `fn+` and ignores it).
 const UserIntentionalMask hotkey.ModFlag = hotkey.ModCtrl |
 	hotkey.ModOption |
 	hotkey.ModCmd |
-	hotkey.ModShift |
-	hotkey.ModFn
+	hotkey.ModShift
 
 // KeyEvent is one recorded keystroke — the Go mirror of the C-side
 // dnd_keyrec_t written by the CGEventTap callback from

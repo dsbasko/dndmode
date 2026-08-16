@@ -193,6 +193,28 @@ for the mechanics.
 All three paths build from source (there is no pre-signed bottle - the binary is
 ad-hoc signed locally), so none require an Apple Developer ID.
 
+### Upgrading from a `hotkey` config
+
+Configs written by earlier versions use a `hotkey:` key holding one chord. It
+still works - a single combination is just a 1-step unlock code - but it is
+deprecated, and `--debug` says so on every start. Nothing breaks on upgrade:
+the file is not rewritten and the chord keeps unlocking.
+
+Migrate by renaming the key, then lengthening the value:
+
+```yaml
+# before
+hotkey: Ctrl+Option+Cmd+X
+
+# after
+unlock_code: s w o r d f i s h
+```
+
+Setting **both** keys is a startup error (exit `1`) - an ambiguous unlock
+secret is not resolvable, and guessing wrong here locks the machine with a code
+the owner does not believe is in effect. See
+[The unlock code](#the-unlock-code) for the grammar and the length rules.
+
 ## First-run setup
 
 1. Install dndmode (see [Install](#install)).
@@ -285,12 +307,15 @@ it is the only secret that ends a locked session.
 # steps typed one after another — a passphrase, not a single chord.
 #
 # Grammar: steps separated by spaces; each step is "(<mod>+)*<key>".
-#   Modifiers (case-insensitive): ctrl, option, cmd, shift, fn
+#   Modifiers (case-insensitive): ctrl, option, cmd, shift
 #   Keys: a-z, 0-9, f1-f12, space, return (alias enter), tab, escape (alias
 #         esc), delete, forwarddelete, left, right, up, down,
 #         and the punctuation - = [ ] ; ' , . / \ backtick
 #   Modifiers inside a step are OPTIONAL, so both 's' and 'ctrl+s' are steps.
 #   A literal space is only a SEPARATOR; the space key itself is 'space'.
+#   'fn' is still accepted in a step but carries NO meaning: macOS raises the
+#   Fn bit for every F-key, arrow and Forward Delete on its own, so it cannot
+#   express intent. Write 'up', not 'fn+up'.
 #
 # Examples:
 #   unlock_code: s w o r d f i s h     # a passphrase
@@ -310,8 +335,8 @@ it is the only secret that ends a locked session.
 # Matched by PHYSICAL key position, not by the character produced: on a RU
 # layout 'unlock_code: s w o r d' is typed with the keys ы ц о р в.
 # Every step is matched EXACTLY: a modifier you happen to be holding (e.g. Cmd)
-# breaks a step declared without it. CapsLock, NumPad and Fn-lock bits are
-# ignored, so CapsLock can never lock you out.
+# breaks a step declared without it. CapsLock, NumPad and Fn bits are ignored,
+# so CapsLock can never lock you out and 'up' or 'f1' work as plain steps.
 unlock_code: Ctrl+Option+Cmd+X
 
 # --- hotkey (DEPRECATED) -----------------------------------------------------
@@ -415,7 +440,7 @@ A literal space is only a separator - the space *key* is written `space`.
 
 | Part | Accepted values |
 | --- | --- |
-| Modifiers (case-insensitive, optional per step) | `ctrl`, `option`, `cmd`, `shift`, `fn` |
+| Modifiers (case-insensitive, optional per step) | `ctrl`, `option`, `cmd`, `shift` |
 | Keys | `a`-`z`, `0`-`9`, `f1`-`f12`, `space`, `return` (alias `enter`), `tab`, `escape` (alias `esc`), `delete`, `forwarddelete`, `left`, `right`, `up`, `down`, and the punctuation `-` `=` `[` `]` `;` `'` `,` `.` `/` `\` `` ` `` |
 
 ```yaml
@@ -430,7 +455,7 @@ automated typist at 100 keypresses/second.
 
 | Steps | Status | Time to exhaust |
 | --- | --- | --- |
-| 1 | Accepted **only with modifiers** - the legacy `hotkey` shape. Weak. | minutes, by hand |
+| 1 | Accepted **only with modifiers** - the legacy `hotkey` shape. Weak, and warned about under `--debug`. | minutes, by hand |
 | 2-3 | **Rejected** at startup (exit `1`) - too weak to be worth the illusion of a passphrase | ~8 minutes at 3 steps |
 | 4-5 | Accepted, warned about under `--debug` | ~5 hours at 4 steps, ~7 days at 5 |
 | **6-32** | Accepted, **recommended** | ~250 days at 6 steps, centuries at 8 |
@@ -468,8 +493,13 @@ Migration is a rename: any value valid as `hotkey` is valid as `unlock_code`.
   letters (`hello`) are unaffected - auto-repeat only engages well past the speed
   of a real double tap.
 
-Caps Lock, the numeric-keypad flag, and the other system-set modifier bits are
-stripped before matching, so a stray Caps Lock can never lock you out.
+Caps Lock, the numeric-keypad flag, the Fn flag, and the other system-set
+modifier bits are stripped before matching, so a stray Caps Lock can never lock
+you out. The Fn one matters more than it looks: macOS raises that bit for every
+key of the function-key group - `f1`-`f12`, the arrows, `forwarddelete` -
+whether or not you are holding Fn. Because it is stripped, those keys work as
+plain steps (`unlock_code: s w up down` is fine) and `fn` in a step is accepted
+but means nothing.
 
 The YAML parser is strict about unknown keys but not about values: a misspelled key
 (`overaly_style`) is rejected on load, while a bad value (`overlay_style: blak`) is
@@ -666,6 +696,39 @@ rm -f ~/.config/dndmode/runtime.json
 ```
 
 Causes are a read-only filesystem, an ACL denying delete, or a full disk.
+
+### The unlock code is rejected at startup (exit 1)
+
+dndmode exits `1` before touching any permission or display. Run it with
+`--debug` to see which check failed - the message names the offending config
+key and the 1-based position of the bad step, and never echoes the value.
+
+| Message | Cause |
+| --- | --- |
+| `both unlock_code and the deprecated hotkey` | Delete the `hotkey` line. |
+| `sets neither unlock_code nor hotkey` | Add an `unlock_code` line. |
+| `step N: hotkey: unknown token` | Step N is not a key name. Only US-ANSI names are accepted (`x`, `f1`, `space`) - see the key table in [The unlock code](#the-unlock-code). |
+| `... is too short` | 2-3 steps are rejected outright. Use 4 or more; 6 or more is recommended. |
+| `must carry at least one modifier` | A 1-step code has to be a chord - a bare key would unlock on the first thing a bystander types. |
+| `too many steps` | More than 32 steps. |
+
+### dndmode starts but the code never unlocks
+
+There is no feedback by design: a wrong code looks exactly like no input at
+all. Exit with `Ctrl-C` in the terminal that launched it, then check, in order:
+
+1. **Layout.** Steps are physical key positions - `s w o r d` is typed **ы ц о
+   р в** on a Russian layout.
+2. **A modifier you are holding.** A step written without modifiers matches
+   only a press with none held. Resting on Cmd or Shift silently breaks it.
+3. **The count.** `--debug` prints `unlock_code=N steps (source=…)` at startup
+   without printing the code itself. If N is not what you expect, the file is
+   not the one you edited.
+4. **Keep typing.** There is no reset and no timeout - matching is on the tail
+   of everything typed, so a mistake costs you nothing but a retype.
+
+Caps Lock, Num Lock and Fn are stripped before matching and cannot be the
+cause.
 
 ## Uninstall
 

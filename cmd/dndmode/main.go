@@ -1,7 +1,7 @@
 //go:build darwin
 
 // Command dndmode is a macOS Apple-Silicon CLI utility that locks the
-// keyboard/trackpad behind a configurable hotkey while keeping the system
+// keyboard/trackpad behind a configurable unlock code while keeping the system
 // awake (Phase 4-5 functionality). Phase 2 adds the per-screen overlay:
 // cocoa.Init creates NSApp + screen observers, controller creates one
 // black NSWindow per display on CGShieldingWindowLevel, and the main
@@ -61,7 +61,7 @@ const (
 	// slot in Phase 5, so the next-available 8 is the minimum-regression
 	// resolution). Stderr wording per the UI spec Copywriting Contract.
 	exitOK                  = 0 // success
-	exitConfigErr           = 1 // P1 — bad YAML, modifier-only hotkey
+	exitConfigErr           = 1 // P1 — bad YAML, invalid, ambiguous or too-short unlock code, bad flag value
 	exitPlatformErr         = 2 // non-arm64, macOS < 14, IOKit fundamentals
 	exitPermissionDenied    = 3 // SIGINT in polling loop
 	exitSecureInputConflict = 4 // SecureEventInput active
@@ -89,7 +89,7 @@ func (c *cancelStopper) RequestStop(_ string) { c.cancel() }
 // --debug flag (Step 1) or `debug: true` in config (Step 5) — switches every
 // banner, diagnostic, and log line on or off at once. Default OFF: dndmode is
 // silent so a visible terminal (overlay_style none/glass) never leaks the
-// unlock hotkey (security stance: reveal nothing — see config.Config.Debug and
+// unlock code (security stance: reveal nothing — see config.Config.Debug and
 //).
 type gatedWriter struct {
 	w  io.Writer
@@ -117,7 +117,7 @@ func resolveBoolFlag(flagVal string, configDefault bool) (bool, error) {
 
 // parseTimer resolves the --timer flag's raw string into an auto-disable
 // duration. An empty string (the common case — the operator did not pass
-// --timer) returns 0 with no error, meaning "no deadline: run until hotkey or
+// --timer) returns 0 with no error, meaning "no deadline: run until the unlock code or
 // signal". A non-empty value is parsed with time.ParseDuration, so it takes the
 // same grammar as any Go duration ("30m", "1h30m", "90s"); a parse failure or a
 // non-positive result (0 or negative — nonsensical for a countdown) returns an
@@ -177,12 +177,12 @@ func parseStyleFlag(s string) (string, *float64, string, error) {
 
 // armTimer starts a one-shot timer that auto-disables dndmode after d by calling
 // stop — the signal.NotifyContext cancel — so expiry drives the EXACT clean
-// shutdown path as the unlock hotkey or a signal: ctx cancels → cocoa.RunApp's
+// shutdown path as the unlock code or a signal: ctx cancels → cocoa.RunApp's
 // watcher posts the synthetic stop event and [NSApp run] returns nil (full mode)
 // / the caffeinate select wakes on ctx.Done() (none mode) → LIFO Cleanup → exit
 // 0. A non-positive d disarms the timer (returns a no-op func) so callers can
 // pass an unresolved --timer unconditionally. The returned func stops the timer
-// and MUST be deferred by the caller: an early exit (hotkey/signal before expiry)
+// and MUST be deferred by the caller: an early exit (unlock code/signal before expiry)
 // would otherwise leave a stray AfterFunc goroutine armed to fire stop after
 // run() has already returned. stop is idempotent (supervisor sync.Once +
 // ctx.cancel), so a benign race between a near-simultaneous signal and the timer
@@ -217,7 +217,7 @@ func main() {
 //     flow into ctx.Done directly).
 //  4. RestoreState + defer Cleanup + stdout "cleaning up… done." banner (P1).
 //  5. Resolve home dir.
-// 6. Load config + parse hotkey.
+// 6. Load config + resolve the unlock code.
 //  7. stdout config banner.
 // 8. permissions.CheckPlatform —; exit 2 on ErrNonArm64/ErrMacOSBelow14.
 // 8.5. runtimepkg.IsLiveInstance (Phase 6, ordering) — cold-start
@@ -259,7 +259,7 @@ func run() int {
 	// slog logger, and the panic trace below — is routed through outW/errW and
 	// suppressed while debugOn is false. debugOn starts false (SILENT default: a
 	// visible terminal under overlay_style none/glass must never leak the unlock
-	// hotkey — security stance) and is raised by the --debug flag (Step 1)
+	// unlock code — security stance) and is raised by the --debug flag (Step 1)
 	// then `debug: true` in config (Step 5). Both writers hold &debugOn, so
 	// raising it un-gates everything written afterwards; it is never lowered
 	// (debug is additive). Declared BEFORE the recover defer so that defer can
@@ -314,15 +314,15 @@ func run() int {
 	focusFlag := flag.String("focus", "", "override focus/DND for this run (true|false); empty = use config")
 	// --timer sets a per-run auto-disable deadline: after the given Go duration
 	// (time.ParseDuration grammar — "30m", "1h30m", "90s") elapses while dndmode is
-	// ACTIVE, dndmode tears down and exits 0 exactly as if the unlock hotkey were
-	// pressed. Empty (the default) means no deadline — run until the hotkey or a
+	// ACTIVE, dndmode tears down and exits 0 exactly as if the unlock code were
+	// pressed. Empty (the default) means no deadline — run until the unlock code or a
 	// signal (SIGINT/SIGTERM/SIGHUP). Per-run ONLY: there is intentionally no config
 	// key (a persistent auto-off default would surprise; typing --timer is the
 	// deliberate opt-in). Works for EVERY overlay_style, including none/caffeinate,
 	// because the timer merely triggers the same ctx-cancel shutdown both modes
 	// already await (see armTimer). Parsed at Step 5b.2 via parseTimer; junk /
 	// non-positive → exitConfigErr (mirrors invalid --style), naming --timer.
-	timerFlag := flag.String("timer", "", "auto-disable after this long, then exit 0 (Go duration, e.g. 30m, 1h30m, 90s); empty = run until hotkey/signal")
+	timerFlag := flag.String("timer", "", "auto-disable after this long, then exit 0 (Go duration, e.g. 30m, 1h30m, 90s); empty = run until the unlock code or a signal")
 	flag.Parse()
 	// Raise the output gate for the whole run when --debug is set. `debug: true`
 	// in config can also raise it after Load (Step 5); either source enables
@@ -836,7 +836,7 @@ func run() int {
 	// supervisor is created BEFORE eventtap.InstallAll (the original Phase 3
 	// Step 16) because InstallAll requires `sup.ExitTrigger()` — the same
 	// sink channel that both the matched-key poller and the
-	// watchdog threshold-hit poller write to on a hotkey/dead-tap
+	// watchdog threshold-hit poller write to on an unlock-code/dead-tap
 	// event. Original Step 17 thus runs as the new Step 16, and eventtap
 	// follows as the new Step 17. Push order onto rs remains LIFO
 	// compatible: controller (windows) pushed at Step 15, eventtap (tap)
@@ -861,25 +861,22 @@ func run() int {
 	// between Step 1 and Step 4-5 (handlers read g_observed_tap first and
 	// no-op on NULL) without violating order.
 	//
-	// `sup.ExitTrigger()` is the sink — matched hotkey OR watchdog
+	// `sup.ExitTrigger()` is the sink — matched unlock code OR watchdog
 	// threshold-hit both signal exit through it; supervisor then converges
 	// on stopper.RequestStop → ctx.cancel → cocoa.RunApp returns →
 	// sup.Wait → defer LIFO unwinds.
 	//
-	// Re-resolve the unlock code here (already validated at Step 5b —
-	// ResolveUnlockCode is idempotent and cheap). The
-	// matcher.UserIntentionalMask pre-masking happens inside Install per.
-	steps, _, parseErr := config.ResolveUnlockCode(&cfg)
-	if parseErr != nil {
-		// Unreachable: Step 5b already validated. Defensive only — keeps
-		// the failure surface explicit instead of relying on global state.
-		_, _ = fmt.Fprintf(errW, "dndmode: re-resolving the unlock code failed: %v\n", parseErr)
-		return exitConfigErr
-	}
+	// unlockSteps comes straight from Step 5b — `cfg` is not mutated between
+	// there and here, so re-resolving would return the same slice and its
+	// error branch could never fire. The single resolve is also the single
+	// place the precedence table is applied, which is the property
+	// config.ResolveUnlockCode's doc comment asks callers to preserve.
+	//
 	// The whole code goes to InstallAll: the poller matches every tail of the
 	// keystroke ring against it, so a 9-step passphrase and a 1-step legacy
-	// combination take the identical path.
-	tapRel, err := eventtap.InstallAll(steps, sup.ExitTrigger(), log)
+	// combination take the identical path. The matcher.UserIntentionalMask
+	// pre-masking happens inside Install.
+	tapRel, err := eventtap.InstallAll(unlockSteps, sup.ExitTrigger(), log)
 	if err != nil {
 		if errors.Is(err, eventtap.ErrTapInstallFailed) {
 			_, _ = fmt.Fprintf(errW,
@@ -909,9 +906,9 @@ func run() int {
 	// dndmode is fully active — not at launch, so the time the operator spent
 	// granting permissions never eats into the deadline. On expiry armTimer cancels
 	// ctx (via stop, the signal.NotifyContext cancel), driving the SAME clean
-	// shutdown as the unlock hotkey or SIGINT (Step 19's cocoa.RunApp returns nil →
+	// shutdown as the unlock code or SIGINT (Step 19's cocoa.RunApp returns nil →
 	// sup.Wait → deferred LIFO Cleanup → exit 0). defer disarms it so an EARLY exit
-	// (hotkey/signal before expiry) leaves no stray AfterFunc goroutine armed.
+	// (unlock code/signal before expiry) leaves no stray AfterFunc goroutine armed.
 	stopTimer := armTimer(timerDur, stop, log)
 	defer stopTimer()
 
@@ -930,7 +927,7 @@ func run() int {
 	sup.Wait()
 
 	// distinguish a watchdog-triggered abnormal shutdown from a
-	// normal matched-hotkey exit. The supervisor exit-trigger channel is
+	// normal matched-unlock-code exit. The supervisor exit-trigger channel is
 	// shared between the matched-key poller and the watchdog threshold
 	// poller — both send a bare struct{}, so the supervisor cannot tell
 	// the source from the signal alone. The watchdog flips its internal
@@ -960,7 +957,7 @@ func run() int {
 // for as long as it runs, and nothing else — no Focus/DND, no keyboard/trackpad
 // block (hence no Accessibility prompt and no Shortcuts requirement), no overlay
 // window, no event tap. Exit is via SIGINT/SIGTERM/SIGHUP only (there is no
-// hotkey without an event tap to observe one).
+// unlock code without an event tap to observe one).
 //
 // caffeinate is pushed onto the SAME RestoreState as the full mode, so teardown
 // rides the existing LIFO Cleanup ("released releaser=caffeinate") and the

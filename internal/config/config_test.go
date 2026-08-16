@@ -1203,16 +1203,54 @@ func TestResolveUnlockCode(t *testing.T) {
 
 // A resolution error must never echo the secret back: the message names the
 // KEY, and ParseSequence reports a failing step by position only.
+//
+// The assertion is per-TOKEN rather than against a hand-picked list of
+// fragments. A list is trivially satisfiable by accident — an earlier version
+// of this test searched for "s w nope d", "s w" and "w o r d", none of which
+// the message could ever contain, while the token the parser actually
+// interpolated ("nope") went unchecked and leaked for real. Every whitespace-
+// and '+'-separated token of the input is a step of the user's passphrase, so
+// every one of them is checked here.
 func TestResolveUnlockCode_ErrorNeverEchoesSecret(t *testing.T) {
-	cfg := config.Config{UnlockCode: "s w nope d"}
-	_, _, err := config.ResolveUnlockCode(&cfg)
-	if err == nil {
-		t.Fatal("expected an error")
+	cases := []struct {
+		name string
+		cfg  config.Config
+	}{
+		{"unknown token mid-code", config.Config{UnlockCode: "s w nope d"}},
+		{"two keys in one step", config.Config{UnlockCode: "s w o r d f+i s h"}},
+		{"duplicate modifier in a step", config.Config{UnlockCode: "s w o ctrl+ctrl+d f i"}},
+		{"empty token in a step", config.Config{UnlockCode: "s w o r d f++i"}},
+		{"too short after parsing", config.Config{UnlockCode: "s w o"}},
+		{"legacy hotkey key", config.Config{Hotkey: "ctrl+option+zebra"}},
+		{"legacy hotkey, whole value unparsable", config.Config{Hotkey: "s w o r d f i s h"}},
 	}
-	for _, leaked := range []string{"s w nope d", "s w", "w o r d"} {
-		if strings.Contains(err.Error(), leaked) {
-			t.Errorf("error message leaks the secret fragment %q: %v", leaked, err)
-		}
+
+	for _, tt := range cases {
+		t.Run(tt.name, func(t *testing.T) {
+			_, _, err := config.ResolveUnlockCode(&tt.cfg)
+			if err == nil {
+				t.Fatal("expected an error")
+			}
+			raw := tt.cfg.UnlockCode
+			if raw == "" {
+				raw = tt.cfg.Hotkey
+			}
+			msg := err.Error()
+			for _, tok := range strings.FieldsFunc(raw, func(r rune) bool {
+				return r == ' ' || r == '\t' || r == '+'
+			}) {
+				// One-character tokens are excluded: a single letter matches
+				// ordinary prose ("a", "s" in "steps") and would make the
+				// assertion fire on messages that leak nothing. Every token
+				// long enough to be searched for meaningfully is checked.
+				if len(tok) < 2 {
+					continue
+				}
+				if strings.Contains(msg, tok) {
+					t.Errorf("error message echoes the secret token %q: %v", tok, err)
+				}
+			}
+		})
 	}
 }
 

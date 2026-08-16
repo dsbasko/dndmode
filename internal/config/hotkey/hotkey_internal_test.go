@@ -41,14 +41,25 @@ func TestKeyCodeTable_Internal_HasMinimumEntries(t *testing.T) {
 }
 
 func TestModifierTable_Internal_NoAliases(t *testing.T) {
-	// the design notes: only 5 canonical modifiers in v1.
-	// Regression guard against accidental alias additions.
+	// the design notes: only the canonical modifiers, no aliases.
+	// `fn` is deliberately NOT here — it parses through ignoredModifiers and
+	// contributes no bit, because macOS raises SecondaryFn for the whole
+	// function-key group on its own (see the ignoredModifiers comment). A
+	// modifierTable entry for it would produce a Spec that
+	// matcher.UserIntentionalMask strips, i.e. one that can never match.
 	wantKeys := map[string]bool{
 		"ctrl":   true,
 		"option": true,
 		"cmd":    true,
 		"shift":  true,
-		"fn":     true,
+	}
+	if _, found := modifierTable["fn"]; found {
+		t.Error("modifierTable contains \"fn\": it must stay in ignoredModifiers, " +
+			"otherwise a step could demand a bit the matcher strips")
+	}
+	if !ignoredModifiers["fn"] {
+		t.Error("ignoredModifiers is missing \"fn\": configs written against the " +
+			"older grammar must keep parsing")
 	}
 	if len(modifierTable) != len(wantKeys) {
 		t.Errorf("modifierTable has %d entries, want exactly %d", len(modifierTable), len(wantKeys))

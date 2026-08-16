@@ -462,12 +462,15 @@ const defaultConfigTemplate = `# dndmode configuration
 # steps typed one after another — a passphrase, not a single chord.
 #
 # Grammar: steps separated by spaces; each step is "(<mod>+)*<key>".
-#   Modifiers (case-insensitive): ctrl, option, cmd, shift, fn
+#   Modifiers (case-insensitive): ctrl, option, cmd, shift
 #   Keys: a-z, 0-9, f1-f12, space, return (alias enter), tab, escape (alias
 #         esc), delete, forwarddelete, left, right, up, down,
 #         and the punctuation - = [ ] ; ' , . / \ backtick
 #   Modifiers inside a step are OPTIONAL, so both 's' and 'ctrl+s' are steps.
 #   A literal space is only a SEPARATOR; the space key itself is 'space'.
+#   'fn' is still accepted in a step but carries NO meaning: macOS raises the
+#   Fn bit for every F-key, arrow and Forward Delete on its own, so it cannot
+#   express intent. Write 'up', not 'fn+up'.
 #
 # Examples:
 #   unlock_code: s w o r d f i s h     # a passphrase
@@ -487,8 +490,8 @@ const defaultConfigTemplate = `# dndmode configuration
 # Matched by PHYSICAL key position, not by the character produced: on a RU
 # layout 'unlock_code: s w o r d' is typed with the keys ы ц о р в.
 # Every step is matched EXACTLY: a modifier you happen to be holding (e.g. Cmd)
-# breaks a step declared without it. CapsLock, NumPad and Fn-lock bits are
-# ignored, so CapsLock can never lock you out.
+# breaks a step declared without it. CapsLock, NumPad and Fn bits are ignored,
+# so CapsLock can never lock you out and 'up' or 'f1' work as plain steps.
 unlock_code: %s
 
 # --- hotkey (DEPRECATED) -----------------------------------------------------

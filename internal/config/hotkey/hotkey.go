@@ -4,9 +4,10 @@
 // (modifier mask + virtual keyCode per step).
 //
 // A single step has the grammar "(<modifier>+)*<key>" with canonical modifier
-// tokens: ctrl, option, cmd, shift, fn (case-insensitive, no aliases in v1 —
+// tokens: ctrl, option, cmd, shift (case-insensitive, no aliases in v1 —
 // see the design notes discretion). Modifiers are optional inside a step, so
-// both "s" and "ctrl+s" are valid steps.
+// both "s" and "ctrl+s" are valid steps. The token "fn" is also accepted but
+// contributes nothing — see ignoredModifiers for why it cannot.
 //
 // An unlock code is a whitespace-separated sequence of at most MaxSteps steps:
 //
@@ -40,7 +41,15 @@ const (
 	ModOption ModFlag = 0x080000 // kCGEventFlagMaskAlternate
 	ModCmd    ModFlag = 0x100000 // kCGEventFlagMaskCommand
 	ModShift  ModFlag = 0x020000 // kCGEventFlagMaskShift
-	ModFn     ModFlag = 0x800000 // kCGEventFlagMaskSecondaryFn
+
+	// ModFn is kCGEventFlagMaskSecondaryFn. It is NEVER produced by ParseStep
+	// and never compared against: macOS raises this bit for the whole
+	// function-key group (F1-F12, arrows, Forward Delete, Home/End/Page…)
+	// regardless of the physical Fn key, so it cannot express intent and is
+	// stripped by matcher.UserIntentionalMask on both sides of the
+	// comparison. The constant survives only to name the bit in that
+	// argument — see the UserIntentionalMask doc comment.
+	ModFn ModFlag = 0x800000
 )
 
 // MaxSteps is the upper bound on the number of steps in an unlock code.
@@ -73,7 +82,24 @@ var modifierTable = map[string]ModFlag{
 	"option": ModOption,
 	"cmd":    ModCmd,
 	"shift":  ModShift,
-	"fn":     ModFn,
+}
+
+// ignoredModifiers are modifier tokens that parse but contribute no bit to
+// the resulting Spec. `fn` is the only member and it is here rather than in
+// modifierTable because macOS raises kCGEventFlagMaskSecondaryFn for the
+// entire function-key group on its own: a step could demand it but the user
+// could not withhold it, and a step that omits it would be unmatchable on
+// exactly those keys. matcher.UserIntentionalMask strips the bit from every
+// recorded event for that reason, so emitting it here would produce a Spec
+// that can never match. Accepting and dropping the token keeps configs
+// written against the older grammar loading instead of aborting startup.
+//
+// Consequence worth knowing: `fn+x` is the same step as `x`. A ONE-step
+// unlock code of `fn+x` therefore carries no modifier at all and is
+// rejected by config.ValidateUnlockCode — which is the correct outcome, a
+// bare key must not unlock the shield on a single press.
+var ignoredModifiers = map[string]bool{
+	"fn": true,
 }
 
 // ParseStep converts one step of an unlock code into a Spec, case-insensitive:
@@ -83,9 +109,15 @@ var modifierTable = map[string]ModFlag{
 //
 // Unlike Parse, a step carrying zero modifiers is valid — that is exactly what
 // makes a passphrase-style code ("s w o r d") expressible. Exactly one
-// non-modifier key is still required.
+// non-modifier key is still required. The `fn` token is accepted and dropped
+// (see ignoredModifiers).
 //
-// Returns an error wrapping one of the sentinel errors (use errors.Is).
+// Returns an error wrapping one of the sentinel errors (use errors.Is). No
+// error path interpolates the offending token: the input is the user's
+// unlock secret, and a diagnostic that echoed even one step of a mistyped
+// passphrase would put a fragment of it in the terminal scrollback. The
+// category plus the 1-based step position added by ParseSequence is what
+// locates the problem.
 func ParseStep(s string) (Spec, error) {
 	s = strings.TrimSpace(s)
 	if s == "" {
@@ -95,7 +127,6 @@ func ParseStep(s string) (Spec, error) {
 	tokens := strings.Split(s, "+")
 
 	var spec Spec
-	keyToken := ""
 	keyTokenSet := false
 	seen := map[string]bool{}
 
@@ -104,13 +135,26 @@ func ParseStep(s string) (Spec, error) {
 		if t == "" {
 			return Spec{}, fmt.Errorf("%w: empty token", ErrInvalidHotkey)
 		}
+		_, isMod := modifierTable[t]
+		isMod = isMod || ignoredModifiers[t]
 		if seen[t] {
-			return Spec{}, fmt.Errorf("%w: %q", ErrDuplicateMod, t)
+			// A repeated NON-modifier is a repeated key, not a repeated
+			// modifier: reporting it as ErrDuplicateMod would send a user
+			// whose step contains no modifier at all looking for one.
+			if !isMod {
+				return Spec{}, fmt.Errorf("%w: the same key appears twice in one step", ErrInvalidHotkey)
+			}
+			return Spec{}, ErrDuplicateMod
 		}
 		seen[t] = true
 
 		if mod, ok := modifierTable[t]; ok {
 			spec.Modifiers |= mod
+			continue
+		}
+		if isMod {
+			// Accepted-and-dropped modifier (`fn`). Not a key, so it must
+			// not fall through to the keyCodeTable lookup below.
 			continue
 		}
 		// Non-modifier token: must resolve to a known key. If it does not,
@@ -119,14 +163,13 @@ func ParseStep(s string) (Spec, error) {
 		// real key (e.g. "x") would produce a misleading "two keys" error.
 		code, ok := keyCodeTable[t]
 		if !ok {
-			return Spec{}, fmt.Errorf("%w: %q (US-ANSI key names only, e.g. 'x', 'f1', 'space')",
-				ErrUnknownToken, t)
+			return Spec{}, fmt.Errorf("%w (US-ANSI key names only, e.g. 'x', 'f1', 'space')",
+				ErrUnknownToken)
 		}
 		if keyTokenSet {
-			return Spec{}, fmt.Errorf("%w: more than one non-modifier key (%q and %q)",
-				ErrInvalidHotkey, keyToken, t)
+			return Spec{}, fmt.Errorf("%w: more than one non-modifier key in a single step "+
+				"(steps are separated by spaces, keys inside a step by '+')", ErrInvalidHotkey)
 		}
-		keyToken = t
 		keyTokenSet = true
 		spec.KeyCode = code
 	}

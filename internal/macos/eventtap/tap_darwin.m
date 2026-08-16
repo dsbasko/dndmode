@@ -23,27 +23,33 @@
 
 // USER_INTENTIONAL_MASK is the bit-for-bit twin of `matcher.UserIntentionalMask`
 // on the Go side. The callback strips system bits (CapsLock 0x10000,
-// NumPad 0x200000, Help 0x400000, NX_NONCOALSESCEDMASK 0x100, …) before
-// comparing against the configured Spec, because macOS sets those bits
+// NumPad 0x200000, SecondaryFn 0x800000, Help 0x400000,
+// NX_NONCOALSESCEDMASK 0x100, …) before
+// recording the press, because macOS sets those bits
 // independently of user intent. Drift between this constant
-// and `matcher.UserIntentionalMask` would silently break the hotkey for users
-// with CapsLock or NumPad toggled — `TestUserIntentionalMask_MatchesMatcherPackage`
+// and `matcher.UserIntentionalMask` would silently break the unlock code for
+// users with CapsLock or NumPad toggled — `TestUserIntentionalMask_MatchesMatcherPackage`
 // in tap_test.go pins both to the same hex literal so any future divergence
 // trips a unit-test rather than locking a customer out at runtime.
+//
+// kCGEventFlagMaskSecondaryFn is EXCLUDED on purpose: macOS raises it for
+// every key of the function-key group (F1-F12, arrows, Forward Delete,
+// Home/End/PageUp/PageDown) regardless of the physical Fn key, so treating
+// it as user intent would make a step declared as a bare `up` unmatchable.
+// See the UserIntentionalMask doc comment in internal/matcher/matcher.go for
+// the full argument — this constant must not re-add the bit on its own.
 //
 // Values are taken from CGEventTypes.h (HIGH confidence per the design notes):
 //   kCGEventFlagMaskShift        = 0x00020000
 //   kCGEventFlagMaskControl      = 0x00040000
 //   kCGEventFlagMaskAlternate    = 0x00080000  (Option)
 //   kCGEventFlagMaskCommand      = 0x00100000
-//   kCGEventFlagMaskSecondaryFn  = 0x00800000
-// OR-sum = 0x009E0000.
+// OR-sum = 0x001E0000.
 static const uint64_t USER_INTENTIONAL_MASK =
     (uint64_t)kCGEventFlagMaskShift     |
     (uint64_t)kCGEventFlagMaskControl   |
     (uint64_t)kCGEventFlagMaskAlternate |
-    (uint64_t)kCGEventFlagMaskCommand   |
-    (uint64_t)kCGEventFlagMaskSecondaryFn;
+    (uint64_t)kCGEventFlagMaskCommand;
 
 // g_ring and g_seq are the keystroke ring: the callback (single writer, tap
 // worker thread) appends one dnd_keyrec_t per non-autorepeat KeyDown, the
@@ -248,8 +254,15 @@ uint64_t eventtap_snapshot(dnd_keyrec_t *out) {
 // moment the tap goes down, rather than at `eventtap_uninstall_c` several
 // CoreFoundation teardown steps later.
 //
-// CALL SITE CONTRACT: Release path ONLY, after `eventtap_enable(tap, false)`
-// (Releaser.Release Step 1 in tap_darwin.go). It MUST NOT be called from the
+// CALL SITE CONTRACT: only where no tap callback can be running — install
+// (before the tap exists), Release Step 1 (after `eventtap_enable(tap,
+// false)` in tap_darwin.go) and the tail of `eventtap_uninstall_c` (after
+// the tap is released). Those three are the ONLY call sites and they are
+// the only implementation of "clear the ring": a fourth open-coded memset
+// that forgets the counter reset would hand the poller a run of
+// `{flags: 0, keycode: 0}` records, and keycode 0 is kVK_ANSI_A.
+//
+// It MUST NOT be called from the
 // poller: the poller runs concurrently with a live tap, so calling it there
 // would introduce a SECOND writer to the ring and destroy the single-writer
 // premise the whole correctness argument for `eventtap_snapshot` rests on.
@@ -308,15 +321,14 @@ void eventtap_wipe_ring(void) {
 //   5. Enables the tap — CGEventTapCreate returns a disabled tap; we MUST
 //      explicitly enable before events flow.
 int eventtap_install_c(CFMachPortRef *out_tap) {
-    // Start every session with an empty ring. Both writes happen BEFORE the
-    // tap exists, so the callback cannot be racing us here. Zeroing matters
+    // Start every session with an empty ring. This happens BEFORE the tap
+    // exists, so the callback cannot be racing us here. Zeroing matters
     // for more than tidiness: a stale record left over from a previous
     // Install would sit inside the first window the poller examines and
     // could complete an unlock code the user never finished typing. The
-    // counter reset is a RELEASE store so the memset is ordered before any
-    // subsequent ACQUIRE load by the reader.
-    memset(g_ring, 0, sizeof(g_ring));
-    __atomic_store_n(&g_seq, 0, __ATOMIC_RELEASE);
+    // counter reset inside eventtap_wipe_ring is a RELEASE store, so the
+    // memset is ordered before any subsequent ACQUIRE load by the reader.
+    eventtap_wipe_ring();
 
     // 15 event types per the design notes block every keyboard, mouse,
     // scroll, and system-defined (media) event the tap can see.
@@ -442,12 +454,15 @@ void eventtap_uninstall_c(CFMachPortRef tap) {
     }
 
     // Wipe the recorded key presses. By this point the tap is disabled and
-    // released, so the callback is gone and there is no writer to race — the
-    // plain memset needs no atomics. This is hygiene, not correctness: the
-    // ring holds the tail of what the user typed, including the unlock code
-    // they just entered, and there is no reason to leave it resident for the
-    // remainder of the process lifetime.
-    memset(g_ring, 0, sizeof(g_ring));
+    // released, so the callback is gone and there is no writer to race.
+    // This is hygiene, not correctness — Release Step 1 already wiped the
+    // ring, and the install-time rollback paths never recorded anything —
+    // but the ring holds the tail of what the user typed, including the
+    // unlock code they just entered, and there is no reason to leave it
+    // resident for the remainder of the process lifetime. Going through
+    // eventtap_wipe_ring rather than an open-coded memset keeps the counter
+    // reset attached to the wipe; see its call-site contract.
+    eventtap_wipe_ring();
 }
 
 // eventtap_is_enabled wraps `CGEventTapIsEnabled` for the watchdog probe

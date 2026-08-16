@@ -646,6 +646,23 @@ func TestAcceptance_BareKeyUnlockCode_ExitOne(t *testing.T) {
 	)
 }
 
+// TestAcceptance_UnparsableUnlockCode_ExitOne covers the one rejection path
+// that has a token in its hands when it fails. The others (both keys, too
+// short, bare key) never touch the step text, so they cannot leak it even by
+// accident; ParseStep can, and used to — it interpolated the offending token
+// with %q, putting a step of a mistyped passphrase into the terminal
+// scrollback of anyone running with --debug.
+//
+// The diagnostic must therefore locate the problem by POSITION ("step 3")
+// and by CATEGORY ("unknown token"), never by content.
+func TestAcceptance_UnparsableUnlockCode_ExitOne(t *testing.T) {
+	runUnlockRejection(t,
+		"unlock_code: swan wolf zebra dawn\n",
+		[]string{"invalid unlock_code", "step 1", "unknown token"},
+		[]string{"swan", "wolf", "zebra", "dawn"},
+	)
+}
+
 // TestAcceptance_LegacyHotkeyOnly_StartsWithDeprecationWarning pins the
 // backwards-compatibility row of the table, which is the whole reason
 // `hotkey` still parses: a config written before unlock_code existed — the
