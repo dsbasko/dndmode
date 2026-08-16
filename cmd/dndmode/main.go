@@ -882,7 +882,10 @@ func run() int {
 	// pushed at Step 17 — tap is released FIRST in the LIFO unwind, then
 	// windows, then assertion ("dndmode active"), then focus, then runtime.
 	//
-	// stopper.cancel === signal.NotifyContext stop func (Step 3).
+	// stopper.cancel is the Step 3 rootCtx cancel — deliberately NOT the
+	// signal.NotifyContext stop func. Handing `stop` here would unregister
+	// the last SIGINT handler the instant shutdown begins, so a second
+	// Ctrl-C would kill the process mid-cleanup; see the Step 3 rationale.
 	// supervisor.Start drives a goroutine that listens to its own signal.Notify
 	// channel and to ctx.Done — both paths converge on cancel; see Step 3
 	// rationale comment for why this double subscription is safe.

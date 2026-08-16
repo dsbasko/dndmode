@@ -337,6 +337,14 @@ it is the only secret that ends a locked session.
 #   Fn bit for every F-key, arrow and Forward Delete on its own, so it cannot
 #   express intent. Write 'up', not 'fn+up'.
 #
+# QUOTING: this is a YAML value, so if the code STARTS with one of - [ ] '
+# or a backtick, wrap the whole value in double quotes — unquoted, YAML reads
+# those as list/quote syntax and startup fails with a parse error, not with a
+# dndmode message. Anywhere but the first character they are fine bare. Also
+# note that ' #' (space then hash) starts a YAML comment and would silently
+# truncate the rest of the code.
+#   unlock_code: "- a b c d"           # leading punctuation: quote it
+#
 # Examples:
 #   unlock_code: s w o r d f i s h     # a passphrase
 #   unlock_code: ctrl+s w o r d cmd+z  # mixed
@@ -362,8 +370,9 @@ unlock_code: Ctrl+Option+Cmd+X
 # --- hotkey (DEPRECATED) -----------------------------------------------------
 # The pre-sequence single-combination key. Still read, so upgrading does not
 # break an existing config, but setting BOTH it and unlock_code is an error
-# (an ambiguous unlock secret is not resolvable). Migrate by renaming the key:
-# any value valid here is valid as a 1-step unlock_code.
+# (an ambiguous unlock secret is not resolvable). Migrate by renaming the key —
+# with one caveat: spaces separate STEPS in unlock_code, so any spaces around the
+# '+' must go ('Ctrl + X' is legal here, but reads as three steps below).
 # hotkey: Ctrl+Option+Cmd+X
 
 # --- overlay_style -----------------------------------------------------------
@@ -503,7 +512,10 @@ secret is not resolvable.
 | set | set | **Error**, exit `1`. Delete the `hotkey` line. |
 | absent | absent | **Error**, exit `1`. |
 
-Migration is a rename: any value valid as `hotkey` is valid as `unlock_code`.
+Migration is a rename, with one caveat: **spaces separate steps** in
+`unlock_code`, so any spaces around the `+` have to go first. `hotkey: Ctrl + X`
+is a legal chord but reads as three steps under `unlock_code`, and startup fails
+with exit `1`.
 
 **Three things that will trip you up:**
 

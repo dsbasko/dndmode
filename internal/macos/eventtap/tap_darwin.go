@@ -143,6 +143,14 @@ func newSnapshotFn() func(buf []matcher.KeyEvent) uint64 {
 		for i := range cring {
 			buf[i] = keyEventFromRecord(uint64(cring[i].flags), uint16(cring[i].keycode))
 		}
+		// Zero the staging array as soon as its contents are converted.
+		// Bound to the closure, it outlives every call, so without this it
+		// would hold a full copy of the recorded keystrokes (ending with the
+		// unlock code) for as long as the tap is installed — and past
+		// eventtap_wipe_ring, which only clears the C side. The memset is
+		// 1 KiB against a 1 KiB memcpy already performed on this line, and
+		// only on ticks where the counter actually moved.
+		clear(cring[:])
 		return cur
 	}
 }
@@ -338,9 +346,20 @@ func (r *Releaser) Name() string { return "eventtap" }
 //     and Step 4-5 reads g_observed_tap → sees NULL → returns immediately
 //     without touching the (about-to-be-freed at Step 3) mach port.
 // Step 1 — both calls happen here under the same mutex.
+//     close(stopPoller) + <-pollerDone — the unlock-code poller exits its
+//     ticker loop within pollInterval (10ms) and is drained to a full
+//     stop. This MUST run here, still inside Step 1 and BEFORE
+//     wipeRingFn, not at the end of Release: the poller is the ring's
+//     only reader, and a memset landing between eventtap_snapshot's
+//     ACQUIRE load and its memcpy would hand the poller a run of zeroed
+//     records (keycode 0 is kVK_ANSI_A). Draining first also keeps
+//     `-race` quiet — a goroutine still reading the C ring after Release
+//     returns would be flagged. Skipped if the channels are nil (unit-test
+//     constructors that exercise only the disable/uninstall path).
 //     wipeRingFn — eventtap_wipe_ring() — closes Step 1 once both taps
-//     are down and nothing can record another key press; the recorded
-//     keystrokes (which end with the unlock code) stop being resident.
+//     are down, nothing can record another key press and the ring's
+//     reader is gone; the recorded keystrokes (which end with the unlock
+//     code) stop being resident.
 //  2. uninstallFn — CFRunLoopRemoveSource → CFRelease(source) →
 //     CGEventTapEnable(tap, false) [defensive] → CFRelease(tap) →
 //     CFRunLoopStop(worker_runloop). The C-side helper
@@ -357,11 +376,6 @@ func (r *Releaser) Name() string { return "eventtap" }
 // 5. wakeStop — stop closure. Removes both NSWorkspace
 //     observers (DidWake + SessionDidBecomeActive) and re-NULLs
 //     g_observed_tap defensively. Skipped if nil (same rationale).
-//  6. close(stopPoller) — the unlock-code poller goroutine exits its
-//     ticker loop within pollInterval (10ms).
-//  7. <-pollerDone — wait for the unlock-code poller to fully unwind
-//     before returning. Under `-race`, a still-running goroutine calling
-//     into the C ring after Release would be flagged.
 func (r *Releaser) Release() error {
 	// Fast path: hint flag. Cheap Load — once released is durably set
 	// (after the winner stored it under mu), any repeat caller skips
@@ -840,11 +854,11 @@ func installInternal(steps []hotkey.Spec, sink chan<- struct{}, log *slog.Logger
 // `Release` follows the verbatim order:
 //
 //	Step 1: eventtap_enable(tap, 0) + eventtap_set_observed_tap(NULL)
+//	        + unlock-code poller close/drain + eventtap_wipe_ring
 //	Step 2: CFRunLoopRemoveSource  ┐
 //	Step 3: CFRelease(source+tap)  ┘  (both bundled in eventtap_uninstall_c)
 //	Step 4: watchdog_stop          (dispatch_source_cancel + Go poller drain)
 //	Step 5: wake_observer_remove   (NSWorkspace observers + g_observed_tap=NULL)
-//	(plus internal Steps 6/7: unlock-code poller close + drain).
 //
 // calls this from cmd/dndmode/main.go Step 16 (after controller,
 // before sup.Wait). The single returned Releaser is pushed onto

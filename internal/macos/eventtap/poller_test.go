@@ -787,10 +787,13 @@ func TestPollSequence_RingOverflow_RecoversAndMatches(t *testing.T) {
 	}
 }
 
-// TestClampFrom_CounterBehindCaller covers `to < from`, which is not a
-// hypothetical: Release wipes the ring (resetting the C counter to 0) at
-// Step 1 and only closes stopPoller at Step 6, so the poller can legitimately
-// tick in between and read a counter BELOW its own lastSeq.
+// TestClampFrom_CounterBehindCaller covers `to < from` — defence in depth
+// against ANY counter reset observed below the poller's own lastSeq.
+// Release orders its teardown so this cannot happen there (the poller is
+// drained BEFORE eventtap_wipe_ring zeroes the counter), but clampFrom must
+// not depend on that ordering holding: it is the last line of defence if a
+// future reorder, a re-install, or a second wipe path ever lets a poller tick
+// observe a counter behind it.
 //
 // The range must collapse to empty. Anything else would hand matchAny a
 // window over the freshly-zeroed ring, and a zero record decodes as a bare

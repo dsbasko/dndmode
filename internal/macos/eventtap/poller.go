@@ -191,6 +191,18 @@ func pollSequence(
 	ring := make([]matcher.KeyEvent, ringCap)
 	tail := make([]matcher.KeyEvent, m.Len())
 
+	// Zero both buffers on the way out, on BOTH exit paths (stop and match).
+	// eventtap_wipe_ring clears the C ring so the just-typed unlock code
+	// stops being resident after teardown, but `ring` holds a byte-identical
+	// 64-record copy of it and `tail` holds the matched window itself —
+	// leaving them behind would make that wipe half a measure. matcher.KeyEvent
+	// is pointer-free, so the GC has no reason to zero these spans before
+	// recycling them: the code would stay readable in the heap for an
+	// unbounded time. On the match path this runs immediately after the sink
+	// send, which is the tick whose tail IS the secret.
+	defer clear(ring)
+	defer clear(tail)
+
 	// Start from whatever the counter already reads rather than from 0:
 	// keystrokes that predate this goroutine are not part of this session's
 	// input. Install zeroes the counter, so in production this is 0 anyway;
