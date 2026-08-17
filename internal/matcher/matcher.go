@@ -97,6 +97,27 @@ func NewSequence(steps []hotkey.Spec) *Sequence {
 // snapshot.
 func (s *Sequence) Len() int { return len(s.steps) }
 
+// MinLen and MaxLen both report Len: a plaintext unlock code has exactly
+// one admissible window size, so the poller's length loop runs a single
+// iteration and the cost per keystroke is what it was before Verifier
+// existed.
+//
+// MaxLen returning 0 for an empty Sequence is load-bearing beyond this
+// package. It is what lets installInternal express its ErrEmptyUnlockCode
+// guard as `v == nil || v.MaxLen() == 0` once the []hotkey.Spec parameter
+// is gone: a nil-checked interface would still admit NewSequence(nil), and
+// a tap installed over a never-matching verifier raises the shield with no
+// way to lower it. Pinned by TestSequence_MaxLen_ZeroForEmpty.
+func (s *Sequence) MinLen() int { return len(s.steps) }
+
+// MaxLen — see MinLen.
+func (s *Sequence) MaxLen() int { return len(s.steps) }
+
+// Match satisfies Verifier. It is MatchTail under the interface's name;
+// MatchTail stays exported because it is the older, more specific spelling
+// and is what the existing tests exercise.
+func (s *Sequence) Match(tail []KeyEvent) bool { return s.MatchTail(tail) }
+
 // MatchTail returns true iff tail is exactly the configured unlock code:
 // len(tail) equals Len() and, for every step i, the user-intentional
 // modifier bits of tail[i] exactly equal steps[i].Modifiers AND

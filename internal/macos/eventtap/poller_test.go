@@ -14,6 +14,7 @@ package eventtap
 
 import (
 	"log/slog"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -249,7 +250,7 @@ func TestMatchAny_TableDriven(t *testing.T) {
 
 			m := mustSequence(t, tt.code)
 			ring, to := newRing(tt.start, mustEvents(t, tt.typed))
-			tail := make([]matcher.KeyEvent, m.Len())
+			tail := make([]matcher.KeyEvent, m.MaxLen())
 
 			if got := matchAny(ring, tt.start, tt.start, to, tail, m); got != tt.want {
 				t.Errorf("matchAny(code=%q, typed=%q, [%d,%d)) = %v, want %v",
@@ -268,7 +269,7 @@ func TestMatchAny_ExactLengthHistory(t *testing.T) {
 
 	m := mustSequence(t, "s w o r d")
 	ring, to := newRing(0, mustEvents(t, "s w o r d"))
-	tail := make([]matcher.KeyEvent, m.Len())
+	tail := make([]matcher.KeyEvent, m.MaxLen())
 
 	if to != uint64(m.Len()) {
 		t.Fatalf("fixture: to = %d, want %d", to, m.Len())
@@ -305,7 +306,7 @@ func TestMatchAny_WindowSpanningBaseline(t *testing.T) {
 	const base uint64 = 4
 
 	m := mustSequence(t, code)
-	tail := make([]matcher.KeyEvent, m.Len())
+	tail := make([]matcher.KeyEvent, m.MaxLen())
 	ring, to := newRing(0, mustEvents(t, code))
 
 	if matchAny(ring, base, base, to, tail, m) {
@@ -340,7 +341,7 @@ func TestMatchAny_EmptyRange(t *testing.T) {
 
 	m := mustSequence(t, "s w o r d")
 	ring, to := newRing(0, mustEvents(t, "s w o r d"))
-	tail := make([]matcher.KeyEvent, m.Len())
+	tail := make([]matcher.KeyEvent, m.MaxLen())
 
 	if matchAny(ring, 0, to, to, tail, m) {
 		t.Errorf("matchAny with from == to == %d = true, want false "+
@@ -392,7 +393,7 @@ func TestMatchAny_LagDropsAgedOutEvents(t *testing.T) {
 		t.Parallel()
 
 		m := mustSequence(t, code)
-		tail := make([]matcher.KeyEvent, m.Len())
+		tail := make([]matcher.KeyEvent, m.MaxLen())
 		ring := buildStream(t, 100) // recycled long before the snapshot
 
 		if matchAny(ring, 0, 0, to, tail, m) {
@@ -405,7 +406,7 @@ func TestMatchAny_LagDropsAgedOutEvents(t *testing.T) {
 		t.Parallel()
 
 		m := mustSequence(t, code)
-		tail := make([]matcher.KeyEvent, m.Len())
+		tail := make([]matcher.KeyEvent, m.MaxLen())
 		ring := buildStream(t, to-5) // the newest five records
 
 		if !matchAny(ring, 0, 0, to, tail, m) {
@@ -425,12 +426,513 @@ func TestMatchAny_LagDropsAgedOutEvents(t *testing.T) {
 func TestMatchAny_DoesNotAllocate(t *testing.T) {
 	m := mustSequence(t, "s w o r d f i s h")
 	ring, to := newRing(0, mustEvents(t, "q q q s w o r d f i s h"))
-	tail := make([]matcher.KeyEvent, m.Len())
+	tail := make([]matcher.KeyEvent, m.MaxLen())
 
 	if got := testing.AllocsPerRun(100, func() {
 		matchAny(ring, 0, 0, to, tail, m)
 	}); got != 0 {
 		t.Errorf("matchAny allocated %v times per run, want 0", got)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// matchAny — Verifier generalisation
+// ---------------------------------------------------------------------------
+
+// digestSalt is a fixed, non-secret salt so the digest fixtures below are
+// deterministic. Production salts come from crypto/rand; a constant here
+// only has to be SaltLen bytes long.
+var digestSalt = []byte("0123456789abcdef")
+
+// mustDigest builds a *matcher.Digest over the same string grammar
+// mustSequence uses, so a Digest case and a Sequence case describing the
+// same secret are written identically and cannot silently diverge.
+//
+// This is the verifier `--set-password` produces: it stores a salted hash
+// and NOT the length, so it admits every window from 1 to hotkey.MaxSteps
+// and lets the hash pick.
+func mustDigest(t *testing.T, code string) *matcher.Digest {
+	t.Helper()
+	steps, err := hotkey.ParseSequence(code)
+	if err != nil {
+		t.Fatalf("ParseSequence(%q): %v", code, err)
+	}
+	d, err := matcher.NewDigest(digestSalt, matcher.HashSteps(digestSalt, steps))
+	if err != nil {
+		t.Fatalf("NewDigest(%q): %v", code, err)
+	}
+	return d
+}
+
+// mustEventsMulti concatenates the event streams of several grammar
+// fragments. It exists because hotkey.ParseSequence enforces the
+// hotkey.MaxSteps ceiling on the WHOLE string, so a fixture that types
+// filler in front of a maximum-length code cannot be written as one string
+// — the typed stream is longer than any legal unlock code, which is exactly
+// the situation the ring clamp has to survive. Empty fragments are skipped.
+func mustEventsMulti(t *testing.T, parts ...string) []matcher.KeyEvent {
+	t.Helper()
+	var out []matcher.KeyEvent
+	for _, p := range parts {
+		if p == "" {
+			continue
+		}
+		out = append(out, mustEvents(t, p)...)
+	}
+	return out
+}
+
+// layStream lays `n` filler keystrokes down in stream ORDER with `evs`
+// spliced in at sequence `at`, then replays the whole stream into a ring
+// snapshot the way the C callback would. Replaying in order is what makes an
+// aged-out window actually disappear: later keystrokes recycle its slots.
+func layStream(t *testing.T, n, at uint64, evs []matcher.KeyEvent) []matcher.KeyEvent {
+	t.Helper()
+	filler := mustEvents(t, "q")[0]
+
+	stream := make([]matcher.KeyEvent, n)
+	for i := range stream {
+		stream[i] = filler
+	}
+	copy(stream[at:], evs)
+
+	ring := make([]matcher.KeyEvent, ringCap)
+	for i, ev := range stream {
+		ring[uint64(i)&ringMask] = ev
+	}
+	return ring
+}
+
+// maxStepsCode is a hotkey.MaxSteps-long unlock code: 26 letters plus six
+// digits. It exists to exercise the longest window matchAny will ever
+// assemble, which for a *Digest is also the window the ring clamp is
+// computed from.
+const maxStepsCode = "a b c d e f g h i j k l m n o p q r s t u v w x y z 1 2 3 4 5 6"
+
+// TestMatchAny_Digest_TableDriven is TestMatchAny_TableDriven's sibling for
+// the length-agnostic verifier. Every behaviour the sliding window has to
+// have must survive not knowing how long the secret is: the hash is what
+// rejects a wrong window, and it has to reject 31 wrong lengths per end
+// position without ever producing a false positive.
+func TestMatchAny_Digest_TableDriven(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name string
+		code string
+		// pre is typed before `typed` and parsed separately, so a fixture
+		// may exceed hotkey.MaxSteps in total even though no single fragment
+		// does.
+		pre   string
+		typed string
+		// start is the sequence number of the first typed event. Values at
+		// or above ringCap exercise index wrapping.
+		start uint64
+		want  bool
+	}{
+		{
+			name:  "code at end of stream",
+			code:  "s w o r d",
+			typed: "s w o r d",
+			want:  true,
+		},
+		{
+			name:  "garbage before the code",
+			code:  "s w o r d",
+			typed: "x y z s w o r d",
+			want:  true,
+		},
+		{
+			// Same reason as for a Sequence: both the code and the stray key
+			// land in one 10ms snapshot, so the newest tail is "code + z".
+			name:  "stray keypress after the code, same window",
+			code:  "s w o r d",
+			typed: "s w o r d z",
+			want:  true,
+		},
+		{
+			name:  "history shorter than the code",
+			code:  "s w o r d",
+			typed: "s w",
+			want:  false,
+		},
+		{
+			// The case a Digest could plausibly get wrong and a Sequence
+			// cannot: "s w" IS a prefix of the secret, and the verifier does
+			// not know the secret is five steps long. The step count inside
+			// the preimage is what makes the short window hash to something
+			// else instead of matching a prefix.
+			name:  "prefix of the code is not the code",
+			code:  "s w o r d",
+			typed: "q s w",
+			want:  false,
+		},
+		{
+			name:  "wrong key in the middle",
+			code:  "s w o r d",
+			typed: "s w q r d",
+			want:  false,
+		},
+		{
+			name:  "code wrapping the ring boundary",
+			code:  "s w o r d",
+			typed: "s w o r d",
+			start: ringCap - 3, // occupies slots 61,62,63,0,1
+			want:  true,
+		},
+		{
+			name:  "garbage plus code wrapping the ring boundary",
+			code:  "s w o r d",
+			typed: "q q q s w o r d",
+			start: 3*ringCap - 4,
+			want:  true,
+		},
+		{
+			name:  "self-overlapping code, complete",
+			code:  "a b a b",
+			typed: "a b a b",
+			want:  true,
+		},
+		{
+			name:  "self-overlapping code, one short",
+			code:  "a b a b",
+			typed: "b a b a",
+			want:  false,
+		},
+		{
+			name:  "self-overlapping code completed late",
+			code:  "a b a b",
+			typed: "a b a a b a b",
+			want:  true,
+		},
+		{
+			name:  "modifier steps",
+			code:  "ctrl+s w cmd+z",
+			typed: "q ctrl+s w cmd+z",
+			want:  true,
+		},
+		{
+			name:  "extra modifier on a bare step breaks it",
+			code:  "s w o r d",
+			typed: "s w o r shift+d",
+			want:  false,
+		},
+		{
+			// The longest window the grammar admits, entered as the very
+			// first keystrokes of the session: `to` is 32, which is below
+			// ringCap, so this is also the case the "compare, THEN subtract"
+			// ordering in clampFrom protects.
+			name:  "maximum-length code as the whole history",
+			code:  maxStepsCode,
+			typed: maxStepsCode,
+			want:  true,
+		},
+		{
+			// A maximum-length code whose window starts one slot inside the
+			// oldest readable record — exactly the boundary clampFrom pins.
+			name:  "maximum-length code preceded by filler",
+			code:  maxStepsCode,
+			pre:   "q q q",
+			typed: maxStepsCode,
+			want:  true,
+		},
+		{
+			name:  "maximum-length code wrapping the ring boundary",
+			code:  maxStepsCode,
+			typed: maxStepsCode,
+			start: ringCap - 5,
+			want:  true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			d := mustDigest(t, tt.code)
+			ring, to := newRing(tt.start, mustEventsMulti(t, tt.pre, tt.typed))
+			tail := make([]matcher.KeyEvent, d.MaxLen())
+
+			if got := matchAny(ring, tt.start, tt.start, to, tail, d); got != tt.want {
+				t.Errorf("matchAny(digest(%q), typed=%q %q, [%d,%d)) = %v, want %v",
+					tt.code, tt.pre, tt.typed, tt.start, to, got, tt.want)
+			}
+		})
+	}
+}
+
+// TestMatchAny_Digest_WindowSpanningBaseline is
+// TestMatchAny_WindowSpanningBaseline for the length loop. The baseline
+// floor has to be re-checked for EVERY candidate length, not once per end
+// position: at a given end a 1-record window can sit entirely above the
+// baseline while the 5-record one reaches below it, and the loop must reject
+// only the latter.
+func TestMatchAny_Digest_WindowSpanningBaseline(t *testing.T) {
+	t.Parallel()
+
+	const code = "s w o r d"
+	// The first four presses predate the rearm; the fifth is the only fresh
+	// one. Their concatenation IS the secret — only the baseline separates
+	// them.
+	const base uint64 = 4
+
+	d := mustDigest(t, code)
+	tail := make([]matcher.KeyEvent, d.MaxLen())
+	ring, to := newRing(0, mustEvents(t, code))
+
+	if matchAny(ring, base, base, to, tail, d) {
+		t.Errorf("matchAny(base=%d) = true for a window starting at 0 — four "+
+			"of the five records belong to a previous tap and must not be "+
+			"spliced onto the fresh one", base)
+	}
+
+	// Control: the same ring and range DO match when every record belongs to
+	// this session, so the assertion above cannot pass by the matcher having
+	// gone deaf.
+	if !matchAny(ring, 0, base, to, tail, d) {
+		t.Error("matchAny(base=0) = false for the same ring and range — the " +
+			"fixture must be a real match that only the baseline suppresses")
+	}
+
+	// And the floor suppresses spliced windows, not the poller: a code typed
+	// entirely after the baseline still matches.
+	fresh, freshTo := newRing(base, mustEvents(t, code))
+	if !matchAny(fresh, base, base, freshTo, tail, d) {
+		t.Error("matchAny = false for a code typed entirely after the " +
+			"baseline; a re-armed poller must still unlock")
+	}
+}
+
+// TestMatchAny_ClampedByMaxLen is the regression test for the bound that
+// changed when Verifier arrived: clampFrom is fed the verifier's WORST-CASE
+// window length, not the length of the window being assembled.
+//
+// The fixture puts the same five-record secret in the same ring, in the same
+// range, and asks two verifiers about it. The window ends at sequence 150
+// with the snapshot taken at 200:
+//
+//	clamp by 5  → 200 - (64-5)  = 141 ≤ 150 → visible
+//	clamp by 32 → 200 - (64-32) = 168 > 150 → refused
+//
+// So the *Sequence (MaxLen 5) matches and the *Digest (MaxLen 32) must not.
+// Had matchAny clamped per candidate length, the Digest would have been told
+// the same optimistic 141 while ALSO assembling 32-record windows whose start
+// reaches sequence 119 — slots the writer recycled long before the snapshot.
+// Matching on recycled records means unlocking on a keystroke stream the user
+// never typed.
+func TestMatchAny_ClampedByMaxLen(t *testing.T) {
+	t.Parallel()
+
+	const code = "s w o r d"
+	const to uint64 = 200
+	const codeEnd uint64 = 150
+
+	evs := mustEvents(t, code)
+	at := codeEnd + 1 - uint64(len(evs))
+
+	seqM := mustSequence(t, code)
+	dig := mustDigest(t, code)
+
+	// Fixture sanity: the two clamps must genuinely straddle the window, or
+	// the test proves nothing.
+	if lo, _ := clampFrom(0, to, uint64(seqM.MaxLen())); lo > codeEnd {
+		t.Fatalf("fixture: clamp by MaxLen=%d gives %d, which already excludes "+
+			"the window ending at %d", seqM.MaxLen(), lo, codeEnd)
+	}
+	if lo, _ := clampFrom(0, to, uint64(dig.MaxLen())); lo <= codeEnd {
+		t.Fatalf("fixture: clamp by MaxLen=%d gives %d, which does not exclude "+
+			"the window ending at %d", dig.MaxLen(), lo, codeEnd)
+	}
+
+	ring := layStream(t, to, at, evs)
+
+	t.Run("sequence sees its own narrow window", func(t *testing.T) {
+		tail := make([]matcher.KeyEvent, seqM.MaxLen())
+		if !matchAny(ring, 0, 0, to, tail, seqM) {
+			t.Error("matchAny = false for a *Sequence whose only admissible " +
+				"window is inside the clamp; the fixture must be a real match")
+		}
+	})
+
+	t.Run("digest refuses the possibly-recycled window", func(t *testing.T) {
+		tail := make([]matcher.KeyEvent, dig.MaxLen())
+		if matchAny(ring, 0, 0, to, tail, dig) {
+			t.Errorf("matchAny = true for a *Digest over a window ending at %d, "+
+				"which sits below the MaxLen=%d clamp at %d — the clamp must be "+
+				"computed from the worst-case window length, not the candidate's",
+				codeEnd, dig.MaxLen(), to-(uint64(ringCap)-uint64(dig.MaxLen())))
+		}
+	})
+
+	t.Run("digest still matches inside the clamp", func(t *testing.T) {
+		// Same stream, secret moved into the region every candidate length
+		// can reach. Without this the test above would also pass if the
+		// Digest path had simply stopped working.
+		const freshEnd uint64 = 195
+		fresh := layStream(t, to, freshEnd+1-uint64(len(evs)), evs)
+		tail := make([]matcher.KeyEvent, dig.MaxLen())
+		if !matchAny(fresh, 0, 0, to, tail, dig) {
+			t.Errorf("matchAny = false for a *Digest over a window ending at %d, "+
+				"which is inside the clamp; the clamp must not discard live history",
+				freshEnd)
+		}
+	})
+}
+
+// matchAnyLegacy is the pre-Verifier matchAny, kept verbatim as the oracle
+// for TestMatchAny_Sequence_MatchesLegacyAlgorithm. It takes a concrete
+// *matcher.Sequence, clamps by that one length, and checks exactly one
+// window per end position.
+func matchAnyLegacy(ring []matcher.KeyEvent, base, from, to uint64, tail []matcher.KeyEvent, m *matcher.Sequence) bool {
+	l := uint64(m.Len())
+	from, _ = clampFrom(from, to, l)
+
+	for end := from; end < to; end++ {
+		if end+1 < base+l {
+			continue
+		}
+		start := end + 1 - l
+		for i := uint64(0); i < l; i++ {
+			tail[i] = ring[(start+i)&ringMask]
+		}
+		if m.MatchTail(tail) {
+			return true
+		}
+	}
+	return false
+}
+
+// TestMatchAny_Sequence_MatchesLegacyAlgorithm pins that generalising
+// matchAny over Verifier did not change what it decides for the plaintext
+// unlock code — the path every existing config takes. A *Sequence reports
+// MinLen == MaxLen, so the length loop must collapse to the single iteration
+// the old code did, the clamp must be fed the same number, and the baseline
+// floor must fire on the same windows.
+//
+// The oracle is the old implementation itself rather than a table of
+// expected booleans: a table would only pin the cases someone thought to
+// write down, while cross-checking the two implementations over a corpus
+// covers wrapping, clamping and baseline interactions no one enumerated.
+func TestMatchAny_Sequence_MatchesLegacyAlgorithm(t *testing.T) {
+	t.Parallel()
+
+	codes := []string{"s w o r d", "a b a b", "ctrl+s w cmd+z", "q", maxStepsCode}
+	// Chunked rather than flat: the last entry is longer than
+	// hotkey.MaxSteps overall, which ParseSequence rejects as a unlock code
+	// but which the ring must still handle as a keystroke STREAM.
+	typings := [][]string{
+		{"s w o r d"},
+		{"x y z s w o r d"},
+		{"s w o r d z"},
+		{"s w"},
+		{"s w q r d"},
+		{"a b a a b a b"},
+		{"b a b a"},
+		{"q ctrl+s w cmd+z"},
+		{"s w o r shift+d"},
+		{"q"},
+		{maxStepsCode},
+		{"q q q", maxStepsCode},
+	}
+	// 0 and 3 stay inside the first lap; ringCap-3 and 3*ringCap-4 wrap the
+	// index; 200 is far enough past ringCap that the clamp engages.
+	starts := []uint64{0, 3, ringCap - 3, 3*ringCap - 4, 200}
+
+	for _, code := range codes {
+		m := mustSequence(t, code)
+		for _, parts := range typings {
+			typed := strings.Join(parts, " ")
+			evs := mustEventsMulti(t, parts...)
+			for _, start := range starts {
+				ring, to := newRing(start, evs)
+				// Baselines: at the start of the stream (production), a few
+				// records in (re-armed poller), and past the whole stream.
+				for _, base := range []uint64{0, start, start + 2, to} {
+					// Lower bounds: the caller's own baseline, zero (a
+					// poller far behind), and `to` (empty range).
+					for _, from := range []uint64{start, 0, to} {
+						gotTail := make([]matcher.KeyEvent, m.MaxLen())
+						wantTail := make([]matcher.KeyEvent, m.Len())
+
+						got := matchAny(ring, base, from, to, gotTail, m)
+						want := matchAnyLegacy(ring, base, from, to, wantTail, m)
+						if got != want {
+							t.Errorf("matchAny(code=%q, typed=%q, start=%d, base=%d, from=%d, to=%d) = %v, "+
+								"legacy = %v — the Sequence path must be unchanged",
+								code, typed, start, base, from, to, got, want)
+						}
+					}
+				}
+			}
+		}
+	}
+}
+
+// TestMatchAny_EmptyVerifier_NeverMatches pins the second layer of the
+// ErrEmptyUnlockCode guard. matcher.NewSequence(nil) is a non-nil Verifier
+// that reports MaxLen 0, so a `v == nil` check alone would let it through;
+// offering it a zero-length window would then hand matcher.Sequence an empty
+// tail. That has to read as "no secret is configured", never as "the empty
+// tail matched" — the latter is an unlock on the first tick with no input at
+// all.
+//
+// `tail` is deliberately nil: an empty verifier must return before it
+// touches the scratch buffer, so a regression here is a panic rather than a
+// quiet wrong answer.
+func TestMatchAny_EmptyVerifier_NeverMatches(t *testing.T) {
+	t.Parallel()
+
+	for _, tc := range []struct {
+		name  string
+		steps []hotkey.Spec
+	}{
+		{name: "nil steps", steps: nil},
+		{name: "empty steps", steps: []hotkey.Spec{}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			v := matcher.NewSequence(tc.steps)
+			if got := v.MaxLen(); got != 0 {
+				t.Fatalf("NewSequence(%v).MaxLen() = %d, want 0 — the "+
+					"installInternal guard and the matchAny short-circuit "+
+					"both key off this", tc.steps, got)
+			}
+
+			ring, to := newRing(0, mustEvents(t, "s w o r d"))
+			if matchAny(ring, 0, 0, to, nil, v) {
+				t.Error("matchAny = true for an empty verifier over a ring " +
+					"full of keystrokes")
+			}
+
+			// And over an untouched ring, which is what the very first ticks
+			// of a session see.
+			if matchAny(make([]matcher.KeyEvent, ringCap), 0, 0, 5, nil, v) {
+				t.Error("matchAny = true for an empty verifier over an empty " +
+					"ring — the empty tail must not read as a match")
+			}
+		})
+	}
+}
+
+// TestMatchAny_Digest_DoesNotAllocate extends the "no allocations in hot
+// path" contract to the length loop. A *Digest hashes up to hotkey.MaxSteps
+// windows per end position, and every one of those hashes has to build its
+// preimage on the stack: an allocation here would be paid on the poller's
+// 10ms tick for as long as the mode is up.
+//
+// NOT t.Parallel — testing.AllocsPerRun panics when called from a parallel
+// test, and its measurement would be noise anyway if other tests were
+// allocating alongside it.
+func TestMatchAny_Digest_DoesNotAllocate(t *testing.T) {
+	d := mustDigest(t, "s w o r d f i s h")
+	ring, to := newRing(0, mustEvents(t, "q q q s w o r d f i s h"))
+	tail := make([]matcher.KeyEvent, d.MaxLen())
+
+	if got := testing.AllocsPerRun(100, func() {
+		matchAny(ring, 0, 0, to, tail, d)
+	}); got != 0 {
+		t.Errorf("matchAny allocated %v times per run with a *Digest, want 0", got)
 	}
 }
 
@@ -511,7 +1013,7 @@ func discardLogger() *slog.Logger {
 // "everything pushed before startPoller is pre-existing, everything pushed
 // after is this session's input" a deterministic property of these tests
 // rather than a race against the Go scheduler.
-func startPoller(t *testing.T, f *fakeRing, m *matcher.Sequence, sink chan struct{}) (stop func(), done chan struct{}) {
+func startPoller(t *testing.T, f *fakeRing, v matcher.Verifier, sink chan struct{}) (stop func(), done chan struct{}) {
 	t.Helper()
 
 	stopCh := make(chan struct{})
@@ -523,7 +1025,7 @@ func startPoller(t *testing.T, f *fakeRing, m *matcher.Sequence, sink chan struc
 	done = make(chan struct{})
 	go func() {
 		defer close(done)
-		pollSequence(stopCh, baseSeq, f.seq, f.snapshot, m, sink, discardLogger())
+		pollSequence(stopCh, baseSeq, f.seq, f.snapshot, v, sink, discardLogger())
 	}()
 
 	t.Cleanup(func() {
@@ -573,6 +1075,63 @@ func TestPollSequence_MatchSendsExactlyOneSignal(t *testing.T) {
 	case <-sink:
 		t.Error("sink received a second signal; a match must send exactly once")
 	default:
+	}
+}
+
+// TestPollSequence_DigestVerifier_MatchSendsSignal walks the hashed secret
+// end to end through the poller, which is the path a config written by
+// `--set-password` takes. It covers what the matchAny tests cannot: that
+// pollSequence sizes its scratch buffer from MaxLen rather than from the
+// secret's real length. A buffer sized from MinLen would be one record long
+// and matchAny would index past it on the second candidate length — a panic
+// on the poller goroutine, i.e. a machine that stays shielded.
+func TestPollSequence_DigestVerifier_MatchSendsSignal(t *testing.T) {
+	t.Parallel()
+
+	f := &fakeRing{}
+	d := mustDigest(t, "s w o r d")
+	sink := make(chan struct{}, 1)
+
+	_, done := startPoller(t, f, d, sink)
+
+	f.push(mustEvents(t, "q s w o r d")...)
+
+	select {
+	case <-sink:
+	case <-time.After(20 * pollInterval):
+		t.Fatal("no signal within 20 ticks after the hashed unlock code was typed")
+	}
+
+	select {
+	case <-done:
+	case <-time.After(20 * pollInterval):
+		t.Fatal("pollSequence did not return after signalling a match")
+	}
+}
+
+// TestPollSequence_DigestVerifier_WrongCodeKeepsPolling is the negative half:
+// a Digest offers hotkey.MaxSteps candidate windows per keystroke, so a near
+// miss gives it 32 chances per press to be wrong. Silence is the required
+// behaviour — the poller logs nothing on a failed match by design.
+func TestPollSequence_DigestVerifier_WrongCodeKeepsPolling(t *testing.T) {
+	t.Parallel()
+
+	f := &fakeRing{}
+	d := mustDigest(t, "s w o r d")
+	sink := make(chan struct{}, 1)
+
+	_, done := startPoller(t, f, d, sink)
+
+	// A prefix of the secret, a suffix of it, and a one-key substitution —
+	// laid so that no five consecutive records spell the code.
+	f.push(mustEvents(t, "s w o r w o r d s w q r d")...)
+
+	select {
+	case <-sink:
+		t.Fatal("signal sent for a keystroke stream that never contained the code")
+	case <-done:
+		t.Fatal("pollSequence returned without a match")
+	case <-time.After(10 * pollInterval):
 	}
 }
 
@@ -906,7 +1465,7 @@ func TestMatchAny_ToBeforeFrom(t *testing.T) {
 	m := mustSequence(t, "s w o r d")
 	evs := mustEvents(t, "s w o r d")
 	ring, cur := newRing(0, evs)
-	tail := make([]matcher.KeyEvent, m.Len())
+	tail := make([]matcher.KeyEvent, m.MaxLen())
 
 	// The code IS in the ring and would match over [0, cur) — the point is
 	// that an inverted range must not consult it at all.

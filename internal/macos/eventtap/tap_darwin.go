@@ -753,13 +753,23 @@ func installInternal(steps []hotkey.Spec, sink chan<- struct{}, log *slog.Logger
 		}
 	}
 
-	// The unlock matcher. Built once, here, from the masked copy —
-	// matcher.Sequence is immutable after construction and MatchTail is
-	// pure, so the poller goroutine can use it without any synchronisation.
-	// A ring reset happens inside eventtap_install_c below, so the poller
-	// starts against an empty ring no matter what a previous Install left
-	// behind.
-	seqMatcher := matcher.NewSequence(masked)
+	// The unlock verifier. Built once, here, from the masked copy —
+	// matcher.Sequence is immutable after construction and Match is pure, so
+	// the poller goroutine can use it without any synchronisation. A ring
+	// reset happens inside eventtap_install_c below, so the poller starts
+	// against an empty ring no matter what a previous Install left behind.
+	//
+	// pollSequence takes a matcher.Verifier, not a *matcher.Sequence: the
+	// hashed secret written by `--set-password` arrives as a *matcher.Digest
+	// through the same parameter. Constructing the Sequence HERE, from the
+	// []hotkey.Spec this function still takes, is deliberately temporary —
+	// it keeps InstallAll's signature (and therefore main.go and both test
+	// files) untouched while the poller moves onto the interface. The
+	// []hotkey.Spec parameter is replaced by a Verifier one task later,
+	// together with the ErrEmptyUnlockCode guard above, which then has to be
+	// expressed as `v == nil || v.MaxLen() == 0` because `len(steps)` will
+	// no longer be in scope.
+	var seqMatcher matcher.Verifier = matcher.NewSequence(masked)
 
 	var cTap C.CFMachPortRef
 	rc := C.eventtap_install_c(&cTap)

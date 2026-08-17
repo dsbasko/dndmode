@@ -50,20 +50,34 @@ const (
 // records, i.e. sequence numbers [to-ringCap, to). The writer keeps going
 // during the memcpy, so the very oldest of those slots may already be
 // half-overwritten by the time they are copied. Every window this poller
-// assembles is `l` records long and ends at some `end` < to, so pinning the
-// oldest readable window start one slot inside the ring — the oldest tail
-// may begin at to-ringCap+1, never at to-ringCap — is what keeps a torn
-// record out of the matcher.
+// assembles is at most `maxL` records long and ends at some `end` < to, so
+// pinning the oldest readable window start one slot inside the ring — the
+// oldest tail may begin at to-ringCap+1, never at to-ringCap — is what keeps
+// a torn record out of the matcher.
+//
+// `maxL` is the verifier's WORST-CASE window length (matcher.Verifier.MaxLen),
+// NOT the length of the window the caller happens to be assembling. The
+// distinction is inert for a *Sequence, where the two are the same number,
+// and load-bearing for a *Digest, which admits every length in
+// [1, hotkey.MaxSteps]. Clamping by the current length would make the answer
+// depend on which iteration of matchAny's length loop asked: a 5-record
+// window would be told the ring reads back to to-59, and matchAny would then
+// walk the SAME `end` positions with a 32-record window whose start reaches
+// slots that no longer hold what they held when the snapshot was taken. Only
+// the longest admissible window yields a bound that holds for every window
+// matchAny will actually try, and erring that way costs a refused match on
+// records that may be torn rather than a match assembled from them.
+// TestMatchAny_ClampedByMaxLen pins it.
 //
 // The arithmetic is deliberately written as "compare, THEN subtract":
 //
-//	if to <= ringCap-l { no clamp }        // safe: no subtraction happened
-//	lo := to - (ringCap - l)               // only reached when to is big enough
+//	if to <= ringCap-maxL { no clamp }     // safe: no subtraction happened
+//	lo := to - (ringCap - maxL)            // only reached when to is big enough
 //
-// Doing it the other way round (`lo := to - (ringCap - l); if from < lo`)
-// underflows for every `to` below ringCap-l, because these are uint64s:
+// Doing it the other way round (`lo := to - (ringCap - maxL); if from < lo`)
+// underflows for every `to` below ringCap-maxL, because these are uint64s:
 // `lo` wraps to ~2^64, `from` is clamped above `to`, and matchAny's loop
-// never executes. That is not a rare edge — it is the FIRST ~60 keystrokes
+// never executes. That is not a rare edge — it is the FIRST ~30 keystrokes
 // of every single session, so the unlock code would simply not work until
 // the ring had wrapped once. poller_test.go pins this case.
 //
@@ -71,26 +85,27 @@ const (
 // the caller fell behind far enough that keystrokes aged out of the ring
 // unread. pollSequence logs that fact (and only the fact — never the
 // keystrokes) at DEBUG level.
-func clampFrom(from, to, l uint64) (uint64, bool) {
-	if l > uint64(ringCap) {
+func clampFrom(from, to, maxL uint64) (uint64, bool) {
+	if maxL > uint64(ringCap) {
 		// Unreachable in production: hotkey.MaxSteps*2 <= ringCap is pinned
-		// by ring_guard_test.go and config validation rejects longer codes.
-		// Handled anyway because the subtraction below would underflow, and
-		// "no window fits in the ring" is the honest answer: report
-		// everything as dropped and let the range collapse to empty.
+		// by ring_guard_test.go and every Verifier caps MaxLen at
+		// hotkey.MaxSteps. Handled anyway because the subtraction below
+		// would underflow, and "no window fits in the ring" is the honest
+		// answer: report everything as dropped and let the range collapse to
+		// empty.
 		return to, true
 	}
-	if to <= uint64(ringCap)-l {
+	if to <= uint64(ringCap)-maxL {
 		return from, false
 	}
-	lo := to - (uint64(ringCap) - l)
+	lo := to - (uint64(ringCap) - maxL)
 	if from >= lo {
 		return from, false
 	}
 	return lo, true
 }
 
-// matchAny reports whether the configured unlock code appears anywhere in
+// matchAny reports whether the configured unlock secret appears anywhere in
 // the keystroke stream as a tail ending on one of the sequence numbers in
 // [from, to), reading the records out of `ring` — a snapshot of the C-side
 // keystroke ring, indexed by `seq & ringMask`.
@@ -106,7 +121,9 @@ func clampFrom(from, to, l uint64) (uint64, bool) {
 // production `base` is 0 (Install samples it over a freshly zeroed ring, so
 // nothing precedes it) and the floor is inert; it is what makes the
 // guarantee documented on pollSequence true for a poller re-armed over a
-// ring that already holds keystrokes.
+// ring that already holds keystrokes. The floor is re-checked for EVERY
+// candidate length, not once per end position: a 32-record window ending
+// where a 5-record one is legal can still reach below the baseline.
 //
 // Why EVERY tail in the range and not just the newest one: the poller wakes
 // on a 10ms ticker, and a snapshot routinely contains more than one new
@@ -118,33 +135,69 @@ func clampFrom(from, to, l uint64) (uint64, bool) {
 // keystrokes happen to be split across ticks, which is the only way a
 // sliding-window code can behave deterministically.
 //
-// `tail` is a caller-owned scratch buffer that MUST be exactly m.Len()
-// long; it is overwritten in place on every candidate window. Together with
-// the caller-owned `ring` this keeps matchAny allocation-free, per the
-// "no allocations in hot path" contract stated in matcher.go.
+// Why every LENGTH as well: a matcher.Verifier does not have to know how
+// long the secret is. A *Sequence does — MinLen and MaxLen are both Len(),
+// so the inner loop runs exactly once and both the behaviour and the cost
+// are what they were before Verifier existed. A *Digest does not: it stores
+// a salted hash and nothing else, deliberately, so that the config file
+// betrays no length. It therefore offers [1, hotkey.MaxSteps] and lets the
+// hash decide which window is the secret.
+//
+// `tail` is a caller-owned scratch buffer that MUST be at least
+// v.MaxLen() long; it is re-sliced to the candidate length and overwritten
+// in place on every candidate window. Together with the caller-owned `ring`
+// this keeps matchAny itself allocation-free, per the "no allocations in
+// hot path" contract stated in matcher.go — Verifier.Match is required to
+// hold up its half of that contract.
 //
 // Pure function — no cgo, no IO. Nothing about the keystrokes it reads is
 // logged or returned; the only observable output is the boolean.
-func matchAny(ring []matcher.KeyEvent, base, from, to uint64, tail []matcher.KeyEvent, m *matcher.Sequence) bool {
-	l := uint64(m.Len())
-	from, _ = clampFrom(from, to, l)
+func matchAny(ring []matcher.KeyEvent, base, from, to uint64, tail []matcher.KeyEvent, v matcher.Verifier) bool {
+	minL, maxL := uint64(v.MinLen()), uint64(v.MaxLen())
+	if maxL == 0 {
+		// An empty verifier — matcher.NewSequence(nil) is the only way to
+		// build one — admits no window at all. Returning here rather than
+		// letting the loop offer a zero-length tail is what keeps "no
+		// configured secret" from reading as "the empty tail matched", i.e.
+		// an immediate unlock on the first tick with no input. installInternal
+		// refuses to install over such a verifier in the first place; this is
+		// the second layer.
+		return false
+	}
+	if minL == 0 {
+		// Defensive: a zero-length window is not a window. No production
+		// Verifier reports MinLen 0 alongside a non-zero MaxLen, but the
+		// alternative to normalising here is the same empty-tail hazard as
+		// above, one loop iteration deeper.
+		minL = 1
+	}
+
+	// The clamp uses the WORST-CASE window length, not the length of any
+	// particular candidate — see clampFrom for why a per-length bound would
+	// let the longest windows read recycled slots.
+	from, _ = clampFrom(from, to, maxL)
 
 	for end := from; end < to; end++ {
-		if end+1 < base+l {
-			// Fewer than l keystrokes have been recorded since the
-			// baseline, so a window ending here would have to start below
-			// it. With base == 0 (production) that is the "no complete
-			// window exists yet" case at session start; with base > 0 it is
-			// a window that would splice records from a previous tap onto
-			// fresh ones. Both are skipped.
-			continue
-		}
-		start := end + 1 - l
-		for i := uint64(0); i < l; i++ {
-			tail[i] = ring[(start+i)&ringMask]
-		}
-		if m.MatchTail(tail) {
-			return true
+		for l := minL; l <= maxL; l++ {
+			if end+1 < base+l {
+				// Fewer than l keystrokes have been recorded since the
+				// baseline, so a window of this length ending here would
+				// have to start below it. With base == 0 (production) that
+				// is the "no complete window exists yet" case at session
+				// start; with base > 0 it is a window that would splice
+				// records from a previous tap onto fresh ones. Both are
+				// skipped — and since the condition only gets truer as l
+				// grows, every longer window at this end position is out
+				// too.
+				break
+			}
+			start := end + 1 - l
+			for i := uint64(0); i < l; i++ {
+				tail[i] = ring[(start+i)&ringMask]
+			}
+			if v.Match(tail[:l]) {
+				return true
+			}
 		}
 	}
 	return false
@@ -200,13 +253,28 @@ func matchAny(ring []matcher.KeyEvent, base, from, to uint64, tail []matcher.Key
 //     (capacity 1) means the supervisor is already exiting via some other
 //     path; a duplicate signal adds no value.
 //
+// `v` is a matcher.Verifier rather than a concrete *matcher.Sequence
+// because the secret has two storable forms — the plaintext `unlock_code`
+// and the salted digest `--set-password` writes — and nothing in the poll
+// loop should branch on which one is configured. The verifier's MinLen and
+// MaxLen are the only things this function needs to know about it.
+//
 // Cost per tick: `seq()` is a bare acquire-load on the C side, and the
 // `cur == lastSeq` early return skips the ring memcpy entirely. On an idle
 // machine — which is the whole point of this tool — every tick takes that
-// branch, so the steady-state cost is one cgo call per 10ms.
+// branch, so the steady-state cost is one cgo call per 10ms. The length
+// loop only costs anything on a tick that saw a keystroke, and for a
+// *Sequence it runs exactly one iteration, so the plaintext path is
+// unchanged; a *Digest pays up to hotkey.MaxSteps SHA-256 hashes over at
+// most 227 stack bytes each per new keystroke, which is noise next to the
+// 10ms tick.
 //
 // `ring` and `tail` are allocated once, before the loop, and reused on
-// every tick: nothing here allocates in the hot path.
+// every tick: nothing here allocates in the hot path. `tail` is sized for
+// the verifier's LONGEST admissible window and re-sliced inside matchAny,
+// so a *Digest — which offers every length from 1 to hotkey.MaxSteps —
+// costs one 32-record buffer for the life of the poller and nothing per
+// tick. For a *Sequence the buffer is Len() long, exactly as before.
 //
 // Logging discipline (this is a security property, not a style choice —
 // see the silent-on-wrong-input stance in the project constraints):
@@ -226,7 +294,7 @@ func pollSequence(
 	baseSeq uint64,
 	seq func() uint64,
 	snapshot func([]matcher.KeyEvent) uint64,
-	m *matcher.Sequence,
+	v matcher.Verifier,
 	sink chan<- struct{},
 	log *slog.Logger,
 ) {
@@ -234,9 +302,11 @@ func pollSequence(
 		log = slog.Default()
 	}
 
-	l := uint64(m.Len())
+	// The drop probe below and matchAny's own clamp must ask the same
+	// question, so both use the worst-case window length.
+	maxL := uint64(v.MaxLen())
 	ring := make([]matcher.KeyEvent, ringCap)
-	tail := make([]matcher.KeyEvent, m.Len())
+	tail := make([]matcher.KeyEvent, v.MaxLen())
 
 	// Zero both buffers on the way out, on BOTH exit paths (stop and match).
 	// eventtap_wipe_ring clears the C ring so the just-typed unlock code
@@ -275,11 +345,11 @@ func pollSequence(
 			// alongside the copy is the one that describes it.
 			cur = snapshot(ring)
 
-			if _, dropped := clampFrom(lastSeq, cur, l); dropped {
+			if _, dropped := clampFrom(lastSeq, cur, maxL); dropped {
 				log.Debug("eventtap: keystroke ring lagged; older events aged out unread")
 			}
 
-			if matchAny(ring, baseSeq, lastSeq, cur, tail, m) {
+			if matchAny(ring, baseSeq, lastSeq, cur, tail, v) {
 				select {
 				case sink <- struct{}{}:
 					log.Info("eventtap: unlock code matched, signalling exit")
