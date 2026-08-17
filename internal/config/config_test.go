@@ -1474,3 +1474,211 @@ func TestLoader_Load_LeadingPunctuationNeedsQuoting(t *testing.T) {
 		})
 	}
 }
+
+// (unlock_salt / unlock_hash) — Loader.Load() parses the salted-digest pair
+// written by --set-password. yaml.Strict() must ACCEPT both keys now that they
+// are declared struct fields, and must still REJECT an unknown key standing
+// next to them: adding fields widens the schema by exactly two names, it does
+// not open the file to arbitrary keys.
+//
+// The values are deliberately NOT validated here. Strict guards unknown KEYS
+// only, so junk base64 lands in the struct verbatim; ResolveUnlockCode is the
+// real gate (Task 4). These cases pin that separation — a future value check
+// smuggled into Load() would break them.
+func TestLoader_Load_ParsesUnlockSaltHash(t *testing.T) {
+	const (
+		validSalt = "8Qk2vN1pRr7sT0uW3xYz4A=="                     // 16 bytes
+		validHash = "n7Kx0Qe5RtY8uI3oP1aS2dF4gH6jK9lZ0xC7vB5nM8w=" // 32 bytes
+	)
+
+	tests := []struct {
+		name     string
+		yamlBody string
+		wantSalt string
+		wantHash string
+		wantErr  bool
+	}{
+		{
+			name:     "both keys → both parse verbatim",
+			yamlBody: "unlock_salt: " + validSalt + "\nunlock_hash: " + validHash + "\n",
+			wantSalt: validSalt,
+			wantHash: validHash,
+		},
+		{
+			name:     "keys absent → both empty (Go zero value)",
+			yamlBody: "unlock_code: s w o r d f i s h\n",
+			wantSalt: "",
+			wantHash: "",
+		},
+		{
+			name:     "salt without hash → parses; half a pair is ResolveUnlockCode's problem",
+			yamlBody: "unlock_salt: " + validSalt + "\n",
+			wantSalt: validSalt,
+			wantHash: "",
+		},
+		{
+			name:     "hash without salt → parses; half a pair is ResolveUnlockCode's problem",
+			yamlBody: "unlock_hash: " + validHash + "\n",
+			wantSalt: "",
+			wantHash: validHash,
+		},
+		{
+			name:     "junk values → parse fine; Strict guards KEYS, not VALUES",
+			yamlBody: "unlock_salt: not-base64!!\nunlock_hash: also-not-base64!!\n",
+			wantSalt: "not-base64!!",
+			wantHash: "also-not-base64!!",
+		},
+		{
+			name: "unknown key alongside the pair → still rejected by yaml.Strict",
+			yamlBody: "unlock_salt: " + validSalt + "\nunlock_hash: " + validHash +
+				"\nuntrusted_field: payload\n",
+			wantErr: true,
+		},
+		{
+			name: "near-miss key name alongside the pair → still rejected",
+			yamlBody: "unlock_salt: " + validSalt + "\nunlock_hash: " + validHash +
+				"\nunlock_length: 9\n",
+			wantErr: true,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			td := newTestDeps(t)
+			if err := os.MkdirAll(filepath.Dir(td.path), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(td.path, []byte(tt.yamlBody), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			cfg, created, err := td.loader.Load()
+			if tt.wantErr {
+				if err == nil {
+					t.Fatal("Load() = nil error, want strict-mode error for the unknown key")
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("Load() = %v, want nil", err)
+			}
+			if created {
+				t.Errorf("created = true, want false (file pre-existed)")
+			}
+			if cfg.UnlockSalt != tt.wantSalt {
+				t.Errorf("cfg.UnlockSalt = %q, want %q", cfg.UnlockSalt, tt.wantSalt)
+			}
+			if cfg.UnlockHash != tt.wantHash {
+				t.Errorf("cfg.UnlockHash = %q, want %q", cfg.UnlockHash, tt.wantHash)
+			}
+		})
+	}
+}
+
+// The new fields are inert until ResolveUnlockCode learns about them (Task 4):
+// they park in the struct and the precedence table behaves exactly as it did
+// before. Pinning this here means the Task 4 diff is visible as a behavior
+// change in THIS test rather than as a silent side effect — every case below
+// must be revisited when the hash source lands, and the "pair alone → error"
+// case flips from "neither key set" to a resolved *matcher.Digest.
+func TestResolveUnlockCode_SaltHashInertBeforeHashSource(t *testing.T) {
+	const (
+		validSalt = "8Qk2vN1pRr7sT0uW3xYz4A=="
+		validHash = "n7Kx0Qe5RtY8uI3oP1aS2dF4gH6jK9lZ0xC7vB5nM8w="
+	)
+
+	tests := []struct {
+		name       string
+		cfg        config.Config
+		wantLen    int
+		wantSource string
+		wantErr    bool
+	}{
+		{
+			name: "pair alongside unlock_code → unlock_code still wins, untouched",
+			cfg: config.Config{
+				UnlockCode: "s w o r d f i s h",
+				UnlockSalt: validSalt,
+				UnlockHash: validHash,
+			},
+			wantLen:    9,
+			wantSource: config.UnlockSourceCode,
+		},
+		{
+			name: "pair alongside the deprecated hotkey → hotkey still resolves",
+			cfg: config.Config{
+				Hotkey:     "Ctrl+Option+Cmd+X",
+				UnlockSalt: validSalt,
+				UnlockHash: validHash,
+			},
+			wantLen:    1,
+			wantSource: config.UnlockSourceHotkey,
+		},
+		{
+			name: "pair alongside BOTH → still the ambiguous-secret error",
+			cfg: config.Config{
+				UnlockCode: "s w o r d",
+				Hotkey:     "Ctrl+Cmd+X",
+				UnlockSalt: validSalt,
+				UnlockHash: validHash,
+			},
+			wantErr: true,
+		},
+		{
+			name: "pair alone → error, no source yet (hash source lands in Task 4)",
+			cfg: config.Config{
+				UnlockSalt: validSalt,
+				UnlockHash: validHash,
+			},
+			wantErr: true,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := tt.cfg
+			got, source, err := config.ResolveUnlockCode(&cfg)
+			if tt.wantErr {
+				if err == nil {
+					t.Fatal("ResolveUnlockCode() = nil error, want error")
+				}
+				if got != nil {
+					t.Errorf("steps = %v on error, want nil", got)
+				}
+				if source != tt.wantSource {
+					t.Errorf("source = %q on error, want %q", source, tt.wantSource)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("ResolveUnlockCode() = %v, want nil", err)
+			}
+			if len(got) != tt.wantLen {
+				t.Errorf("len(steps) = %d, want %d", len(got), tt.wantLen)
+			}
+			if source != tt.wantSource {
+				t.Errorf("source = %q, want %q", source, tt.wantSource)
+			}
+			// The resolver must not have mutated the caller's config.
+			if cfg.UnlockSalt != tt.cfg.UnlockSalt || cfg.UnlockHash != tt.cfg.UnlockHash {
+				t.Errorf("ResolveUnlockCode mutated the salt/hash pair: got (%q, %q), want (%q, %q)",
+					cfg.UnlockSalt, cfg.UnlockHash, tt.cfg.UnlockSalt, tt.cfg.UnlockHash)
+			}
+		})
+	}
+}
+
+// UnlockSourceHash names the key that actually carries the secret, and it must
+// be distinct from the other two — callers switch on these strings, so a
+// collision would silently merge two branches of the precedence table.
+func TestUnlockSourceHash_Constant(t *testing.T) {
+	if config.UnlockSourceHash != "unlock_hash" {
+		t.Errorf("UnlockSourceHash = %q, want %q (it must name the config key verbatim)",
+			config.UnlockSourceHash, "unlock_hash")
+	}
+	sources := []string{config.UnlockSourceCode, config.UnlockSourceHotkey, config.UnlockSourceHash}
+	seen := make(map[string]bool, len(sources))
+	for _, s := range sources {
+		if seen[s] {
+			t.Fatalf("duplicate unlock source constant %q", s)
+		}
+		seen[s] = true
+	}
+}

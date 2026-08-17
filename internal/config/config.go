@@ -56,11 +56,15 @@ const (
 	// under 5 hours.
 	WeakUnlockSteps = 6
 
-	// UnlockSourceCode / UnlockSourceHotkey name the config key an unlock code
-	// was resolved from. Returned by ResolveUnlockCode so callers can phrase
-	// diagnostics in terms of the key the user actually wrote.
+	// UnlockSourceCode / UnlockSourceHotkey / UnlockSourceHash name the config
+	// key an unlock code was resolved from. Returned by ResolveUnlockCode so
+	// callers can phrase diagnostics in terms of the key the user actually
+	// wrote. UnlockSourceHash names the salted-digest pair written by
+	// --set-password: the key that carries the secret is unlock_hash, with
+	// unlock_salt as its inseparable other half.
 	UnlockSourceCode   = "unlock_code"
 	UnlockSourceHotkey = "hotkey"
+	UnlockSourceHash   = "unlock_hash"
 
 	// OverlayStyleBlack is the v1 default look: a plain opaque-black shield.
 	// An absent/empty overlay_style normalizes to this (NormalizeOverlayStyle).
@@ -143,6 +147,23 @@ type Config struct {
 	// ValidateUnlockCode are the real gate, called from main.go before any
 	// window is created.
 	UnlockCode string `yaml:"unlock_code"`
+	// UnlockSalt is the base64 (StdEncoding) per-config random salt of the
+	// hashed unlock secret written by --set-password, matcher.SaltLen bytes
+	// when decoded. It carries no secret on its own and is meaningless without
+	// UnlockHash: half a pair is a resolve error, not a fallback.
+	// Like UnlockCode the VALUE is not validated by yaml.Strict() (which only
+	// guards unknown KEYS, so junk base64 parses fine) — ResolveUnlockCode is
+	// the real gate, called from main.go before any window is created.
+	UnlockSalt string `yaml:"unlock_salt"`
+	// UnlockHash is the base64 (StdEncoding) SHA-256 digest of the unlock
+	// sequence, 32 bytes when decoded — see matcher.HashSteps for the preimage.
+	// Set together with UnlockSalt by --set-password so the plaintext secret
+	// never reaches the config file. The stored digest deliberately does NOT
+	// record the sequence LENGTH, so nothing downstream can report or leak it.
+	// The VALUE is not validated by yaml.Strict() — ResolveUnlockCode decodes
+	// and length-checks both halves, and its errors name the KEY without ever
+	// echoing the value.
+	UnlockHash string `yaml:"unlock_hash"`
 	// OverlayStyle selects the overlay look. Absent/empty => "black" (v1
 	// default, via NormalizeOverlayStyle); the only valid non-empty values are
 	// "black", "matrix", "terminal", "dvd", "glass" and "none" ("none" = caffeinate-only
