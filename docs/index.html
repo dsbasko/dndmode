@@ -1,0 +1,881 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>dndmode — lock your unattended MacBook without killing the work it is doing</title>
+<meta name="description" content="A macOS CLI that shields every display, blocks the keyboard and trackpad at the HID level, keeps the Mac awake and silences it — while the long job you left running keeps going.">
+<meta name="theme-color" content="#12151a" media="(prefers-color-scheme: dark)">
+<meta name="theme-color" content="#fafaf9" media="(prefers-color-scheme: light)">
+<meta name="color-scheme" content="dark light">
+<meta property="og:type" content="website">
+<meta property="og:title" content="dndmode — lock your unattended MacBook without killing the work it is doing">
+<meta property="og:description" content="A macOS CLI that shields every display, blocks the keyboard and trackpad at the HID level, keeps the Mac awake and silences it — while the long job you left running keeps going.">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 20 20'%3E%3Cpath d='M10 1.6 17.4 4.6v5.6c0 4.4-3 7.2-7.4 8.2-4.4-1-7.4-3.8-7.4-8.2V4.6Z' fill='%2338bdf8'/%3E%3C/svg%3E">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans:wght@400;500;600&family=Instrument+Serif:ital@0;1&display=swap">
+<link rel="stylesheet" href="styles.css">
+</head>
+<body>
+
+<a class="skip" href="#top">Skip to content</a>
+
+<header>
+  <div class="wrap bar">
+    <a class="wordmark" href="#top">dndmode</a>
+    <nav aria-label="Sections">
+      <a href="#why">Why</a>
+      <a href="#compare">vs caffeinate</a>
+      <a href="#how">How it works</a>
+      <a href="#styles">Styles</a>
+      <a href="#unlock">Unlock code</a>
+      <a href="#install">Install</a>
+      <a href="#cli">CLI</a>
+      <a href="#config">Config</a>
+      <a href="#exit">Exit codes</a>
+      <a href="#threat">Threat model</a>
+      <a href="#limits">Limits</a>
+    </nav>
+    <a class="gh" href="https://github.com/dsbasko/dndmode">GitHub</a>
+  </div>
+</header>
+
+<main id="top">
+
+<section>
+  <div class="wrap">
+    <div class="hero">
+      <div class="hero-col">
+        <p class="eyebrow">macOS 14+ &middot; Apple Silicon &middot; foreground CLI</p>
+        <h1>Lock your unattended MacBook without killing the work it is doing.</h1>
+        <p class="lead" style="max-width:52ch">One command covers every display with a full-screen shield, blocks the keyboard and trackpad at the HID level, keeps the Mac awake and silences it &mdash; while the long job you left running never notices.</p>
+        <div class="term" data-copy="brew install dsbasko/tap/dndmode">
+          <div><span class="p">$</span> brew install dsbasko/tap/dndmode</div>
+          <div><span class="p">$</span> dndmode <span class="c">&nbsp;&nbsp;# lock now, until the unlock code is typed</span></div>
+          <div><span class="p">$</span> dndmode --timer 1h <span class="c">&nbsp;&nbsp;# or auto-unlock in an hour</span></div>
+        </div>
+        <div style="display:flex;flex-wrap:wrap;gap:10px">
+          <span class="badge">macOS 14+ &middot; arm64</span>
+          <span class="badge">Go 1.26 + cgo</span>
+          <span class="badge"><span class="dot"></span>Zero network calls</span>
+          <span class="badge">MIT</span>
+        </div>
+      </div>
+      <div style="position:relative">
+        <div class="screen">
+          <svg viewBox="0 0 520 344" width="100%" style="display:block" role="img" aria-label="A MacBook with a black shield covering the screen">
+            <defs><radialGradient id="vig" cx="50%" cy="42%" r="62%"><stop offset="0%" stop-color="oklch(0.20 0.008 250)"/><stop offset="100%" stop-color="oklch(0.10 0.004 250)"/></radialGradient></defs>
+            <rect x="46" y="8" width="428" height="272" rx="12" fill="oklch(0.235 0.008 250)"/>
+            <rect x="55" y="17" width="410" height="254" rx="6" fill="url(#vig)"/>
+            <rect x="55" y="17" width="410" height="254" rx="6" fill="none" stroke="oklch(0.30 0.010 250)"/>
+            <rect x="243" y="21" width="34" height="5" rx="2.5" fill="oklch(0.16 0.006 250)"/>
+            <path d="M14 292 h492 l-14 26 a10 10 0 0 1 -9 6 H37 a10 10 0 0 1 -9 -6 Z" fill="oklch(0.255 0.008 250)"/>
+            <rect x="46" y="280" width="428" height="12" fill="oklch(0.215 0.008 250)"/>
+            <rect x="222" y="283" width="76" height="4" rx="2" fill="oklch(0.16 0.006 250)"/>
+          </svg>
+          <div class="label">shield up</div>
+        </div>
+        <div class="job">
+          <div class="top">
+            <span class="pulse dot"></span>
+            <span class="mono" style="font-size:11px;letter-spacing:.14em;text-transform:uppercase;color:var(--ink2)">agent running</span>
+            <span class="mono" style="margin-left:auto;font-size:11px;color:var(--ink3)">02:14:07</span>
+          </div>
+          <div class="log">
+            <div>go build ./... <span style="color:var(--ink2)">ok</span></div>
+            <div>go test -race <span style="color:var(--ink2)">428 passed</span></div>
+            <div>writing patch <span class="caret">&#9608;</span></div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div class="strip">
+      <div><p class="eyebrow" style="padding-bottom:8px">Shield</p><p style="font-size:14px;color:var(--ink2)">One window per display, above the screen saver.</p></div>
+      <div><p class="eyebrow" style="padding-bottom:8px">Input</p><p style="font-size:14px;color:var(--ink2)">Two event taps. Nothing reaches WindowServer.</p></div>
+      <div><p class="eyebrow" style="padding-bottom:8px">Awake</p><p style="font-size:14px;color:var(--ink2)">One IOKit power assertion, released on exit.</p></div>
+      <div><p class="eyebrow" style="padding-bottom:8px">Silence</p><p style="font-size:14px;color:var(--ink2)">Audio muted and restored. Banners never show.</p></div>
+    </div>
+    <p class="small" style="padding-top:24px">No daemon, no launchd, no menu-bar icon. You run it, you watch it, you end it.</p>
+  </div>
+</section>
+
+<section id="why">
+  <div class="wrap">
+    <div class="intro">
+      <p class="eyebrow">The problem</p>
+      <h2>You have to leave. The job cannot.</h2>
+      <p class="lead">An AI agent is running in YOLO mode, or a build, or a render. You need to walk away from the laptop for two hours. Until now there were two options, and both cost you something.</p>
+    </div>
+    <div class="g3 head-gap">
+      <div class="card">
+        <p class="eyebrow" style="color:var(--ink2)">Option A</p>
+        <h3 class="h4">Lock the screen</h3>
+        <p style="font-size:14.5px"><code>Ctrl+Cmd+Q</code> is safe. But macOS may suspend or throttle the session behind the lock, and a black login screen is an invitation to walk away and forget the job is even alive.</p>
+        <p class="small push no">May cost you the work.</p>
+      </div>
+      <div class="card">
+        <p class="eyebrow" style="color:var(--ink2)">Option B</p>
+        <h3 class="h4">Leave it open</h3>
+        <p style="font-size:14.5px">The job keeps running at full speed. So does anyone who walks past: a keypress, a click on a confirmation dialog, a read of whatever is on screen. Your terminal is a public terminal now.</p>
+        <p class="small push no">Costs you the machine.</p>
+      </div>
+      <div class="card" style="border-color:var(--accent);background:color-mix(in oklch,var(--accent) 7%,var(--bg2))">
+        <p class="eyebrow" style="color:var(--accent)">Option C</p>
+        <h3 class="h4">dndmode</h3>
+        <p style="font-size:14.5px">The job runs untouched at full speed, and the machine is covered on every display and inert to keyboard and trackpad until you come back and type your unlock code. Everything is exactly where you left it.</p>
+        <p class="small push yes" style="border-color:color-mix(in oklch,var(--accent) 30%,transparent)">Costs you nothing but the typing.</p>
+      </div>
+    </div>
+    <p class="small" style="padding-top:32px;max-width:78ch">dndmode is a soft-lock for cooperative spaces &mdash; home, an office, a coworking desk. It is not hardware-grade protection, and the <a href="#threat">threat model</a> says so in detail rather than hiding it.</p>
+  </div>
+</section>
+<section id="compare">
+  <div class="wrap">
+    <div class="intro">
+      <p class="eyebrow">dndmode vs the alternatives</p>
+      <h2>caffeinate does one of the five jobs.</h2>
+      <p class="lead"><code>caffeinate</code> keeps the Mac from falling asleep. That is all it does &mdash; and it is genuinely all it claims. The screen stays lit, unlocked and fully interactive for anyone who walks past it.</p>
+    </div>
+    <div class="head-gap">
+      <table class="spec"><caption class="sr">How dndmode compares with caffeinate and the built-in screen lock</caption>
+        <thead><tr><th scope="col" style="width:44%"><span class="sr">Capability</span></th><th scope="col" class="ctr">caffeinate</th><th scope="col" class="ctr">Screen lock<br><span style="letter-spacing:.02em;text-transform:none;font-size:11px">Ctrl+Cmd+Q</span></th><th scope="col" class="ctr" style="color:var(--accent)">dndmode</th></tr></thead>
+        <tbody>
+        <tr><th scope="row" class="lead-cell">Long background job keeps running</th><td class="ctr" data-label="caffeinate"><span class="stack"><span class="yes" style="display:inline-flex" role="img" aria-label="yes"><svg width="15" height="15" viewBox="0 0 15 15" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" style="display:block"><path d="M3 8 6 11 12 4"/></svg></span></span></td><td class="ctr" data-label="screen lock"><span class="stack"><span class="warn" style="display:inline-flex" role="img" aria-label="partial"><svg width="15" height="15" viewBox="0 0 15 15" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" style="display:block"><path d="M3 7.5c1.5-2.6 3-2.6 4.5 0s3 2.6 4.5 0"/></svg></span><span class="note">may throttle</span></span></td><td class="ctr" data-label="dndmode"><span class="stack"><span class="yes" style="display:inline-flex" role="img" aria-label="yes"><svg width="15" height="15" viewBox="0 0 15 15" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" style="display:block"><path d="M3 8 6 11 12 4"/></svg></span><span class="note">full speed</span></span></td></tr>
+        <tr><th scope="row" class="lead-cell">Screen hidden from bystanders</th><td class="ctr" data-label="caffeinate"><span class="stack"><span class="no" style="display:inline-flex" role="img" aria-label="no"><svg width="15" height="15" viewBox="0 0 15 15" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" style="display:block"><path d="M4 4l7 7M11 4l-7 7"/></svg></span><span class="note">fully visible</span></span></td><td class="ctr" data-label="screen lock"><span class="stack"><span class="yes" style="display:inline-flex" role="img" aria-label="yes"><svg width="15" height="15" viewBox="0 0 15 15" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" style="display:block"><path d="M3 8 6 11 12 4"/></svg></span></span></td><td class="ctr" data-label="dndmode"><span class="stack"><span class="yes" style="display:inline-flex" role="img" aria-label="yes"><svg width="15" height="15" viewBox="0 0 15 15" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" style="display:block"><path d="M3 8 6 11 12 4"/></svg></span><span class="note">every display</span></span></td></tr>
+        <tr><th scope="row" class="lead-cell">Keyboard blocked</th><td class="ctr" data-label="caffeinate"><span class="stack"><span class="no" style="display:inline-flex" role="img" aria-label="no"><svg width="15" height="15" viewBox="0 0 15 15" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" style="display:block"><path d="M4 4l7 7M11 4l-7 7"/></svg></span></span></td><td class="ctr" data-label="screen lock"><span class="stack"><span class="yes" style="display:inline-flex" role="img" aria-label="yes"><svg width="15" height="15" viewBox="0 0 15 15" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" style="display:block"><path d="M3 8 6 11 12 4"/></svg></span></span></td><td class="ctr" data-label="dndmode"><span class="stack"><span class="yes" style="display:inline-flex" role="img" aria-label="yes"><svg width="15" height="15" viewBox="0 0 15 15" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" style="display:block"><path d="M3 8 6 11 12 4"/></svg></span><span class="note">HID level</span></span></td></tr>
+        <tr><th scope="row" class="lead-cell">Trackpad and multi-finger gestures blocked</th><td class="ctr" data-label="caffeinate"><span class="stack"><span class="no" style="display:inline-flex" role="img" aria-label="no"><svg width="15" height="15" viewBox="0 0 15 15" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" style="display:block"><path d="M4 4l7 7M11 4l-7 7"/></svg></span></span></td><td class="ctr" data-label="screen lock"><span class="stack"><span class="yes" style="display:inline-flex" role="img" aria-label="yes"><svg width="15" height="15" viewBox="0 0 15 15" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" style="display:block"><path d="M3 8 6 11 12 4"/></svg></span></span></td><td class="ctr" data-label="dndmode"><span class="stack"><span class="yes" style="display:inline-flex" role="img" aria-label="yes"><svg width="15" height="15" viewBox="0 0 15 15" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" style="display:block"><path d="M3 8 6 11 12 4"/></svg></span><span class="note">session tap</span></span></td></tr>
+        <tr><th scope="row" class="lead-cell">Mission Control / Spotlight / Cmd+Tab / Force Quit covered</th><td class="ctr" data-label="caffeinate"><span class="stack"><span class="no" style="display:inline-flex" role="img" aria-label="no"><svg width="15" height="15" viewBox="0 0 15 15" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" style="display:block"><path d="M4 4l7 7M11 4l-7 7"/></svg></span></span></td><td class="ctr" data-label="screen lock"><span class="stack"><span class="yes" style="display:inline-flex" role="img" aria-label="yes"><svg width="15" height="15" viewBox="0 0 15 15" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" style="display:block"><path d="M3 8 6 11 12 4"/></svg></span></span></td><td class="ctr" data-label="dndmode"><span class="stack"><span class="yes" style="display:inline-flex" role="img" aria-label="yes"><svg width="15" height="15" viewBox="0 0 15 15" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" style="display:block"><path d="M3 8 6 11 12 4"/></svg></span><span class="note">shield level</span></span></td></tr>
+        <tr><th scope="row" class="lead-cell">Notification banners and sounds suppressed</th><td class="ctr" data-label="caffeinate"><span class="stack"><span class="no" style="display:inline-flex" role="img" aria-label="no"><svg width="15" height="15" viewBox="0 0 15 15" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" style="display:block"><path d="M4 4l7 7M11 4l-7 7"/></svg></span></span></td><td class="ctr" data-label="screen lock"><span class="stack"><span class="yes" style="display:inline-flex" role="img" aria-label="yes"><svg width="15" height="15" viewBox="0 0 15 15" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" style="display:block"><path d="M3 8 6 11 12 4"/></svg></span></span></td><td class="ctr" data-label="dndmode"><span class="stack"><span class="yes" style="display:inline-flex" role="img" aria-label="yes"><svg width="15" height="15" viewBox="0 0 15 15" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" style="display:block"><path d="M3 8 6 11 12 4"/></svg></span><span class="note">mute + shield</span></span></td></tr>
+        <tr><th scope="row" class="lead-cell">Machine stays awake</th><td class="ctr" data-label="caffeinate"><span class="stack"><span class="yes" style="display:inline-flex" role="img" aria-label="yes"><svg width="15" height="15" viewBox="0 0 15 15" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" style="display:block"><path d="M3 8 6 11 12 4"/></svg></span></span></td><td class="ctr" data-label="screen lock"><span class="stack"><span class="warn" style="display:inline-flex" role="img" aria-label="partial"><svg width="15" height="15" viewBox="0 0 15 15" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" style="display:block"><path d="M3 7.5c1.5-2.6 3-2.6 4.5 0s3 2.6 4.5 0"/></svg></span><span class="note">depends</span></span></td><td class="ctr" data-label="dndmode"><span class="stack"><span class="yes" style="display:inline-flex" role="img" aria-label="yes"><svg width="15" height="15" viewBox="0 0 15 15" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" style="display:block"><path d="M3 8 6 11 12 4"/></svg></span><span class="note">IOPMAssertion</span></span></td></tr>
+        <tr><th scope="row" class="lead-cell">Covers every attached display</th><td class="ctr" data-label="caffeinate"><span class="stack"><span class="k mono" style="font-size:12px">n/a</span></span></td><td class="ctr" data-label="screen lock"><span class="stack"><span class="yes" style="display:inline-flex" role="img" aria-label="yes"><svg width="15" height="15" viewBox="0 0 15 15" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" style="display:block"><path d="M3 8 6 11 12 4"/></svg></span></span></td><td class="ctr" data-label="dndmode"><span class="stack"><span class="yes" style="display:inline-flex" role="img" aria-label="yes"><svg width="15" height="15" viewBox="0 0 15 15" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" style="display:block"><path d="M3 8 6 11 12 4"/></svg></span><span class="note">hot-plug 250 ms</span></span></td></tr>
+        <tr><th scope="row" class="lead-cell">Survives kill -9 without leaving state behind</th><td class="ctr" data-label="caffeinate"><span class="stack"><span class="yes" style="display:inline-flex" role="img" aria-label="yes"><svg width="15" height="15" viewBox="0 0 15 15" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" style="display:block"><path d="M3 8 6 11 12 4"/></svg></span><span class="note">self-releases</span></span></td><td class="ctr" data-label="screen lock"><span class="stack"><span class="k mono" style="font-size:12px">n/a</span></span></td><td class="ctr" data-label="dndmode"><span class="stack"><span class="yes" style="display:inline-flex" role="img" aria-label="yes"><svg width="15" height="15" viewBox="0 0 15 15" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" style="display:block"><path d="M3 8 6 11 12 4"/></svg></span><span class="note">runtime.json</span></span></td></tr>
+        <tr><th scope="row" class="lead-cell">Zero network calls</th><td class="ctr" data-label="caffeinate"><span class="stack"><span class="yes" style="display:inline-flex" role="img" aria-label="yes"><svg width="15" height="15" viewBox="0 0 15 15" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" style="display:block"><path d="M3 8 6 11 12 4"/></svg></span><span class="note">zero</span></span></td><td class="ctr" data-label="screen lock"><span class="stack"><span class="yes" style="display:inline-flex" role="img" aria-label="yes"><svg width="15" height="15" viewBox="0 0 15 15" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" style="display:block"><path d="M3 8 6 11 12 4"/></svg></span><span class="note">zero</span></span></td><td class="ctr" data-label="dndmode"><span class="stack"><span class="yes" style="display:inline-flex" role="img" aria-label="yes"><svg width="15" height="15" viewBox="0 0 15 15" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" style="display:block"><path d="M3 8 6 11 12 4"/></svg></span><span class="note">zero, auditable</span></span></td></tr>
+        </tbody>
+      </table>
+    </div>
+    <div class="split head-gap">
+      <div style="display:flex;flex-direction:column;gap:14px">
+        <h3>There is a mode where dndmode is just caffeinate.</h3>
+        <p style="font-size:14.5px">Run <code>dndmode --style none</code> and you get awake-only mode: no overlay, no input blocking, no mute, no Focus, and no Accessibility permission required. Under the hood that mode literally shells out to caffeinate, tying the assertion to dndmode&#39;s own pid so it self-releases even after a hard kill.</p>
+        <p class="small">So the honest framing is not &ldquo;better than caffeinate&rdquo;. It is: staying awake is one of five jobs. dndmode normally does that one itself with an IOKit power assertion, and the other four are jobs caffeinate was never meant to do.</p>
+      </div>
+      <div class="term">
+        <div class="c"># the one mode that shells out to caffeinate</div>
+        <div><span class="p">$</span> caffeinate -d -i -s -w &lt;pid&gt;</div>
+        <div style="height:8px"></div>
+        <div class="c"># every other mode, in-process</div>
+        <div><span class="acc">+</span> CGShieldingWindowLevel overlay</div>
+        <div><span class="acc">+</span> kCGHIDEventTap input lock</div>
+        <div><span class="acc">+</span> IOPMAssertion awake lock</div>
+        <div><span class="acc">+</span> audio mute, state-aware</div>
+        <div><span class="acc">+</span> runtime.json crash recovery</div>
+      </div>
+    </div>
+  </div>
+</section>
+<section id="how">
+  <div class="wrap">
+    <div class="intro">
+      <p class="eyebrow">How it works</p>
+      <h2>Four layers, and a fifth one underneath them.</h2>
+      <p class="lead">Every layer is a documented macOS API doing exactly one job. The interesting one is the input lock, because the way it recognises your unlock code is also the reason a wrong code is indistinguishable from silence.</p>
+    </div>
+
+    <div class="head-gap">
+      <p class="eyebrow" style="padding-bottom:20px">Input path &mdash; matching happens after interception, never inside it</p>
+      <svg class="diagram" viewBox="0 0 1088 268" width="100%" style="display:block;font-family:'IBM Plex Mono',ui-monospace,monospace" role="img" aria-label="Input events enter the HID event tap, which returns NULL so WindowServer never sees them, while a copy of the modifier flags and key code goes to a 64-entry ring buffer that a Go matcher polls every 10 milliseconds">
+        <defs>
+          <marker id="ah" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0 0 10 5 0 10z" fill="oklch(0.600 0.010 250)"/></marker>
+          <marker id="aha" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0 0 10 5 0 10z" fill="oklch(0.72 0.13 215)"/></marker>
+        </defs>
+        <rect x="0" y="30" width="196" height="66" fill="var(--bg2)" stroke="var(--line)"/>
+        <text x="18" y="56" fill="var(--ink)" font-size="12.5">Keyboard &#183; Trackpad</text>
+        <text x="18" y="76" fill="var(--ink3)" font-size="11">15 event types</text>
+        <line x1="196" y1="63" x2="240" y2="63" stroke="oklch(0.600 0.010 250)" stroke-width="1.2" marker-end="url(#ah)"/>
+        <rect x="248" y="8" width="266" height="110" fill="var(--bg2)" stroke="var(--accent)"/>
+        <text x="268" y="36" fill="var(--accent)" font-size="12.5">CGEventTapCreate</text>
+        <text x="268" y="58" fill="var(--ink2)" font-size="11">kCGHIDEventTap</text>
+        <text x="268" y="76" fill="var(--ink2)" font-size="11">kCGHeadInsertEventTap</text>
+        <text x="268" y="94" fill="var(--ink2)" font-size="11">kCGEventTapOptionDefault</text>
+        <line x1="514" y1="63" x2="596" y2="63" stroke="oklch(0.72 0.13 25)" stroke-width="1.2" stroke-dasharray="5 4"/>
+        <text x="522" y="52" fill="oklch(0.72 0.13 25)" font-size="11">return NULL</text>
+        <g stroke="oklch(0.72 0.13 25)" stroke-width="1.6" stroke-linecap="round"><path d="M598 55 610 71M610 55 598 71"/></g>
+        <rect x="628" y="30" width="196" height="66" fill="none" stroke="var(--linesoft)" stroke-dasharray="4 4"/>
+        <text x="646" y="56" fill="var(--ink3)" font-size="12.5">WindowServer</text>
+        <text x="646" y="76" fill="var(--ink3)" font-size="11">never sees the event</text>
+        <line x1="381" y1="118" x2="381" y2="160" stroke="oklch(0.600 0.010 250)" stroke-width="1.2" marker-end="url(#ah)"/>
+        <text x="393" y="144" fill="var(--ink3)" font-size="11">copy of (flags, keycode)</text>
+        <rect x="248" y="168" width="266" height="76" fill="var(--void)" stroke="var(--line)"/>
+        <text x="268" y="196" fill="var(--ink)" font-size="12.5">64-entry ring buffer</text>
+        <text x="268" y="216" fill="var(--ink3)" font-size="11">in memory, zero Go calls in</text>
+        <text x="268" y="232" fill="var(--ink3)" font-size="11">the C callback; autorepeat dropped</text>
+        <line x1="514" y1="206" x2="596" y2="206" stroke="oklch(0.600 0.010 250)" stroke-width="1.2" marker-end="url(#ah)"/>
+        <text x="524" y="196" fill="var(--ink3)" font-size="11">poll 10 ms</text>
+        <rect x="604" y="168" width="220" height="76" fill="var(--void)" stroke="var(--line)"/>
+        <text x="624" y="196" fill="var(--ink)" font-size="12.5">Go matcher</text>
+        <text x="624" y="216" fill="var(--ink3)" font-size="11">is the tail equal to</text>
+        <text x="624" y="232" fill="var(--ink3)" font-size="11">the unlock code?</text>
+        <line x1="824" y1="206" x2="884" y2="206" stroke="oklch(0.72 0.13 215)" stroke-width="1.2" marker-end="url(#aha)"/>
+        <rect x="892" y="168" width="196" height="76" fill="var(--bg2)" stroke="var(--accent)"/>
+        <text x="912" y="196" fill="var(--accent)" font-size="12.5">session ends</text>
+        <text x="912" y="216" fill="var(--ink3)" font-size="11">shield down, exit 0</text>
+      </svg>
+
+      <ol class="diagram-mobile" style="margin:0;padding:0;list-style:none;counter-reset:s">
+        <li style="padding:14px 0;border-top:1px solid var(--linesoft)"><p class="mono" style="font-size:12.5px;color:var(--ink)">Keyboard &middot; Trackpad</p><p class="small">15 event types, including media keys.</p></li>
+        <li style="padding:14px 0;border-top:1px solid var(--linesoft)"><p class="mono" style="font-size:12.5px;color:var(--accent)">CGEventTapCreate</p><p class="small">kCGHIDEventTap, head-inserted, suppression-capable.</p></li>
+        <li style="padding:14px 0;border-top:1px solid var(--linesoft)"><p class="mono" style="font-size:12.5px;color:var(--no)">return NULL &rarr; WindowServer never sees the event</p></li>
+        <li style="padding:14px 0;border-top:1px solid var(--linesoft)"><p class="mono" style="font-size:12.5px;color:var(--ink)">64-entry ring buffer</p><p class="small">A copy of (flags, keycode) only. Zero Go calls in the C callback; autorepeat dropped.</p></li>
+        <li style="padding:14px 0;border-top:1px solid var(--linesoft)"><p class="mono" style="font-size:12.5px;color:var(--ink)">Go matcher, every 10 ms</p><p class="small">Is the tail of what was typed equal to the unlock code?</p></li>
+        <li style="padding:14px 0;border-top:1px solid var(--linesoft);border-bottom:1px solid var(--linesoft)"><p class="mono" style="font-size:12.5px;color:var(--accent)">session ends &mdash; shield down, exit 0</p></li>
+      </ol>
+
+      <p class="small" style="padding-top:18px;max-width:88ch">No event ever passes the filter &mdash; not even the keys of your own unlock code. Because the match is computed after the fact rather than in the interception path, there is no &ldquo;correct key&rdquo; that behaves differently from a wrong one, and no keystroke ever surfaces in the app underneath.</p>
+    </div>
+
+    <div class="head-gap" style="border-top:1px solid var(--line);padding-top:36px">
+      <div class="layer">
+        <div><p class="eyebrow" style="color:var(--accent)">Layer 1</p><h3 class="h4" style="padding-top:6px">Shield overlay</h3></div>
+        <p style="font-size:14.5px">One borderless <code>NSWindow</code> per attached display, drawn above the screen saver. That places the shield over the menu bar, Dock, Mission Control, Spotlight, Cmd+Tab and the Force Quit dialog, on every Space and next to full-screen apps. Plugging a display, changing resolution or rearranging monitors rebuilds the overlay within 250 ms. The system cursor is hidden.</p>
+        <div class="api"><div>CGShieldingWindowLevel()</div><div>canJoinAllSpaces</div><div>stationary</div><div>fullScreenAuxiliary</div><div>ignoresCycle</div></div>
+      </div>
+      <div class="layer">
+        <div><p class="eyebrow" style="color:var(--accent)">Layer 2</p><h3 class="h4" style="padding-top:6px">Input lock</h3></div>
+        <p style="font-size:14.5px">Two event taps, both head-inserted and suppression-capable rather than listen-only. The primary one sits at the HID level and drops everything. A second tap at the session level swallows the gesture stream WindowServer synthesises past the HID point, so three- and four-finger swipes and the Launchpad pinch die before the Dock sees them. A watchdog probes every 5 s and re-enables both taps if macOS silently disabled them; after five failed attempts it ends the session with its own exit code, and an <code>NSWorkspace</code> observer re-arms them after sleep or fast user switching.</p>
+        <div class="api"><div>kCGHIDEventTap</div><div>kCGSessionEventTap</div><div>CGEventTapIsEnabled</div><div>watchdog 5 s &middot; 5 retries</div><div>exit 4 on give-up</div></div>
+      </div>
+      <div class="layer">
+        <div><p class="eyebrow" style="color:var(--accent)">Layer 3</p><h3 class="h4" style="padding-top:6px">Awake lock</h3></div>
+        <p style="font-size:14.5px">One IOKit power assertion named <code>dndmode active</code>, visible in <code>pmset -g assertions</code> so you can always see who is holding the machine up. By default it keeps the display lit as well; flip <code>allow_display_sleep</code> and the panel is allowed to idle off while the system keeps running.</p>
+        <div class="api"><div>IOPMAssertionCreateWithName</div><div>kIOPMAssertPreventUserIdleDisplaySleep</div><div>kIOPMAssertPreventUserIdleSystemSleep</div></div>
+      </div>
+      <div class="layer">
+        <div><p class="eyebrow" style="color:var(--accent)">Layer 4</p><h3 class="h4" style="padding-top:6px">Silence</h3></div>
+        <p style="font-size:14.5px">System audio is muted for the session and restored on exit. The mute is state-aware: it records whether audio was already muted before the session and never unmutes what it did not mute. Notification banners never show because the shield sits above Notification Center. Do Not Disturb is a separate opt-in, off by default &mdash; macOS syncs Focus to your iPhone over iCloud, and there is no API to enable it on this device only.</p>
+        <div class="api"><div>mute: true</div><div>focus: false</div><div>shortcuts run dndmode-on</div><div>shortcuts run dndmode-off</div></div>
+      </div>
+      <div class="layer">
+        <div><p class="eyebrow" style="color:var(--warn)">Underneath</p><h3 class="h4" style="padding-top:6px">Crash safety</h3></div>
+        <p style="font-size:14.5px">A snapshot records the pid, the assertion id and the prior audio and Focus state. A second instance detects the first and refuses to start. If a session is killed with <code>kill -9</code>, the next launch reads the snapshot, releases the orphaned power assertion by its exact id, conditionally restores audio and Focus, and deletes the file &mdash; so a hard kill never leaves the Mac stuck awake or muted.</p>
+        <div class="api"><div>~/.config/dndmode/runtime.json</div><div>pid &middot; assertion id</div><div>prior audio &middot; prior focus</div><div>exit 5 on second instance</div></div>
+      </div>
+    </div>
+  </div>
+</section>
+<section id="styles">
+  <div class="wrap">
+    <div class="intro">
+      <p class="eyebrow">Overlay styles</p>
+      <h2>Six styles. Four block identically, one bleeds, one is not a shield at all.</h2>
+      <p class="lead">The animated styles are a purely cosmetic content swap on top of the same opaque black shield &mdash; same window level, same HID input lock, same no-bleed-through guarantee. Only <code>glass</code> trades that guarantee, and only <code>none</code> drops the shield entirely.</p>
+    </div>
+
+    <div class="tiles head-gap">
+      <div class="tile">
+        <div class="preview"><div style="position:absolute;inset:0;background:radial-gradient(120% 90% at 50% 45%,oklch(0.17 0.006 250) 0%,oklch(0.06 0.002 250) 100%)"></div></div>
+        <p class="name"><b>black</b><span>default</span></p>
+        <p class="small">Opaque black shield. Nothing bleeds through, nothing moves, nothing to look at &mdash; which is the point.</p>
+      </div>
+      <div class="tile">
+        <div class="preview rain"><span style="left:5%;animation-duration:3.1s;animation-delay:-0.4s;opacity:.9">7A0F31C8D2K9</span><span style="left:14%;animation-duration:4.4s;animation-delay:-2.1s;opacity:.6">4B7E20MX16C3</span><span style="left:23%;animation-duration:2.6s;animation-delay:-1.2s;opacity:.9">0D93FA5T7B21</span><span style="left:33%;animation-duration:5.2s;animation-delay:-3.4s;opacity:.5">C61X4E90ZQ82</span><span style="left:43%;animation-duration:3.6s;animation-delay:-0.9s;opacity:.8">9F2A7D40N5J1</span><span style="left:53%;animation-duration:4.9s;animation-delay:-2.7s;opacity:.5">1E85B3C7V0A6</span><span style="left:63%;animation-duration:2.9s;animation-delay:-1.7s;opacity:.9">B04C7F13R8D5</span><span style="left:73%;animation-duration:4.1s;animation-delay:-3.1s;opacity:.6">5A29E6H0F4C7</span><span style="left:83%;animation-duration:3.3s;animation-delay:-0.2s;opacity:.8">2C8B41D97E0G</span><span style="left:92%;animation-duration:5.6s;animation-delay:-4.2s;opacity:.4">6F30A8C25B14</span><div style="position:absolute;inset:0;background:linear-gradient(180deg,oklch(0 0 0/0.55) 0%,oklch(0 0 0/0) 30%,oklch(0 0 0/0) 70%,oklch(0 0 0/0.6) 100%)"></div></div>
+        <p class="name"><b>matrix</b></p>
+        <p class="small">Green digital rain over the same opaque shield. Cosmetic only; every blocking guarantee is identical to <code>black</code>.</p>
+      </div>
+      <div class="tile">
+        <div class="preview" style="background:oklch(0.135 0.008 265);padding:16px 18px">
+          <div class="mono" style="font-size:10.5px;line-height:1.85;white-space:nowrap">
+            <div><span class="t-kw">func</span> <span class="t-key">watchTaps</span>(d time.Duration) {</div>
+            <div>&nbsp;&nbsp;t := time.<span class="t-key">NewTicker</span>(d)</div>
+            <div>&nbsp;&nbsp;<span class="t-kw">defer</span> t.<span class="t-key">Stop</span>()</div>
+            <div>&nbsp;&nbsp;<span class="t-kw">for</span> <span class="t-kw">range</span> t.C {</div>
+            <div>&nbsp;&nbsp;&nbsp;&nbsp;<span class="t-kw">if</span> !tap.<span class="t-key">Enabled</span>() {</div>
+            <div>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;tap.<span class="t-key">Enable</span>(<span class="t-num">true</span>)<span class="t-com"> // re-arm</span></div>
+            <div>&nbsp;&nbsp;&nbsp;&nbsp;}</div>
+            <div>&nbsp;&nbsp;<span class="typeline">}<span class="t-com"> // silent</span></span><span class="caret">&#9608;</span></div>
+          </div>
+        </div>
+        <p class="name"><b>terminal</b><span>go &middot; python &middot; typescript &middot; rust</span></p>
+        <p class="small">Synthetic source types itself out at ~160&nbsp;WPM behind a blinking caret, then scrolls. Compiled in &mdash; no real file, project or system data is ever read or shown.</p>
+      </div>
+      <div class="tile">
+        <div class="preview"><div class="dvd" style="width:68px;height:30px"><span>LOGO</span></div></div>
+        <p class="name"><b>dvd</b></p>
+        <p class="small">The old DVD-player screensaver: the logo drifts, bounces off every edge, changes color on each hit, and flashes white on a corner. One per display, each on its own path.</p>
+      </div>
+      <div class="tile">
+        <div class="preview" style="background:oklch(0.28 0.05 265)"><div style="position:absolute;inset:0;background:radial-gradient(60% 70% at 22% 30%,oklch(0.55 0.14 250) 0%,transparent 70%),radial-gradient(50% 60% at 78% 74%,oklch(0.52 0.12 320) 0%,transparent 72%)"></div><div style="position:absolute;left:34px;top:44px;width:190px;height:112px;background:oklch(0.18 0.01 260);border:1px solid oklch(0.36 0.02 260)"><div style="height:16px;background:oklch(0.24 0.01 260);border-bottom:1px solid oklch(0.34 0.02 260)"></div><div style="padding:11px 12px;display:flex;flex-direction:column;gap:7px"><div style="height:5px;width:70%;background:oklch(0.44 0.02 260)"></div><div style="height:5px;width:88%;background:oklch(0.38 0.02 260)"></div><div style="height:5px;width:52%;background:oklch(0.38 0.02 260)"></div><div style="height:5px;width:76%;background:oklch(0.32 0.02 260)"></div></div></div><div style="position:absolute;inset:0;backdrop-filter:blur(16px);-webkit-backdrop-filter:blur(16px);background:oklch(0.55 0.01 250 / 0.22)"></div></div>
+        <p class="name"><b>glass</b><span class="warn">bleeds through</span></p>
+        <p class="small">Frosted glass; the blurred desktop shows through by design. Input is still fully blocked. Blur radius is <code>glass_blur</code>, or <code>--style glass:24</code> for one run.</p>
+      </div>
+      <div class="tile">
+        <div class="preview" style="background:oklch(0.28 0.05 265)"><div style="position:absolute;inset:0;background:radial-gradient(60% 70% at 22% 30%,oklch(0.55 0.14 250) 0%,transparent 70%),radial-gradient(50% 60% at 78% 74%,oklch(0.52 0.12 320) 0%,transparent 72%)"></div><div style="position:absolute;left:34px;top:44px;width:190px;height:112px;background:oklch(0.18 0.01 260);border:1px solid oklch(0.36 0.02 260)"><div style="height:16px;background:oklch(0.24 0.01 260);border-bottom:1px solid oklch(0.34 0.02 260)"></div><div style="padding:11px 12px;display:flex;flex-direction:column;gap:7px"><div style="height:5px;width:70%;background:oklch(0.44 0.02 260)"></div><div style="height:5px;width:88%;background:oklch(0.38 0.02 260)"></div><div style="height:5px;width:52%;background:oklch(0.38 0.02 260)"></div><div style="height:5px;width:76%;background:oklch(0.32 0.02 260)"></div></div></div><div class="mono" style="position:absolute;left:0;right:0;bottom:12px;text-align:center;font-size:10px;letter-spacing:.22em;text-transform:uppercase;color:oklch(0.95 0 0 / 0.8)">no overlay &middot; awake only</div></div>
+        <p class="name"><b>none</b><span>no Accessibility needed</span></p>
+        <p class="small">Awake-only mode. No shield, no input lock, no mute, no Focus &mdash; a thin <code>caffeinate</code> wrapper. Exit with Ctrl-C or <code>--timer</code>; there is no unlock code because there is no tap to observe one.</p>
+      </div>
+    </div>
+
+    <div class="head-gap">
+      <table class="spec"><caption class="sr">The six overlay styles compared</caption>
+        <thead><tr><th scope="col" style="width:13%">Style</th><th scope="col" style="width:33%">What you see</th><th scope="col" class="ctr" style="width:13%">Bleeds through</th><th scope="col" class="ctr" style="width:13%">Input blocked</th><th scope="col" style="width:28%">Permissions needed</th></tr></thead>
+        <tbody>
+        <tr><th scope="row" class="m lead-cell">black</th><td data-label="Look">Opaque black shield. Default.</td><td class="ctr" data-label="Bleeds through">No</td><td class="ctr" data-label="Input blocked"><span class="yes">Yes</span></td><td data-label="Permissions">Accessibility + Input Monitoring</td></tr>
+        <tr><th scope="row" class="m lead-cell">matrix</th><td data-label="Look">Green digital rain, cosmetic.</td><td class="ctr" data-label="Bleeds through">No</td><td class="ctr" data-label="Input blocked"><span class="yes">Yes</span></td><td data-label="Permissions">Accessibility + Input Monitoring</td></tr>
+        <tr><th scope="row" class="m lead-cell">terminal</th><td data-label="Look">Self-typing synthetic source, cosmetic.</td><td class="ctr" data-label="Bleeds through">No</td><td class="ctr" data-label="Input blocked"><span class="yes">Yes</span></td><td data-label="Permissions">Accessibility + Input Monitoring</td></tr>
+        <tr><th scope="row" class="m lead-cell">dvd</th><td data-label="Look">Bouncing logo screensaver, cosmetic.</td><td class="ctr" data-label="Bleeds through">No</td><td class="ctr" data-label="Input blocked"><span class="yes">Yes</span></td><td data-label="Permissions">Accessibility + Input Monitoring</td></tr>
+        <tr><th scope="row" class="m lead-cell">glass</th><td data-label="Look">Frosted blur over the live desktop.</td><td class="ctr" data-label="Bleeds through"><span class="warn">Yes, by design</span></td><td class="ctr" data-label="Input blocked"><span class="yes">Yes</span></td><td data-label="Permissions">Accessibility + Input Monitoring + Screen Recording</td></tr>
+        <tr><th scope="row" class="m lead-cell">none</th><td data-label="Look">Nothing. The desktop as it was.</td><td class="ctr" data-label="Bleeds through"><span class="k">n/a</span></td><td class="ctr" data-label="Input blocked"><span class="no">No</span></td><td data-label="Permissions"><span class="k">None</span></td></tr>
+        </tbody>
+      </table>
+    </div>
+  </div>
+</section>
+<section id="unlock">
+  <div class="wrap">
+    <div class="intro">
+      <p class="eyebrow">The unlock code</p>
+      <h2>Not a hotkey. A passphrase you type into a dead keyboard.</h2>
+      <p class="lead">dndmode watches the tail of everything you type and ends the session the moment that tail equals your code. No prompt, no progress indicator, no wrong-code feedback, and no way to reset a half-typed attempt &mdash; you just keep typing until it matches.</p>
+    </div>
+
+    <div class="split head-gap">
+      <div style="display:flex;flex-direction:column;gap:18px">
+        <h3>Grammar</h3>
+        <p style="font-size:14.5px">Steps are separated by spaces; each step is <code>(&lt;mod&gt;+)*&lt;key&gt;</code>. Modifiers inside a step are optional, so both <code>s</code> and <code>ctrl+s</code> are valid steps. A literal space is only a separator &mdash; the space <em>key</em> is written <code>space</code>.</p>
+        <table class="spec"><caption class="sr">Unlock-code grammar: modifiers and keys</caption>
+          <colgroup><col style="width:32%"><col></colgroup>
+          <tbody>
+            <tr><th scope="row" class="lead-cell" style="color:var(--ink)">Modifiers <span class="small">(case-insensitive, optional per step)</span></th><td class="m" data-label="Values">ctrl &nbsp; option &nbsp; cmd &nbsp; shift</td></tr>
+            <tr><th scope="row" class="lead-cell" style="color:var(--ink)">Keys</th><td class="m" data-label="Values" style="line-height:1.9">a-z &nbsp; 0-9 &nbsp; f1-f12 &nbsp; space &nbsp; return <span class="k">(enter)</span> &nbsp; tab &nbsp; escape <span class="k">(esc)</span> &nbsp; delete &nbsp; forwarddelete &nbsp; left &nbsp; right &nbsp; up &nbsp; down &nbsp; - = [ ] ; &#39; , . / \ &#96;</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <div style="display:flex;flex-direction:column;gap:18px">
+        <h3>Examples</h3>
+        <div class="term">
+          <div><span class="t-key">unlock_code</span>: s w o r d f i s h <span class="t-com">&nbsp;# a passphrase &mdash; recommended</span></div>
+          <div><span class="t-key">unlock_code</span>: ctrl+s w o r d cmd+z <span class="t-com">&nbsp;# mixed</span></div>
+          <div><span class="t-key">unlock_code</span>: Ctrl+Option+Cmd+X <span class="t-com">&nbsp;# one chord = length 1</span></div>
+          <div><span class="t-key">unlock_code</span>: <span class="t-str">&quot;- a b c d&quot;</span> <span class="t-com">&nbsp;# leading punctuation: quote it</span></div>
+        </div>
+        <p class="small">The value is a YAML scalar. If the code <em>starts</em> with <code>-</code> <code>[</code> <code>]</code> <code>&#39;</code> or <code>&#96;</code>, wrap it in double quotes &mdash; unquoted, YAML parses those as list or quote syntax and startup dies with a YAML error rather than a dndmode one. A space followed by <code>#</code> always starts a YAML comment and would silently cut the code short.</p>
+      </div>
+    </div>
+
+    <div class="head-gap">
+      <div style="display:flex;align-items:baseline;justify-content:space-between;gap:20px;flex-wrap:wrap;padding-bottom:16px">
+        <h3>Length is the whole security argument</h3>
+        <p class="small">alphabet ~36 &middot; automated typist at 100 keypresses/second</p>
+      </div>
+      <p style="font-size:14.5px;max-width:82ch;padding-bottom:24px">Every keypress is a fresh match attempt. There is no lockout and no rate limit &mdash; that is a deliberate trade for silence, and it means short codes fall fast.</p>
+      <table class="spec"><caption class="sr">Unlock-code length versus time to exhaust the code space</caption>
+        <thead><tr><th scope="col" style="width:12%">Steps</th><th scope="col" style="width:26%">Status</th><th scope="col" style="width:34%">Time to exhaust</th><th scope="col">Time to exhaust, log scale</th></tr></thead>
+        <tbody>
+        <tr><th scope="row" class="m lead-cell">1 step</th><td data-label="Status"><span class="warn">Accepted with modifiers only</span><br><span class="small">the legacy hotkey shape</span></td><td data-label="Exhaust">Minutes, by hand</td><td class="bar-cell" data-label="Log scale"><span class="scale" aria-hidden="true"><i class="solid" style="width:1%;background:var(--no)"></i></span></td></tr>
+        <tr><th scope="row" class="m lead-cell">2&ndash;3 steps</th><td data-label="Status"><span class="no">Rejected at startup &middot; exit 1</span><br><span class="small">too weak to be worth the illusion</span></td><td data-label="Exhaust">~8 minutes at 3 steps</td><td class="bar-cell" data-label="Log scale"><span class="scale" aria-hidden="true"><i class="solid" style="width:4%;background:var(--no)"></i></span></td></tr>
+        <tr><th scope="row" class="m lead-cell">4&ndash;5 steps</th><td data-label="Status"><span class="warn">Accepted, warned about</span><br><span class="small">under --debug</span></td><td data-label="Exhaust">~5 hours at 4, ~7 days at 5</td><td class="bar-cell" data-label="Log scale"><span class="scale" aria-hidden="true"><i style="width:44%;background:color-mix(in oklch,var(--warn) 32%,transparent)"></i><i class="solid" style="width:24%;background:var(--warn)"></i></span></td></tr>
+        <tr><th scope="row" class="m lead-cell">6&ndash;32 steps</th><td data-label="Status"><span class="yes">Accepted &middot; recommended</span><br><span class="small">6 or more is the shape to use</span></td><td data-label="Exhaust">~250 days at 6, centuries at 8</td><td class="bar-cell" data-label="Log scale"><span class="scale" aria-hidden="true"><i style="width:100%;background:color-mix(in oklch,var(--yes) 32%,transparent)"></i><i class="solid" style="width:65%;background:var(--yes)"></i></span></td></tr>
+        </tbody>
+      </table>
+      <p class="small" style="padding-top:18px">The bars plot the column beside them on a base-10 log scale, from five minutes at the left edge to three centuries at the right; the paler extension on the last two rows is the span between that band&#39;s two figures. Codes longer than 32 steps are rejected. A 1-step code without modifiers is rejected too &mdash; a bare key would unlock on the first thing a bystander types. The shipped default <code>Ctrl+Option+Cmd+X</code> is exactly the weak shape that motivated unlock codes; change it before you rely on it.</p>
+    </div>
+
+    <div class="head-gap">
+      <h3 style="padding-bottom:22px">Three things that will trip you up</h3>
+      <div class="g3">
+        <div class="card">
+          <p class="eyebrow" style="color:var(--ink2)">01</p>
+          <h4>Physical positions, not characters</h4>
+          <p style="font-size:14px">The code is matched by key position, so it behaves identically on US, Russian or AZERTY layouts. That also means <code>s w o r d</code> is typed on a Russian layout with the keys <span class="mono" lang="ru" style="color:var(--ink)">&#1099; &#1094; &#1086; &#1088; &#1074;</span>. Pick your code by where your fingers go, not by what appears on screen.</p>
+        </div>
+        <div class="card">
+          <p class="eyebrow" style="color:var(--ink2)">02</p>
+          <h4>A stray modifier breaks a step</h4>
+          <p style="font-size:14px">Each step is matched exactly. A step written without modifiers matches only a press with <em>no</em> modifiers held, so resting on Cmd or Shift silently breaks it and the tail resets. Write the modifier into the step (<code>cmd+s</code>) if you intend to hold it.</p>
+        </div>
+        <div class="card">
+          <p class="eyebrow" style="color:var(--ink2)">03</p>
+          <h4>Holding a key does not help</h4>
+          <p style="font-size:14px">Auto-repeat presses are dropped before they reach the matcher, so a held key contributes exactly one step and cannot be used to sweep the code space. Genuine double letters are unaffected &mdash; auto-repeat only engages well past the speed of a real double tap.</p>
+        </div>
+      </div>
+      <p class="small" style="padding-top:20px">Caps Lock, the numeric-keypad flag, the Fn flag and the other system-set modifier bits are stripped before matching, so a stray Caps Lock can never lock you out, the arrows and <code>forwarddelete</code> work as plain steps, and <code>fn</code> inside a step parses but means nothing.</p>
+    </div>
+
+    <div class="callout warn-box head-gap" style="margin-top:12px">
+      <svg width="22" height="22" viewBox="0 0 22 22" fill="none" stroke="var(--warn)" stroke-width="1.5" stroke-linecap="round" aria-hidden="true"><path d="M11 2.6 20.2 18.4H1.8Z"/><path d="M11 8.6v4.4M11 15.8v.2"/></svg>
+      <div style="display:flex;flex-direction:column;gap:10px">
+        <h4 style="color:var(--warn)">Do not put f1&ndash;f12 in your unlock code</h4>
+        <p style="font-size:14.5px;max-width:88ch">Stripping the Fn <em>bit</em> is not enough for the F-row. On the macOS default &mdash; &ldquo;Use F1, F2, etc. keys as standard function keys&rdquo; turned <strong style="color:var(--ink);font-weight:500">off</strong> &mdash; the F-row is not a key press at all: it is delivered as a system media event, which dndmode blocks but never records. A code containing <code>f1</code> parses, validates and starts without a single warning, and then cannot be typed. Get it wrong and the screen stays locked with no keyboard and no Ctrl-C &mdash; the way out is SSH from another machine or a hard power-off.</p>
+      </div>
+    </div>
+  </div>
+</section>
+<section id="install">
+  <div class="wrap">
+    <div class="intro">
+      <p class="eyebrow">Install</p>
+      <h2>Pick one install path and stay on it.</h2>
+      <p class="lead">All three paths build from source &mdash; there is no pre-signed bottle, the binary is ad-hoc signed locally, and none of them needs an Apple Developer ID.</p>
+    </div>
+
+    <div class="g3 head-gap">
+      <div class="card" style="border-color:var(--accent)">
+        <div style="display:flex;align-items:baseline;justify-content:space-between;gap:12px"><h3 class="h4">Homebrew</h3><span class="mono" style="font-size:10.5px;letter-spacing:.14em;text-transform:uppercase;color:var(--accent)">easiest</span></div>
+        <div class="term" style="font-size:13px;line-height:1.95;padding:14px 16px" data-copy="brew install dsbasko/tap/dndmode"><div><span class="p">$</span> brew install dsbasko/tap/dndmode</div><div><span class="p">$</span> brew upgrade dndmode</div></div>
+        <p class="small">From the personal tap <code>dsbasko/homebrew-tap</code>, not homebrew-core. Each upgrade rebuilds with a fresh cdhash, so macOS re-prompts for permissions afterwards.</p>
+        <p class="small push">Lands in <span class="mono">/opt/homebrew/bin</span></p>
+      </div>
+      <div class="card">
+        <div style="display:flex;align-items:baseline;justify-content:space-between;gap:12px"><h3 class="h4">From source</h3><span class="mono" style="font-size:10.5px;letter-spacing:.14em;text-transform:uppercase;color:var(--yes)">stable grants</span></div>
+        <div class="term" style="font-size:13px;line-height:1.95;padding:14px 16px" data-copy="git clone https://github.com/dsbasko/dndmode&#10;cd dndmode&#10;make install"><div><span class="p">$</span> git clone github.com/dsbasko/dndmode</div><div><span class="p">$</span> cd dndmode</div><div><span class="p">$</span> make install</div></div>
+        <p class="small">Builds with the ad-hoc identifier <code>com.dsbasko.dndmode</code>. That identifier and its cdhash are stable across rebuilds, so a later <code>git pull &amp;&amp; make install</code> keeps your permission grants.</p>
+        <p class="small push">Lands in <span class="mono">/usr/local/bin</span></p>
+      </div>
+      <div class="card">
+        <div style="display:flex;align-items:baseline;justify-content:space-between;gap:12px"><h3 class="h4">go install</h3><span class="mono" style="font-size:10.5px;letter-spacing:.14em;text-transform:uppercase;color:var(--ink3)">quick</span></div>
+        <div class="term" style="font-size:13px;line-height:1.95;padding:14px 16px" data-copy="go install github.com/dsbasko/dndmode@latest"><div><span class="p">$</span> go install github.com/dsbasko/dndmode@latest</div></div>
+        <p class="small">Every <code>@latest</code> rebuild changes the cdhash, so TCC sees a new app and re-prompts for Accessibility and Input Monitoring on each upgrade.</p>
+        <p class="small push">Lands in <span class="mono">$(go env GOPATH)/bin</span></p>
+      </div>
+    </div>
+
+    <div class="callout" style="margin-top:28px">
+      <svg width="20" height="20" viewBox="0 0 20 20" fill="none" stroke="var(--ink2)" stroke-width="1.4" stroke-linecap="round" aria-hidden="true"><circle cx="10" cy="10" r="8"/><path d="M10 6v4.6M10 13.6v.2"/></svg>
+      <p style="font-size:14.5px;max-width:92ch">Mixing them produces separate binaries with different code signatures, and macOS TCC treats each as a different app &mdash; each needs its own Accessibility and Input Monitoring grant. If <code>/usr/local/bin</code> is not ahead of <code>~/go/bin</code> in your <code>$PATH</code>, you may be granting permissions to one binary and running another.</p>
+    </div>
+
+    <div class="head-gap">
+      <h3 style="padding-bottom:6px">First-run setup</h3>
+      <p class="small" style="padding-bottom:22px">The config file does not exist until dndmode runs. <code>dndmode --help</code> only prints usage and creates nothing.</p>
+      <div class="steps">
+        <div><span class="n">01</span><p style="font-size:14.5px">Install dndmode by one of the paths above.</p></div>
+        <div><span class="n">02</span><p style="font-size:14.5px">Run <code>dndmode</code>. The first launch writes the default config to <code>~/.config/dndmode/config.yml</code>, then prompts for Accessibility. Click <strong style="color:var(--ink);font-weight:500">Open System Settings</strong> and enable dndmode under Privacy &amp; Security &rarr; Accessibility.</p></div>
+        <div><span class="n">03</span><p style="font-size:14.5px">It then waits for Input Monitoring. There is no system prompt for this one &mdash; dndmode opens the pane, and the run continues once you flip the switch.</p></div>
+        <div><span class="n">04</span><p style="font-size:14.5px"><span class="k">Only if you want Focus/DND.</span> In the Shortcuts app create two shortcuts: <strong style="color:var(--ink);font-weight:500">Set Focus &rarr; Do Not Disturb &rarr; Turn On Until Turned Off</strong>, saved as <code>dndmode-on</code>; and a second that turns it off, saved as <code>dndmode-off</code>. With the default <code>focus: false</code> you can skip this entirely.</p></div>
+        <div><span class="n">05</span><p style="font-size:14.5px">Run <code>dndmode</code> again. With <code>--debug</code> you will see <span class="mono" style="color:var(--ink)">dndmode: active. press Ctrl-C.</span> &mdash; and then change your unlock code before you rely on it.</p></div>
+      </div>
+    </div>
+
+    <div class="split head-gap">
+      <div style="display:flex;flex-direction:column;gap:12px">
+        <p class="eyebrow">Requirements</p>
+        <table class="spec" style="font-size:13.5px"><caption class="sr">System requirements</caption>
+          <colgroup><col style="width:44%"><col></colgroup>
+          <tbody>
+            <tr><th scope="row" class="lead-cell" style="color:var(--ink)">macOS</th><td data-label="Value">14 (Sonoma) or newer</td></tr>
+            <tr><th scope="row" class="lead-cell" style="color:var(--ink)">Architecture</th><td data-label="Value">Apple Silicon only; Intel is not supported</td></tr>
+            <tr><th scope="row" class="lead-cell" style="color:var(--ink)">Permissions</th><td data-label="Value">Accessibility and Input Monitoring &mdash; both required for the input lock; awake-only <code>none</code> mode needs neither</td></tr>
+            <tr><th scope="row" class="lead-cell" style="color:var(--ink)">Shortcuts</th><td data-label="Value">Only when <code>focus: true</code></td></tr>
+            <tr><th scope="row" class="lead-cell" style="color:var(--ink)">Go</th><td data-label="Value">1.26+, and only to build from source</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <div style="display:flex;flex-direction:column;gap:12px">
+        <p class="eyebrow">Uninstall</p>
+        <div class="term">
+          <div><span class="p">$</span> sudo rm /usr/local/bin/dndmode</div>
+          <div class="c"># optional: clear the permission entries</div>
+          <div><span class="p">$</span> tccutil reset Accessibility com.dsbasko.dndmode</div>
+          <div><span class="p">$</span> tccutil reset ListenEvent com.dsbasko.dndmode</div>
+        </div>
+        <p class="small">The binary makes zero network calls and has no network code in its dependency closure &mdash; verify it with <code>make audit-net</code> statically and <code>make audit-net-runtime</code> against a live instance.</p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section id="cli">
+  <div class="wrap">
+    <div class="intro">
+      <p class="eyebrow">CLI reference</p>
+      <h2>Every flag is per-run. The tri-state ones fall back to the config file.</h2>
+      <p class="lead">There is no flag that writes to the config file, and no config key for <code>--timer</code>. A run is described entirely by the file plus the flags you typed for it.</p>
+    </div>
+
+    <div class="strip cols3" style="margin-top:clamp(30px,4.5vw,48px);border:1px solid var(--line)">
+      <div style="grid-column:span 1"><p class="eyebrow" style="padding-bottom:10px">Start</p><p style="font-size:14px">Run <code>dndmode</code>. It runs in the foreground and blocks the terminal until the session ends.</p></div>
+      <div><p class="eyebrow" style="padding-bottom:10px">End</p><p style="font-size:14px">Type the unlock code, press Ctrl-C in the launching terminal, send <code>SIGTERM</code>/<code>SIGHUP</code>, or let <code>--timer</code> expire.</p></div>
+      <div><p class="eyebrow" style="padding-bottom:10px">Report</p><p style="font-size:14px">Nothing on stdout or stderr. The outcome comes back as an exit code, and only <code>--debug</code> un-silences it.</p></div>
+    </div>
+
+    <div class="head-gap">
+      <table class="spec"><caption class="sr">Command-line flags</caption>
+        <thead><tr><th scope="col" style="width:13%">Flag</th><th scope="col" style="width:30%">Values</th><th scope="col" style="width:11%">Default</th><th scope="col">Effect</th></tr></thead>
+        <tbody>
+          <tr><th scope="row" class="m lead-cell">--style</th><td class="m" data-label="Values" style="line-height:1.85">black | matrix | terminal[:go|python|typescript|rust] | dvd | glass[:radius] | none</td><td class="m k" data-label="Default">config</td><td data-label="Effect">Overlay look for this run; wins over <code>overlay_style</code>. <code>terminal:&lt;lang&gt;</code> picks the source language, default <code>go</code>.</td></tr>
+          <tr><th scope="row" class="m lead-cell">--mute</th><td class="m" data-label="Values">true | false</td><td class="m k" data-label="Default">config</td><td data-label="Effect">Mute system audio for this run. Restored on exit; audio already muted before start is left muted.</td></tr>
+          <tr><th scope="row" class="m lead-cell">--focus</th><td class="m" data-label="Values">true | false</td><td class="m k" data-label="Default">config</td><td data-label="Effect">Toggle Do Not Disturb for this run through the <code>dndmode-on</code> / <code>dndmode-off</code> Shortcuts.</td></tr>
+          <tr><th scope="row" class="m lead-cell">--timer</th><td class="m" data-label="Values">Go duration &mdash; 30m, 1h30m, 90s</td><td class="m k" data-label="Default">off</td><td data-label="Effect">Auto-unlock after the duration, then exit <code>0</code>. Counting starts once dndmode is active, so time spent granting permissions never eats into it. Works with every style including <code>none</code>. There is deliberately no config key &mdash; typing the flag is the opt-in.</td></tr>
+          <tr><th scope="row" class="m lead-cell">--debug</th><td class="m k" data-label="Values">boolean</td><td class="m k" data-label="Default">off</td><td data-label="Effect">Un-silence banners, diagnostics and logs.</td></tr>
+        </tbody>
+      </table>
+      <p class="small" style="padding-top:18px">Invalid flag values &mdash; <code>--timer 5x</code>, <code>--mute banana</code>, <code>--style neon</code> &mdash; exit with the config-error code <code>1</code>, and print the reason on stderr only under <code>--debug</code>.</p>
+    </div>
+
+    <div class="split head-gap">
+      <div style="display:flex;flex-direction:column;gap:16px">
+        <h3>Quiet by default is a security decision, not laziness</h3>
+        <p style="font-size:14.5px">With <code>glass</code> or <code>none</code> the terminal stays visible while dndmode runs, and a printed startup banner would leak your unlock code to anyone watching over your shoulder. So dndmode prints nothing at all and reports outcome only through its exit code.</p>
+        <p style="font-size:14.5px">Even under <code>--debug</code> the banner confirms only <em>that</em> a code resolved and which config key it came from &mdash; never the code itself, and never its length, because the length is part of the secret. Both facts land on the same line, so <code>source=</code> and <code>config=</code> are read together.</p>
+      </div>
+      <div style="display:flex;flex-direction:column;gap:14px">
+        <div class="term">
+          <div><span class="p">$</span> dndmode</div>
+          <div><span class="p">$</span> <span class="c">(nothing at all)</span></div>
+          <div style="height:10px"></div>
+          <div><span class="p">$</span> dndmode --debug</div>
+          <div style="white-space:normal;line-height:1.7;text-indent:-2ch;padding-left:2ch">dndmode: <span class="t-key">unlock_code</span>=<span class="t-str">ok</span> (source=unlock_code) config=~/.config/dndmode/config.yml</div>
+          <div>dndmode: active. press Ctrl-C.</div>
+        </div>
+        <p class="small">Nothing per-keystroke is ever logged either &mdash; not progress, not a failed match, not a count of dropped events. The length and timing of the secret are part of the secret.</p>
+      </div>
+    </div>
+  </div>
+</section>
+<section id="config">
+  <div class="wrap">
+    <div class="intro">
+      <p class="eyebrow">Configuration</p>
+      <h2>One file. One required key. Everything else is a commented default.</h2>
+      <p class="lead">The config lives at <code>~/.config/dndmode/config.yml</code> and is created on first run. Only <code>unlock_code</code> is written as an active key; every other setting ships commented at its default, so uncommenting a line only ever overrides.</p>
+    </div>
+    <div class="head-gap">
+      <table class="spec"><caption class="sr">Configuration keys</caption>
+        <thead><tr><th scope="col" style="width:19%">Key</th><th scope="col" style="width:15%">Default</th><th scope="col" style="width:14%">Per-run flag</th><th scope="col">What it does</th></tr></thead>
+        <tbody>
+          <tr><th scope="row" class="m lead-cell" style="color:var(--accent)">unlock_code</th><td class="m" data-label="Default"><span class="k">required</span></td><td class="m" data-label="Flag"><span class="k">&mdash;</span></td><td data-label="What it does">The sequence of steps that ends the session. The only secret that unlocks a locked machine.</td></tr>
+          <tr><th scope="row" class="m lead-cell">hotkey</th><td class="m" data-label="Default"><span class="k">deprecated</span></td><td class="m" data-label="Flag"><span class="k">&mdash;</span></td><td data-label="What it does">The pre-sequence single combination. Still read so upgrades do not break, but setting both it and <code>unlock_code</code> is a startup error &mdash; an ambiguous unlock secret is not resolvable.</td></tr>
+          <tr><th scope="row" class="m lead-cell">overlay_style</th><td class="m" data-label="Default">black</td><td class="m" data-label="Flag">--style</td><td data-label="What it does">Which shield to draw: <code>black</code>, <code>matrix</code>, <code>terminal</code>, <code>dvd</code>, <code>glass</code> or <code>none</code>.</td></tr>
+          <tr><th scope="row" class="m lead-cell">glass_blur</th><td class="m" data-label="Default">16</td><td class="m" data-label="Flag">--style glass:&lt;radius&gt;</td><td data-label="What it does">Blur radius in points for <code>glass</code>. ~8 is sharp enough that text starts to become legible; ~30 dissolves everything into frost. Ignored by other styles.</td></tr>
+          <tr><th scope="row" class="m lead-cell">terminal_language</th><td class="m" data-label="Default">go</td><td class="m" data-label="Flag">--style terminal:&lt;lang&gt;</td><td data-label="What it does">Source language rendered by <code>terminal</code>: go, python, typescript or rust. Each has its own compiled-in corpus and highlighting.</td></tr>
+          <tr><th scope="row" class="m lead-cell">allow_display_sleep</th><td class="m" data-label="Default">false</td><td class="m" data-label="Flag"><span class="k">&mdash;</span></td><td data-label="What it does">Inverted toggle for the display only &mdash; the system stays awake either way. <code>true</code> lets the panel dim and sleep while background work keeps running.</td></tr>
+          <tr><th scope="row" class="m lead-cell">mute</th><td class="m" data-label="Default">true</td><td class="m" data-label="Flag">--mute</td><td data-label="What it does">Mute system audio for the session and restore the prior volume on exit. Ignored entirely in <code>none</code> mode.</td></tr>
+          <tr><th scope="row" class="m lead-cell">focus</th><td class="m" data-label="Default">false</td><td class="m" data-label="Flag">--focus</td><td data-label="What it does">Toggle Do Not Disturb through the two Shortcuts. Off by default because macOS syncs Focus to your other Apple devices over iCloud.</td></tr>
+          <tr><th scope="row" class="m lead-cell">debug</th><td class="m" data-label="Default">false</td><td class="m" data-label="Flag">--debug</td><td data-label="What it does">Console output gate. Silent by default; the exit code is the contract.</td></tr>
+        </tbody>
+      </table>
+    </div>
+
+    <div class="split head-gap">
+      <div style="display:flex;flex-direction:column;gap:16px">
+        <div style="display:flex;align-items:baseline;justify-content:space-between;gap:16px;flex-wrap:wrap">
+          <h3>The file as it is written on first run</h3>
+          <span class="mono small">~/.config/dndmode/config.yml</span>
+        </div>
+        <div class="term" style="font-size:12.5px;line-height:1.95">
+          <div class="t-com"># dndmode configuration</div>
+          <div class="t-com"># Every field except unlock_code is OPTIONAL. Unknown</div>
+          <div class="t-com"># keys are REJECTED: a typo aborts startup with an</div>
+          <div class="t-com"># error pointing at the line.</div>
+          <div style="height:10px"></div>
+          <div class="t-com"># --- unlock_code (REQUIRED) -----------------------</div>
+          <div class="t-com"># A SEQUENCE of steps typed one after another.</div>
+          <div class="t-com"># Grammar: steps separated by spaces, each step is</div>
+          <div class="t-com"># (&lt;mod&gt;+)*&lt;key&gt;. 6+ steps strongly recommended.</div>
+          <div><span class="t-key">unlock_code</span>: Ctrl+Option+Cmd+X</div>
+          <div style="height:10px"></div>
+          <div class="t-com"># --- hotkey (DEPRECATED) --------------------------</div>
+          <div class="t-com"># hotkey: Ctrl+Option+Cmd+X</div>
+          <div style="height:10px"></div>
+          <div class="t-com"># --- overlay_style --------------------------------</div>
+          <div class="t-com"># black | matrix | terminal | dvd | glass | none</div>
+          <div class="t-com"># overlay_style: black</div>
+          <div style="height:10px"></div>
+          <div class="t-com"># --- glass_blur -----------------------------------</div>
+          <div class="t-com"># glass_blur: 16</div>
+          <div style="height:10px"></div>
+          <div class="t-com"># --- terminal_language ----------------------------</div>
+          <div class="t-com"># terminal_language: go</div>
+          <div style="height:10px"></div>
+          <div class="t-com"># --- allow_display_sleep --------------------------</div>
+          <div class="t-com"># allow_display_sleep: false</div>
+          <div style="height:10px"></div>
+          <div class="t-com"># --- mute -----------------------------------------</div>
+          <div class="t-com"># mute: true</div>
+          <div style="height:10px"></div>
+          <div class="t-com"># --- focus ----------------------------------------</div>
+          <div class="t-com"># focus: false</div>
+          <div style="height:10px"></div>
+          <div class="t-com"># --- debug ----------------------------------------</div>
+          <div class="t-com"># debug: false</div>
+        </div>
+      </div>
+      <div style="display:flex;flex-direction:column;gap:24px">
+        <div class="card">
+          <h4>Strict about keys, forgiving about nothing else</h4>
+          <p style="font-size:14px">A misspelled key (<code>overaly_style</code>) is rejected on load; a bad value (<code>overlay_style: blak</code>) is caught a moment later. Either way the process exits <code>1</code> with a line-and-column error under <code>--debug</code>.</p>
+        </div>
+        <div class="card">
+          <h4>Which key is in effect</h4>
+          <table class="spec" style="font-size:13px"><caption class="sr">Which unlock key takes effect</caption>
+            <thead><tr><th scope="col">unlock_code</th><th scope="col">hotkey</th><th scope="col">Result</th></tr></thead>
+            <tbody>
+              <tr><td data-label="unlock_code">set</td><td data-label="hotkey">absent</td><td class="yes" data-label="Result">Used</td></tr>
+              <tr><td data-label="unlock_code">absent</td><td data-label="hotkey">set</td><td class="warn" data-label="Result">Used as length 1</td></tr>
+              <tr><td data-label="unlock_code">set</td><td data-label="hotkey">set</td><td class="no" data-label="Result">Error, exit 1</td></tr>
+              <tr><td data-label="unlock_code">absent</td><td data-label="hotkey">absent</td><td class="no" data-label="Result">Error, exit 1</td></tr>
+            </tbody>
+          </table>
+        </div>
+        <div class="card">
+          <h4>Migrating from hotkey</h4>
+          <p style="font-size:14px">Migration is a rename, with one caveat: spaces separate <em>steps</em> in <code>unlock_code</code>, so any spaces around the <code>+</code> have to go first. <code>hotkey: Ctrl + X</code> is a legal chord but reads as three steps and fails with exit <code>1</code>.</p>
+          <p style="font-size:14px"><code>fn</code> is no longer a modifier: <code>ctrl+fn+x</code> now unlocks on Ctrl+X, and <code>fn+x</code> is a startup error because no modifier is left.</p>
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section id="exit">
+  <div class="wrap">
+    <div class="intro">
+      <p class="eyebrow">Exit codes</p>
+      <h2>The exit code is the contract.</h2>
+      <p class="lead">In the default silent mode it is the only thing dndmode tells you. Every failure mode has its own number, so a wrapper script can branch on the reason without parsing anything.</p>
+    </div>
+    <div class="head-gap">
+      <table class="spec"><caption class="sr">Exit codes</caption>
+        <thead><tr><th scope="col" style="width:8%">Code</th><th scope="col" style="width:24%">Class</th><th scope="col">Meaning</th></tr></thead>
+        <tbody>
+          <tr><th scope="row" class="m lead-cell" style="font-size:15px;color:var(--yes)">0</th><td data-label="Class"><span class="yes">Clean exit</span></td><td data-label="Meaning">Ended by the unlock code, by a signal, or by <code>--timer</code> expiry.</td></tr>
+          <tr><th scope="row" class="m lead-cell" style="font-size:15px">1</th><td data-label="Class"><span class="no">Config error</span></td><td data-label="Meaning">Bad YAML, an invalid or ambiguous unlock code, or an invalid flag value. Raised before any permission or display is touched.</td></tr>
+          <tr><th scope="row" class="m lead-cell" style="font-size:15px">2</th><td data-label="Class"><span class="no">Platform error</span></td><td data-label="Meaning">Not arm64, macOS older than 14, an IOKit or Cocoa failure &mdash; or, in <code>none</code> mode, an unexpected <code>caffeinate</code> death.</td></tr>
+          <tr><th scope="row" class="m lead-cell" style="font-size:15px">3</th><td data-label="Class"><span class="warn">Interrupted</span></td><td data-label="Meaning">Interrupted while waiting for the Accessibility or Input Monitoring grant.</td></tr>
+          <tr><th scope="row" class="m lead-cell" style="font-size:15px">4</th><td data-label="Class"><span class="no">Input tap lost</span></td><td data-label="Meaning">Secure Event Input is held by another app, or the input tap was silently disabled and the watchdog gave up after five failed re-enables.</td></tr>
+          <tr><th scope="row" class="m lead-cell" style="font-size:15px">5</th><td data-label="Class"><span class="warn">Already running</span></td><td data-label="Meaning">Another live dndmode instance is already holding the machine.</td></tr>
+          <tr><th scope="row" class="m lead-cell" style="font-size:15px">6</th><td data-label="Class"><span class="warn">Shortcuts missing</span></td><td data-label="Meaning">Required Shortcuts <code>dndmode-on</code> / <code>dndmode-off</code> not found. Only reachable with <code>focus: true</code>, and checked before anything is locked.</td></tr>
+          <tr><th scope="row" class="m lead-cell" style="font-size:15px">7</th><td data-label="Class"><span class="no">Stale runtime file</span></td><td data-label="Meaning">Cannot delete a stale <code>~/.config/dndmode/runtime.json</code> &mdash; a read-only filesystem, an ACL denying delete, or a full disk.</td></tr>
+          <tr><th scope="row" class="m lead-cell" style="font-size:15px">8</th><td data-label="Class"><span class="no">Internal panic</span></td><td data-label="Meaning">An internal panic, recovered after cleanup ran. The shield comes down and the assertion is released before the process exits.</td></tr>
+        </tbody>
+      </table>
+    </div>
+    <div class="split head-gap">
+      <div style="display:flex;flex-direction:column;gap:14px">
+        <h3>Branching on it</h3>
+        <div class="term">
+          <div>dndmode --timer 2h</div>
+          <div><span class="t-kw">case</span> $? <span class="t-kw">in</span></div>
+          <div>&nbsp;&nbsp;0) <span class="t-com"># unlocked or timed out</span> ;;</div>
+          <div>&nbsp;&nbsp;1) <span class="t-com"># fix the config first</span> ;;</div>
+          <div>&nbsp;&nbsp;4) <span class="t-com"># dismiss the sudo prompt</span> ;;</div>
+          <div>&nbsp;&nbsp;5) <span class="t-com"># one is already running</span> ;;</div>
+          <div><span class="t-kw">esac</span></div>
+        </div>
+      </div>
+      <div style="display:flex;flex-direction:column;gap:14px">
+        <h3>Teardown always runs</h3>
+        <p style="font-size:14.5px">Whatever the exit code, the shutdown path is a single LIFO teardown: the shield comes down, both taps are released, the power assertion is released by its exact id, audio is restored if dndmode was the one that muted it, Focus is turned off if dndmode turned it on, and the runtime snapshot is deleted.</p>
+        <p class="small">The only way to skip that path is <code>kill -9</code> &mdash; which is exactly what the runtime snapshot exists to repair on the next launch.</p>
+      </div>
+    </div>
+  </div>
+</section>
+<section id="threat">
+  <div class="wrap">
+    <div class="intro">
+      <p class="eyebrow">Threat model</p>
+      <h2>What it stops, and what it plainly does not.</h2>
+      <p class="lead">dndmode is a soft-lock for cooperative environments, not red-team-grade hardware protection. Both columns below are part of the product description.</p>
+    </div>
+
+    <div class="g2 head-gap">
+      <div style="border:1px solid var(--yes);background:color-mix(in oklch,var(--yes) 6%,var(--bg));padding:clamp(20px,2.6vw,30px);display:flex;flex-direction:column;gap:18px">
+        <div style="display:flex;align-items:center;gap:12px">
+          <svg width="20" height="20" viewBox="0 0 20 20" fill="none" stroke="var(--yes)" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M10 2.2 16.8 5v5.2c0 4-2.8 6.6-6.8 7.6-4-1-6.8-3.6-6.8-7.6V5Z"/><path d="M7.2 9.8 9.3 12l3.7-4"/></svg>
+          <h3 style="font-size:22px">Protects against</h3>
+        </div>
+        <div style="display:flex;flex-direction:column">
+          <p style="font-size:14.5px;padding:14px 0;border-top:1px solid color-mix(in oklch,var(--yes) 25%,transparent)">A passerby, family member or colleague touching the keyboard or trackpad while an agent runs. Keyboard, mouse, scroll, media keys, Cmd+Tab and Cmd+Q are blocked at the HID level; trackpad gestures &mdash; Mission Control, App Expos&eacute;, Spaces swipes, the Launchpad pinch &mdash; are blocked at the session level.</p>
+          <p style="font-size:14.5px;padding:14px 0;border-top:1px solid color-mix(in oklch,var(--yes) 25%,transparent)">Visual access to the desktop on every connected display, including probing through Mission Control, Spotlight or the Force Quit dialog.</p>
+          <p style="font-size:14.5px;padding:14px 0;border-top:1px solid color-mix(in oklch,var(--yes) 25%,transparent)">Notification banners, hidden under the shield, and notification sounds, with the audio muted for the session &mdash; and Focus/DND optionally on top.</p>
+          <p style="font-size:14.5px;padding:14px 0;border-top:1px solid color-mix(in oklch,var(--yes) 25%,transparent)">Leaking that keystrokes are even being observed: no feedback on a wrong code, no per-keystroke logging, no reaction in the overlay animation.</p>
+        </div>
+      </div>
+
+      <div style="border:1px solid var(--no);background:color-mix(in oklch,var(--no) 6%,var(--bg));padding:clamp(20px,2.6vw,30px);display:flex;flex-direction:column;gap:18px">
+        <div style="display:flex;align-items:center;gap:12px">
+          <svg width="20" height="20" viewBox="0 0 20 20" fill="none" stroke="var(--no)" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="10" cy="10" r="7.8"/><path d="M4.6 4.6l10.8 10.8"/></svg>
+          <h3 style="font-size:22px">Does not protect against</h3>
+        </div>
+        <div style="display:flex;flex-direction:column">
+          <p style="font-size:14.5px;padding:14px 0;border-top:1px solid color-mix(in oklch,var(--no) 25%,transparent)">Touch ID and biometric unlock &mdash; impossible to block without root.</p>
+          <p style="font-size:14.5px;padding:14px 0;border-top:1px solid color-mix(in oklch,var(--no) 25%,transparent)">A power-button hold (hard shutdown) and Recovery mode at boot.</p>
+          <p style="font-size:14.5px;padding:14px 0;border-top:1px solid color-mix(in oklch,var(--no) 25%,transparent)">Hardware keyloggers and DMA over Thunderbolt.</p>
+          <p style="font-size:14.5px;padding:14px 0;border-top:1px solid color-mix(in oklch,var(--no) 25%,transparent)">Malware running as root, and sustained physical access generally.</p>
+          <p style="font-size:14.5px;padding:14px 0;border-top:1px solid color-mix(in oklch,var(--no) 25%,transparent)">Remote SSH or VNC sessions &mdash; the target is the local console only.</p>
+          <p style="font-size:14.5px;padding:14px 0;border-top:1px solid color-mix(in oklch,var(--no) 25%,transparent)">A short unlock code against someone willing to sit and type. Matching is on the tail of the keystroke stream, so every keypress is a fresh attempt and there is no lockout and no rate limit. The shipped 1-step default, or a 4-step code, is minutes to hours of effort.</p>
+        </div>
+      </div>
+    </div>
+
+    <div class="head-gap">
+      <h3 style="padding-bottom:20px">Per-layer coverage</h3>
+      <table class="spec"><caption class="sr">What each layer covers</caption>
+        <thead><tr><th scope="col" style="width:22%">Layer</th><th scope="col" style="width:34%">Covers</th><th scope="col">Notes</th></tr></thead>
+        <tbody>
+          <tr><th scope="row" class="lead-cell" style="color:var(--ink)">Shield overlay</th><td data-label="Covers">Visual access to every display</td><td data-label="Notes"><code>glass</code> shows a blurred desktop by design.</td></tr>
+          <tr><th scope="row" class="lead-cell" style="color:var(--ink)">Input lock</th><td data-label="Covers">Keyboard, mouse, scroll, media, Cmd+Tab, Cmd+Q</td><td data-label="Notes">Needs Accessibility; self-heals via a watchdog and a wake observer.</td></tr>
+          <tr><th scope="row" class="lead-cell" style="color:var(--ink)">Awake lock</th><td data-label="Covers">System and display idle sleep</td><td data-label="Notes">Display kept awake by default; <code>allow_display_sleep</code> flips it.</td></tr>
+          <tr><th scope="row" class="lead-cell" style="color:var(--ink)">Audio mute</th><td data-label="Covers">Notification sounds and beeps</td><td data-label="Notes">On by default, restored on exit; skipped in <code>none</code> mode.</td></tr>
+          <tr><th scope="row" class="lead-cell" style="color:var(--ink)">Focus / DND</th><td data-label="Covers">Notification banners</td><td data-label="Notes">Opt-in; DND syncs to your iPhone over iCloud.</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </div>
+</section>
+
+<section id="limits">
+  <div class="wrap">
+    <div class="intro">
+      <p class="eyebrow">Limits &amp; troubleshooting</p>
+      <h2>Where it stops being convenient.</h2>
+      <p class="lead">Nothing below is a bug being worked around &mdash; each one is a deliberate scope decision, and knowing it in advance is cheaper than discovering it with the shield already up.</p>
+    </div>
+
+    <h3 class="head-gap" style="display:block">Known limitations</h3>
+    <div class="g2" style="gap:0 clamp(24px,4vw,40px);padding-top:16px">
+      <div style="display:flex;flex-direction:column;gap:12px;padding:20px 0;border-top:1px solid var(--linesoft)">
+        <h4>No prior-Focus restore</h4>
+        <p style="font-size:14.5px">With <code>focus: true</code>, dndmode turns Focus off on exit rather than restoring whatever you had before. Audio, by contrast, is restored: a session that finds audio already muted leaves it muted.</p>
+      </div>
+      <div style="display:flex;flex-direction:column;gap:12px;padding:20px 0;border-top:1px solid var(--linesoft)">
+        <h4>glass bleeds through</h4>
+        <p style="font-size:14.5px">It shows a blurred desktop on purpose. Use <code>black</code>, <code>matrix</code>, <code>terminal</code> or <code>dvd</code> if you need the desktop fully hidden.</p>
+      </div>
+      <div style="display:flex;flex-direction:column;gap:12px;padding:20px 0;border-top:1px solid var(--linesoft)">
+        <h4>Foreground only</h4>
+        <p style="font-size:14.5px">No daemon and no launchd mode. The terminal that launched dndmode must stay open &mdash; which is the point: the utility is meant to be observable.</p>
+      </div>
+      <div style="display:flex;flex-direction:column;gap:12px;padding:20px 0;border-top:1px solid var(--linesoft)">
+        <h4>One instance at a time</h4>
+        <p style="font-size:14.5px">A second dndmode exits <code>5</code> with instructions rather than stacking a second shield on top of the first.</p>
+      </div>
+      <div style="display:flex;flex-direction:column;gap:12px;padding:20px 0;border-top:1px solid var(--linesoft);border-bottom:1px solid var(--linesoft)">
+        <h4>Needs an active display</h4>
+        <p style="font-size:14.5px">dndmode shields the screens you can see; it does not keep a MacBook running with the lid shut. With the lid closed and no external monitor there is nothing to draw on, so startup aborts with exit <code>2</code> and <span class="mono" style="color:var(--ink)">no displays detected</span>. The awake lock also does not defeat clamshell sleep &mdash; closing the lid on battery still sleeps the Mac. Run it lid-open, or in clamshell with an external display on AC power.</p>
+      </div>
+      <div style="display:flex;flex-direction:column;gap:12px;padding:20px 0;border-top:1px solid var(--linesoft);border-bottom:1px solid var(--linesoft)">
+        <h4>Signing</h4>
+        <p style="font-size:14.5px">Recent macOS refuses unsigned binaries. <code>make build</code> applies ad-hoc codesigning; <code>go install</code> relies on Go&#39;s linker-signed signature, which launches but is not stable enough for TCC across upgrades.</p>
+      </div>
+    </div>
+
+    <div class="head-gap">
+      <h3 style="padding-bottom:22px">Troubleshooting</h3>
+      <div style="border:1px solid var(--line)">
+        <div class="split" style="gap:clamp(20px,3vw,32px);padding:22px clamp(18px,2.4vw,26px);border-bottom:1px solid var(--linesoft);align-items:start">
+          <div style="display:flex;flex-direction:column;gap:8px">
+            <h4>Permissions lost after a go install upgrade</h4>
+            <p style="font-size:14px">Each <code>@latest</code> rebuild changes the cdhash, which TCC uses as identity. Without a stable signature macOS sees a new app and revokes both grants.</p>
+          </div>
+          <div class="term" style="font-size:12.5px;line-height:1.95;padding:14px 16px">
+            <div><span class="p">$</span> make install <span class="c"># stable identity</span></div>
+            <div class="c"># or reset and re-grant</div>
+            <div><span class="p">$</span> tccutil reset Accessibility com.dsbasko.dndmode</div>
+            <div><span class="p">$</span> tccutil reset ListenEvent com.dsbasko.dndmode</div>
+          </div>
+        </div>
+        <div class="split" style="gap:clamp(20px,3vw,32px);padding:22px clamp(18px,2.4vw,26px);border-bottom:1px solid var(--linesoft);align-items:start">
+          <div style="display:flex;flex-direction:column;gap:8px">
+            <h4>Secure Event Input conflict &mdash; exit 4</h4>
+            <p style="font-size:14px">Another app holds Secure Event Input: usually a Terminal <code>sudo</code> prompt, a password manager, or an active password field. Dismiss it and re-run. Exit <code>4</code> also fires when the tap was silently disabled and the watchdog could not bring it back.</p>
+          </div>
+          <div class="term" style="font-size:12.5px;line-height:1.95;padding:14px 16px"><div><span class="p">$</span> ioreg -l -w 0 | grep SecureInput</div></div>
+        </div>
+        <div class="split" style="gap:clamp(20px,3vw,32px);padding:22px clamp(18px,2.4vw,26px);border-bottom:1px solid var(--linesoft);align-items:start">
+          <div style="display:flex;flex-direction:column;gap:8px">
+            <h4>Another instance is already active &mdash; exit 5</h4>
+            <p style="font-size:14px">Find the pid and ask it to exit cleanly, or wait for it to finish.</p>
+          </div>
+          <div class="term" style="font-size:12.5px;line-height:1.95;padding:14px 16px"><div><span class="p">$</span> pgrep -x dndmode</div><div><span class="p">$</span> pkill -TERM dndmode</div></div>
+        </div>
+        <div class="split" style="gap:clamp(20px,3vw,32px);padding:22px clamp(18px,2.4vw,26px);border-bottom:1px solid var(--linesoft);align-items:start">
+          <div style="display:flex;flex-direction:column;gap:8px">
+            <h4>Cannot delete a stale runtime file &mdash; exit 7</h4>
+            <p style="font-size:14px">Causes are a read-only filesystem, an ACL denying delete, or a full disk.</p>
+          </div>
+          <div class="term" style="font-size:12.5px;line-height:1.95;padding:14px 16px"><div><span class="p">$</span> rm -f ~/.config/dndmode/runtime.json</div></div>
+        </div>
+        <div class="split" style="gap:clamp(20px,3vw,32px);padding:22px clamp(18px,2.4vw,26px);align-items:start">
+          <div style="display:flex;flex-direction:column;gap:8px">
+            <h4>It starts, but the code never unlocks</h4>
+            <p style="font-size:14px">There is no feedback by design &mdash; a wrong code looks exactly like no input at all. Exit with Ctrl-C in the launching terminal, then check, in order: your <strong style="color:var(--ink);font-weight:500">layout</strong> (steps are physical positions); a <strong style="color:var(--ink);font-weight:500">modifier you are holding</strong>; the <strong style="color:var(--ink);font-weight:500">source</strong> reported under <code>--debug</code>; and then simply keep typing &mdash; there is no reset and no timeout, so a mistake costs nothing but a retype.</p>
+          </div>
+          <div class="term" style="font-size:12.5px;line-height:1.95;padding:14px 16px">
+            <div><span class="p">$</span> dndmode --debug</div>
+            <div>dndmode: <span class="t-key">unlock_code</span>=<span class="t-str">ok</span> (source=hotkey)</div>
+            <div class="c">&nbsp;&nbsp;&nbsp;&nbsp;&#8593; not the key you edited</div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+
+</main>
+
+<footer>
+  <div class="wrap" style="display:flex;align-items:flex-end;justify-content:space-between;gap:32px;flex-wrap:wrap;width:100%">
+    <div style="display:flex;flex-direction:column;gap:10px">
+      <span class="mono" style="font-size:16px;font-weight:500;color:var(--ink);letter-spacing:-0.02em">dndmode</span>
+      <p class="small">Released under the MIT License. &copy; 2026 Dmitriy Basenko.</p>
+    </div>
+    <div style="display:flex;gap:clamp(20px,3vw,36px);font-size:13.5px;flex-wrap:wrap">
+      <a href="https://github.com/dsbasko/dndmode">github.com/dsbasko/dndmode</a>
+      <a href="https://github.com/dsbasko/homebrew-tap">dsbasko/homebrew-tap</a>
+      <a href="#top">Back to top &#8593;</a>
+    </div>
+  </div>
+</footer>
+
+<script>
+(function(){
+  var d=document;
+  d.querySelectorAll('[data-copy]').forEach(function(t){
+    var w=d.createElement('div');w.className='termwrap';
+    t.parentNode.insertBefore(w,t);w.appendChild(t);
+    t.style.paddingRight='72px';
+    var b=d.createElement('button');b.type='button';b.className='copy';b.textContent='copy';
+    b.setAttribute('aria-label','Copy command to clipboard');
+    b.addEventListener('click',function(){
+      if(!(navigator.clipboard&&navigator.clipboard.writeText))return;
+      navigator.clipboard.writeText(t.getAttribute('data-copy')).then(function(){
+        b.textContent='copied';b.classList.add('did');
+        setTimeout(function(){b.textContent='copy';b.classList.remove('did')},1500);
+      },function(){});
+    });
+    w.appendChild(b);
+  });
+  d.querySelectorAll('main section[id]').forEach(function(sec){
+    var h=sec.querySelector('h2');if(!h)return;
+    var a=d.createElement('a');a.className='hl';a.href='#'+sec.id;a.textContent='#';
+    a.setAttribute('aria-label','Link to this section');
+    h.appendChild(a);
+  });
+  var links={};
+  d.querySelectorAll('header nav a[href^="#"]').forEach(function(a){links[a.getAttribute('href').slice(1)]=a});
+  var nv=d.querySelector('header nav');
+  function edge(){nv.classList.toggle('at-end',nv.scrollLeft+nv.clientWidth>=nv.scrollWidth-4)}
+  nv.addEventListener('scroll',edge,{passive:true});
+  addEventListener('resize',edge,{passive:true});edge();
+  var current=null;
+  function act(id){
+    if(current===id)return;current=id;
+    d.querySelectorAll('header nav a[aria-current]').forEach(function(a){a.removeAttribute('aria-current')});
+    var a=links[id];
+    if(a){a.setAttribute('aria-current','true');try{a.scrollIntoView({block:'nearest',inline:'nearest'})}catch(e){}}
+  }
+  var secs=Array.prototype.slice.call(d.querySelectorAll('main section[id]'));
+  function spy(){
+    var line=scrollY+innerHeight*0.46,id=null;
+    for(var i=0;i<secs.length;i++){if(secs[i].offsetTop<=line)id=secs[i].id;else break}
+    act(id)
+  }
+  addEventListener('scroll',spy,{passive:true});spy();
+})();
+</script>
+</body>
+</html>
