@@ -866,7 +866,12 @@
     if(current===id)return;current=id;
     d.querySelectorAll('header nav a[aria-current]').forEach(function(a){a.removeAttribute('aria-current')});
     var a=links[id];
-    if(a){a.setAttribute('aria-current','true');try{a.scrollIntoView({block:'nearest',inline:'nearest'})}catch(e){}}
+    if(a){
+      a.setAttribute('aria-current','true');
+      var nr=nv.getBoundingClientRect(),ar=a.getBoundingClientRect();
+      if(ar.left<nr.left)nv.scrollLeft+=ar.left-nr.left-16;
+      else if(ar.right>nr.right)nv.scrollLeft+=ar.right-nr.right+16;
+    }
   }
   var secs=Array.prototype.slice.call(d.querySelectorAll('main section[id]'));
   function spy(){

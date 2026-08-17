@@ -37,7 +37,7 @@
 }
 
 *{box-sizing:border-box}
-html{scroll-behavior:smooth;scroll-padding-top:76px;-webkit-text-size-adjust:100%;overflow-x:clip}
+html{scroll-padding-top:76px;-webkit-text-size-adjust:100%;overflow-x:hidden}
 body{margin:0;background:var(--bg);color:var(--ink2);font-family:var(--sans);font-size:15px;line-height:1.62;-webkit-font-smoothing:antialiased;text-wrap:pretty}
 img,svg{max-width:100%}
 p{margin:0}
@@ -163,7 +163,6 @@ table.spec{width:100%;border-collapse:collapse;font-size:14px}
 .typeline{display:inline-block;overflow:hidden;white-space:nowrap;vertical-align:bottom;animation:dndType 3.4s steps(14) infinite}
 @media (prefers-reduced-motion:reduce){
   *,*::before,*::after{animation-duration:0.001ms !important;animation-iteration-count:1 !important;transition-duration:0.001ms !important}
-  html{scroll-behavior:auto}
   .rain span{animation:none;transform:none}
   .typeline{animation:none;width:auto}
   .dvd{animation:none;left:38%;top:40%}
