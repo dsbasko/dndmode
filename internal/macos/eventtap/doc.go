@@ -34,6 +34,62 @@
 // pushed onto the `RestoreState` LIFO chain in `cmd/dndmode/main.go`
 // Step 17, replacing the Phase 3 `mock-tap` placeholder.
 //
+//	func CaptureConfirmed(ctx context.Context, prompt func(pass int), log *slog.Logger) ([]hotkey.Spec, error)
+//
+// `CaptureConfirmed` is the OTHER production entry point, used by
+// `dndmode --set-password` and by nothing else. It installs a tap to READ
+// the keystroke ring rather than to watch it: no verifier, no sink, no
+// poller goroutine (`installForCapture` → `installInternal` with both nil).
+// It reads the sequence twice, returns it only if the two entries agree,
+// and takes the tap down in a single defer. See the capture section below.
+//
+// # Capture mode (--set-password)
+//
+// While `CaptureConfirmed` runs, input for the ENTIRE system is suppressed
+// at `kCGHIDEventTap` exactly as it is under the shield — the callback is
+// the same one, and it swallows every event it records. Ctrl-C is part of
+// "every event": it never reaches this process, so the signal machinery
+// cannot end the capture, and `cmd/dndmode` additionally turns the tty raw
+// (ISIG off) for the duration. Four things can end it, and they are the
+// whole safety story of the branch:
+//
+//   - Escape, unmodified — the voluntary exit (`ErrCaptureCancelled`);
+//   - `captureIdleTimeout`, 10s with no keystroke — covers "walked away";
+//   - `captureTotalTimeout`, 60s — covers "keystrokes trickle in forever";
+//   - `hotkey.MaxSteps + 1` presses with no Return (`ErrCaptureTooLong`),
+//     because silently truncating would hash a prefix of what was typed.
+//
+// Both ceilings are PER PASS: the confirmation pass gets its own fresh
+// budget rather than inheriting what the first one spent. `ctx` is a fifth
+// exit for callers that keep their own signal handler alive.
+//
+// The tap is installed ONCE and held across both passes — it is NOT torn
+// down after the first Return and reinstalled for the second. Any gap
+// without a tap is an open terminal, and the user is already typing into it:
+// the leading steps of the secret would go to the shell, echo into the
+// scrollback and stay in the tty input buffer for whatever runs next. That
+// is also why the prompts are printed through a callback from inside this
+// package instead of by `main.go` between two calls — two calls are exactly
+// what would reopen the gap.
+//
+// Holding one tap has one consequence that must be handled rather than
+// ignored: a tap has exactly one install-time ring baseline. The first pass
+// runs from it; the second runs from the `endSeq` the first returned, which
+// points one record past the terminating Return. Handing the install-time
+// baseline to the second pass would make it re-scan the first pass's
+// records, stop on the first pass's Return, and return an identical sequence
+// without waiting for a single keystroke — confirmation would become a
+// tautology that ratifies a typo as readily as a correct entry, with the
+// plaintext already deleted and the length deliberately not stored.
+//
+// Nothing about a capture is logged — not a pass boundary, not a step count,
+// not a duration — because two timestamped lines subtract to the exact
+// duration of the confirmation pass, and the timing of a secret is as much a
+// secret as its length. The single-pass loop (`collectSteps`) stays
+// unexported for the matching reason: an unconfirmed capture is a typo that
+// nothing downstream can detect, so the package offers no way to perform
+// one.
+//
 // # Unlock mechanism: ring in C, matching in Go
 //
 // The comparison does NOT happen in the CGEventTap callback. The pipeline is:

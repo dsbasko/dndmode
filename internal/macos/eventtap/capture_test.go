@@ -16,6 +16,7 @@ package eventtap
 import (
 	"context"
 	"errors"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -652,4 +653,225 @@ func runCapture(
 
 	_, _, err := collectSteps(ctx, 0, seq, snapshot, now, discardLogger())
 	return err
+}
+
+// ---------------------------------------------------------------------------
+// two-pass confirmation
+// ---------------------------------------------------------------------------
+
+// promptRecorder captures the pass numbers confirmPasses announced and, on
+// the pass it is armed for, feeds the ring the entry that pass is supposed to
+// wait for. Arming happens INSIDE the callback rather than before the call,
+// which is the point: a second pass seeded from the first pass's baseline
+// would already have returned by the time this runs, so any test that passes
+// with the input supplied here is a test that proves the hand-off works.
+type promptRecorder struct {
+	mu     sync.Mutex
+	passes []int
+	onPass map[int]func()
+}
+
+func (p *promptRecorder) prompt(pass int) {
+	p.mu.Lock()
+	p.passes = append(p.passes, pass)
+	fn := p.onPass[pass]
+	p.mu.Unlock()
+	if fn != nil {
+		fn()
+	}
+}
+
+func (p *promptRecorder) seen() []int {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return append([]int(nil), p.passes...)
+}
+
+// TestConfirmPasses_AgreeingEntries is the success path, and it is written so
+// that it can only pass if the second pass genuinely waited: the ring holds
+// nothing but the first entry until prompt(2) fires.
+func TestConfirmPasses_AgreeingEntries(t *testing.T) {
+	t.Parallel()
+
+	f := &fakeRing{}
+	f.push(mustEvents(t, "s w o r d return")...)
+
+	rec := &promptRecorder{onPass: map[int]func(){
+		2: func() { f.push(mustEvents(t, "s w o r d return")...) },
+	}}
+
+	ctx, cancel := context.WithTimeout(context.Background(), captureTimeout)
+	defer cancel()
+
+	got, err := confirmPasses(ctx, 0, f.seq, f.snapshot, nil, rec.prompt, discardLogger())
+	if err != nil {
+		t.Fatalf("confirmPasses: unexpected error: %v", err)
+	}
+	assertSpecs(t, got, mustSpecs(t, "s w o r d"))
+
+	if want := []int{1, 2}; !slices.Equal(rec.seen(), want) {
+		t.Errorf("prompt called with %v, want %v — both prompts must be printed, in order, while the tap is live", rec.seen(), want)
+	}
+}
+
+// TestConfirmPasses_Mismatch is the typo the second pass exists to catch.
+// Nothing is returned: the caller must not be able to hash either entry,
+// because there is no way to know which of the two the user meant.
+func TestConfirmPasses_Mismatch(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name   string
+		first  string
+		second string
+	}{
+		{name: "different step", first: "s w o r d return", second: "s w o r f return"},
+		{name: "second is a prefix", first: "s w o r d return", second: "s w o return"},
+		{name: "second is longer", first: "s w o return", second: "s w o r d return"},
+		{name: "same steps, different modifiers", first: "a b return", second: "a shift+b return"},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			f := &fakeRing{}
+			f.push(mustEvents(t, tc.first)...)
+
+			rec := &promptRecorder{onPass: map[int]func(){
+				2: func() { f.push(mustEvents(t, tc.second)...) },
+			}}
+
+			ctx, cancel := context.WithTimeout(context.Background(), captureTimeout)
+			defer cancel()
+
+			got, err := confirmPasses(ctx, 0, f.seq, f.snapshot, nil, rec.prompt, discardLogger())
+			if !errors.Is(err, ErrCaptureMismatch) {
+				t.Fatalf("err = %v, want ErrCaptureMismatch", err)
+			}
+			if got != nil {
+				t.Errorf("confirmPasses returned %d steps alongside a mismatch; neither entry may survive", len(got))
+			}
+		})
+	}
+}
+
+// TestConfirmPasses_SecondPassWaitsForFreshInput is the tautology guard in
+// pure-Go form. With the ring left exactly as the first pass finished it and
+// no further input ever arriving, confirmPasses must block until the context
+// expires rather than re-reading the first pass's records and "confirming"
+// them against themselves.
+//
+// A regression that seeds the second pass from the install-time baseline —
+// or from anything else at or before the first Return — turns this test's
+// deadline into a successful capture, which is exactly the failure that
+// would hash a typo and lock the user out.
+func TestConfirmPasses_SecondPassWaitsForFreshInput(t *testing.T) {
+	t.Parallel()
+
+	f := &fakeRing{}
+	f.push(mustEvents(t, "s w o r d return")...)
+
+	rec := &promptRecorder{}
+
+	ctx, cancel := context.WithTimeout(context.Background(), captureTimeout)
+	defer cancel()
+
+	got, err := confirmPasses(ctx, 0, f.seq, f.snapshot, nil, rec.prompt, discardLogger())
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("err = %v, want context.DeadlineExceeded — the second pass must wait for real input", err)
+	}
+	if got != nil {
+		t.Errorf("confirmPasses returned %d steps without a second entry ever being typed", len(got))
+	}
+	if want := []int{1, 2}; !slices.Equal(rec.seen(), want) {
+		t.Errorf("prompt called with %v, want %v", rec.seen(), want)
+	}
+}
+
+// TestConfirmPasses_FirstPassFailureStopsThere: a cancelled or timed-out
+// first pass must surface its own error and never announce a second pass.
+// Prompting for a confirmation of something that was never captured would be
+// a plain lie to the user, and it would hold the keyboard for another full
+// budget while doing it.
+func TestConfirmPasses_FirstPassFailureStopsThere(t *testing.T) {
+	t.Parallel()
+
+	f := &fakeRing{}
+	f.push(mustEvents(t, "s w o escape")...)
+
+	rec := &promptRecorder{}
+
+	ctx, cancel := context.WithTimeout(context.Background(), captureTimeout)
+	defer cancel()
+
+	got, err := confirmPasses(ctx, 0, f.seq, f.snapshot, nil, rec.prompt, discardLogger())
+	if !errors.Is(err, ErrCaptureCancelled) {
+		t.Fatalf("err = %v, want ErrCaptureCancelled", err)
+	}
+	if got != nil {
+		t.Errorf("confirmPasses returned %d steps after a cancelled first pass", len(got))
+	}
+	if want := []int{1}; !slices.Equal(rec.seen(), want) {
+		t.Errorf("prompt called with %v, want %v — no second prompt after a failed first pass", rec.seen(), want)
+	}
+}
+
+// TestConfirmPasses_SecondPassFailurePropagates: an error in the confirmation
+// pass is the user's error, surfaced verbatim. It is not downgraded to a
+// mismatch, and nothing captured so far comes back with it.
+func TestConfirmPasses_SecondPassFailurePropagates(t *testing.T) {
+	t.Parallel()
+
+	f := &fakeRing{}
+	f.push(mustEvents(t, "s w o r d return")...)
+
+	rec := &promptRecorder{onPass: map[int]func(){
+		2: func() { f.push(mustEvents(t, "s w escape")...) },
+	}}
+
+	ctx, cancel := context.WithTimeout(context.Background(), captureTimeout)
+	defer cancel()
+
+	got, err := confirmPasses(ctx, 0, f.seq, f.snapshot, nil, rec.prompt, discardLogger())
+	if !errors.Is(err, ErrCaptureCancelled) {
+		t.Fatalf("err = %v, want ErrCaptureCancelled", err)
+	}
+	if got != nil {
+		t.Errorf("confirmPasses returned %d steps after a cancelled second pass", len(got))
+	}
+}
+
+// TestConfirmPasses_NilPromptIsAllowed keeps the callback optional so tests
+// and any non-interactive caller need not supply one. It must not panic and
+// must not change the outcome.
+func TestConfirmPasses_NilPromptIsAllowed(t *testing.T) {
+	t.Parallel()
+
+	f := &fakeRing{}
+	f.push(mustEvents(t, "a b return")...)
+	f.push(mustEvents(t, "a b return")...)
+
+	ctx, cancel := context.WithTimeout(context.Background(), captureTimeout)
+	defer cancel()
+
+	got, err := confirmPasses(ctx, 0, f.seq, f.snapshot, nil, nil, discardLogger())
+	if err != nil {
+		t.Fatalf("confirmPasses: unexpected error: %v", err)
+	}
+	assertSpecs(t, got, mustSpecs(t, "a b"))
+}
+
+// TestErrCaptureMismatch_NeverEchoesTheSecret extends the sentinel leak pin
+// to the one error the two-pass layer adds. Saying which step differed, or
+// that one entry was longer, would describe the secret to a terminal the
+// user cannot yet type into — and unlike the collectSteps sentinels, this
+// one is raised at the moment BOTH entries are in hand, so it is the message
+// with the most to give away.
+func TestErrCaptureMismatch_NeverEchoesTheSecret(t *testing.T) {
+	t.Parallel()
+
+	if i := strings.IndexAny(ErrCaptureMismatch.Error(), "0123456789"); i >= 0 {
+		t.Errorf("ErrCaptureMismatch contains a digit at offset %d; no step count or position may reach the terminal", i)
+	}
 }

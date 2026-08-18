@@ -701,8 +701,33 @@ func (r *Releaser) Release() error {
 // bundled here so the three plans can land in parallel and so the smoke
 // test stays minimal. Production callers MUST use InstallAll.
 func installTapOnly(v matcher.Verifier, sink chan<- struct{}, log *slog.Logger) (*Releaser, error) {
-	r, _, err := installInternal(v, sink, log)
+	r, _, _, err := installInternal(v, sink, log)
 	return r, err
+}
+
+// installForCapture installs the tap for `--set-password`: same C-side path
+// as every other install, but with no verifier, no sink and no poller
+// goroutine. It returns the Releaser and the install-time ring baseline.
+//
+// It is a two-line wrapper over installInternal on purpose. The capture
+// branch needs exactly one thing the poller path does not — the baseline —
+// and it needs it sampled at precisely the same instant installInternal
+// samples its own: after eventtap_install_c has zeroed the ring and BEFORE
+// the tap source is attached to the worker run loop. Re-deriving it here
+// with a second seq() call would read a live counter and silently classify
+// everything typed in the interim as predating the capture, which on this
+// path means a truncated secret gets hashed and stored. Reusing the one
+// sampling site is what makes that impossible rather than unlikely.
+//
+// Nothing is added to the `.m` side for this: the C tap does not know or
+// care whether a poller is reading the ring it fills.
+//
+// The returned Releaser carries nil poller channels; Release nil-guards both
+// and its ring wipe still runs, which matters more here than anywhere else —
+// the ring this tap filled holds the secret the user just typed.
+func installForCapture(log *slog.Logger) (*Releaser, uint64, error) {
+	r, _, baseSeq, err := installInternal(nil, nil, log)
+	return r, baseSeq, err
 }
 
 // installInternal is the package-private install-and-return-tap helper
@@ -714,12 +739,27 @@ func installTapOnly(v matcher.Verifier, sink chan<- struct{}, log *slog.Logger) 
 // site, and the tap value is never stored on a struct field that would
 // trip the heuristic.
 //
+// The third return value is the poller baseline — the press counter sampled
+// at the one instant it is provably quiescent (see the `baseSeq := seq()`
+// comment in the body). The poller path consumes it internally; the capture
+// path (installForCapture) needs it in the caller's hands, because there the
+// consumer is collectSteps rather than a goroutine started here.
+//
 // Logger fallback, latch reset, and mask pre-computation are identical
 // to the original `Install` body — extracted verbatim during.
-func installInternal(v matcher.Verifier, sink chan<- struct{}, log *slog.Logger) (*Releaser, C.CFMachPortRef, error) {
+func installInternal(v matcher.Verifier, sink chan<- struct{}, log *slog.Logger) (*Releaser, C.CFMachPortRef, uint64, error) {
 	if log == nil {
 		log = slog.Default()
 	}
+
+	// captureOnly is the --set-password shape: a tap installed to READ the
+	// keystroke ring rather than to watch it for a configured secret, so it
+	// arrives with neither a verifier nor a sink and gets no poller
+	// goroutine. Both halves are required to be absent — a verifier with no
+	// sink would match into nowhere, a sink with no verifier is the
+	// empty-code lockout the guard below exists to refuse — so the mode is
+	// keyed on the pair and not on either one alone.
+	captureOnly := v == nil && sink == nil
 
 	// Reject the empty code before touching CoreGraphics — see the
 	// ErrEmptyUnlockCode paragraph on installTapOnly for why a zero-step
@@ -731,9 +771,14 @@ func installInternal(v matcher.Verifier, sink chan<- struct{}, log *slog.Logger)
 	// including the empty one — so a nil-only check would install the tap,
 	// raise the shield and leave no input able to lower it. *Digest reports
 	// MaxLen() == hotkey.MaxSteps unconditionally, so it never trips this.
-	if v == nil || v.MaxLen() == 0 {
+	//
+	// captureOnly is exempt because there is no unlock to be locked out of:
+	// nothing matches the ring on that path, the tap comes down when
+	// CaptureConfirmed returns, and the ceilings inside collectSteps — not a
+	// verifier — are what bound how long it holds the keyboard.
+	if !captureOnly && (v == nil || v.MaxLen() == 0) {
 		var zero C.CFMachPortRef
-		return nil, zero, ErrEmptyUnlockCode
+		return nil, zero, 0, ErrEmptyUnlockCode
 	}
 
 	// Refuse to reuse C-side state a previous teardown could not quiesce.
@@ -744,7 +789,7 @@ func installInternal(v matcher.Verifier, sink chan<- struct{}, log *slog.Logger)
 	// this costs nothing in production.
 	if teardownUnclean.Load() {
 		var zero C.CFMachPortRef
-		return nil, zero, ErrTeardownUnclean
+		return nil, zero, 0, ErrTeardownUnclean
 	}
 
 	// The unlock verifier arrives already built and already masked. Both
@@ -766,7 +811,7 @@ func installInternal(v matcher.Verifier, sink chan<- struct{}, log *slog.Logger)
 	rc := C.eventtap_install_c(&cTap)
 	if rc != 0 {
 		var zero C.CFMachPortRef
-		return nil, zero, fmt.Errorf("%w: rc=%d (likely Accessibility revoked, SecureEventInput active, or kernel out of mach ports)",
+		return nil, zero, 0, fmt.Errorf("%w: rc=%d (likely Accessibility revoked, SecureEventInput active, or kernel out of mach ports)",
 			ErrTapInstallFailed, int(rc))
 	}
 
@@ -898,9 +943,9 @@ func installInternal(v matcher.Verifier, sink chan<- struct{}, log *slog.Logger)
 			// goroutine's recover defer above; here we surface the
 			// category in the error returned to main.go so the
 			// top-level recover doesn't double-log.
-			return nil, zero, fmt.Errorf("%w: worker goroutine panicked before run-loop handshake", ErrTapInstallFailed)
+			return nil, zero, 0, fmt.Errorf("%w: worker goroutine panicked before run-loop handshake", ErrTapInstallFailed)
 		}
-		return nil, zero, fmt.Errorf("%w: worker run-loop registration rc=%d", ErrTapInstallFailed, int(hs.rc))
+		return nil, zero, 0, fmt.Errorf("%w: worker run-loop registration rc=%d", ErrTapInstallFailed, int(hs.rc))
 	}
 	// Second tap: session-level trackpad-gesture suppressor
 	// (gesturetap_darwin.m). hs.loop — the worker run loop the handshake
@@ -936,11 +981,21 @@ func installInternal(v matcher.Verifier, sink chan<- struct{}, log *slog.Logger)
 			teardownUnclean.Store(true)
 		}
 		var zero C.CFMachPortRef
-		return nil, zero, fmt.Errorf("%w: gesture tap rc=%d (session-level dock-gesture suppression)%s", ErrTapInstallFailed, int(rc), rollbackNote)
+		return nil, zero, 0, fmt.Errorf("%w: gesture tap rc=%d (session-level dock-gesture suppression)%s", ErrTapInstallFailed, int(rc), rollbackNote)
 	}
 
-	stopPoller := make(chan struct{})
-	pollerDone := make(chan struct{})
+	// Both channels stay nil in captureOnly mode, and nil is the correct
+	// value rather than an unused one: Release closes stopPoller and then
+	// BLOCKS on pollerDone, so a non-nil pair with no goroutine behind it
+	// would hang the teardown of the --set-password branch forever — with
+	// the tap still holding every key on the machine. Release nil-guards
+	// both (see its Step 3), so leaving them unset is what makes the
+	// poller-less Releaser tear down cleanly.
+	var stopPoller, pollerDone chan struct{}
+	if !captureOnly {
+		stopPoller = make(chan struct{})
+		pollerDone = make(chan struct{})
+	}
 
 	// Capture cTap by value into the closures so the disable/uninstall
 	// functions stay bound to the install-time mach port — Release nilling
@@ -1083,13 +1138,21 @@ func installInternal(v matcher.Verifier, sink chan<- struct{}, log *slog.Logger)
 	// newSnapshotFn is called HERE, once, rather than per tick: it owns a
 	// staging buffer that must not be shared with any other goroutine, and
 	// this poller is its only user.
-	snapshotFn := newSnapshotFn()
-	go func() {
-		defer close(pollerDone)
-		pollSequence(stopPoller, baseSeq, seq, snapshotFn, seqMatcher, sink, log)
-	}()
+	//
+	// captureOnly skips the whole block. The capture path reads the same ring
+	// through its own newSnapshotFn on the calling goroutine, and starting a
+	// poller alongside it would put a second reader on that buffer for no
+	// purpose — there is nothing to match, and a send into a nil sink would
+	// be a leak of the one signal this package emits.
+	if !captureOnly {
+		snapshotFn := newSnapshotFn()
+		go func() {
+			defer close(pollerDone)
+			pollSequence(stopPoller, baseSeq, seq, snapshotFn, seqMatcher, sink, log)
+		}()
+	}
 
-	return r, cTap, nil
+	return r, cTap, baseSeq, nil
 }
 
 // InstallAll is the production composite that wires the three
@@ -1153,7 +1216,7 @@ func InstallAll(v matcher.Verifier, sink chan<- struct{}, log *slog.Logger) (*Re
 	// helpers without storing it on a Releaser field — see the
 	// Design note on the Releaser struct for the go-vet
 	// / GC-safety rationale).
-	r, cTap, err := installInternal(v, sink, log)
+	r, cTap, _, err := installInternal(v, sink, log)
 	if err != nil {
 		// Nothing acquired; propagate the wrapped error so callers can
 		// `errors.Is(err, ErrTapInstallFailed)` for exit-code dispatch.

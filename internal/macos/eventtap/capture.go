@@ -6,6 +6,7 @@ import (
 	"context"
 	"errors"
 	"log/slog"
+	"slices"
 	"time"
 
 	"github.com/dsbasko/dndmode/internal/config/hotkey"
@@ -265,4 +266,154 @@ func collectSteps(
 			lastSeq = cur
 		}
 	}
+}
+
+// CaptureConfirmed reads a new unlock sequence from the keyboard twice over
+// ONE CGEventTap and returns it only if both entries agree.
+//
+// It is the only exported way into capture, and that is a safety property
+// rather than a packaging choice: a single-pass capture cannot be confirmed,
+// and an unconfirmed sequence is a typo that gets salted, hashed, written to
+// the config and never recovered — the plaintext is deleted by then and the
+// length is deliberately not stored, so there is nothing left to reconstruct
+// it from. collectSteps, the single pass, stays unexported so no caller can
+// assemble that outcome by accident. Confirmation is by construction here,
+// not by discipline at the call site.
+//
+// # Why the tap is installed once and not per pass
+//
+// Everything between the two passes — printing the second prompt, comparing
+// nothing yet, scheduling the next goroutine step — happens while the tap is
+// still live. If the tap came down after the first Return and went back up
+// for the second pass, that gap would be an open terminal: the leading steps
+// of the secret the user is already typing would go to the shell, echo into
+// the scrollback, and sit in the tty input buffer for whatever runs next.
+// The window is small and the leak it produces is permanent, so the tap is
+// installed once, held across both passes, and removed by a single defer.
+//
+// This is also why the prompts arrive through a callback instead of being
+// printed by the caller: main.go could not print between the passes without
+// the passes being separate calls, and separate calls are exactly what would
+// reintroduce the gap.
+//
+// prompt is invoked with 1 before the first pass and 2 before the second,
+// on this goroutine, with the tap live. It may be nil (tests). Whatever it
+// writes lands on a terminal whose input is currently suppressed, which is
+// the intended arrangement: the user can read but cannot type into anything
+// else.
+//
+// # Baselines
+//
+// The first pass starts from the install-time baseline installForCapture
+// returns. The second starts from the endSeq the FIRST pass returned — not
+// from the install-time value, and not from a fresh seq() read. Both
+// alternatives are wrong in opposite directions and collectSteps' doc
+// comment spells out why at length: the install-time value would have the
+// second pass re-scan the first pass's records and terminate on the first
+// pass's Return without ever waiting for a keystroke, making confirmation a
+// tautology; a fresh seq() read would discard everything typed between the
+// first Return and that read.
+//
+// # Safeguards
+//
+// While this function runs, input for the entire system is suppressed at
+// kCGHIDEventTap, Ctrl-C included — it never reaches the process, so the
+// signal machinery cannot end the capture. Four things can:
+//
+//   - Escape (unmodified) — the voluntary exit, ErrCaptureCancelled;
+//   - captureIdleTimeout (10s without a keystroke), per pass;
+//   - captureTotalTimeout (60s), per pass;
+//   - hotkey.MaxSteps + 1 presses without a Return, ErrCaptureTooLong.
+//
+// ctx is a fifth, for callers that install their own signal handler while
+// the tap is up (cmd/dndmode does).
+//
+// # What it does not say
+//
+// Nothing here is logged: not a pass boundary, not a step count, not a
+// duration. Two timestamped completion lines subtract to the exact length of
+// the confirmation pass, and the timing of a secret is as much a secret as
+// its length. The only line this function can emit is a Release failure,
+// which describes the tap and not the input.
+func CaptureConfirmed(ctx context.Context, prompt func(pass int), log *slog.Logger) ([]hotkey.Spec, error) {
+	if log == nil {
+		log = slog.Default()
+	}
+
+	r, baseSeq, err := installForCapture(log)
+	if err != nil {
+		return nil, err
+	}
+	// One defer for both passes. Release restores input, and its ring wipe
+	// clears the C-side copy of what was just typed — which on this path is
+	// the new secret in full, not merely the tail of a session.
+	defer func() {
+		if relErr := r.Release(); relErr != nil {
+			log.Warn("eventtap: releasing the capture tap failed", slog.Any("err", relErr))
+		}
+	}()
+
+	// newSnapshotFn owns a staging buffer and is not safe for concurrent
+	// use. Constructed once here and used by both passes on this goroutine;
+	// installForCapture started no poller, so there is no second reader.
+	return confirmPasses(ctx, baseSeq, seq, newSnapshotFn(), time.Now, prompt, log)
+}
+
+// ErrCaptureMismatch means the two passes produced different sequences.
+//
+// Like every other capture sentinel it is a bare static string: saying WHERE
+// they diverged, or that one was longer, would describe the secret the user
+// just typed to a terminal they cannot yet type into.
+var ErrCaptureMismatch = errors.New("eventtap: the two entries did not match")
+
+// confirmPasses is CaptureConfirmed with the tap factored out: the two
+// passes, the baseline hand-off between them, the comparison and the wiping,
+// with every impure input (counter, ring, clock) arriving as a function
+// parameter. That split is what makes the two-pass logic testable — a real
+// CaptureConfirmed test would need a signed binary, an Accessibility grant
+// and a human at the keyboard, and would take the machine's input with it.
+func confirmPasses(
+	ctx context.Context,
+	baseSeq uint64,
+	seqFn func() uint64,
+	snapshot func([]matcher.KeyEvent) uint64,
+	now func() time.Time,
+	prompt func(pass int),
+	log *slog.Logger,
+) ([]hotkey.Spec, error) {
+	if prompt != nil {
+		prompt(1)
+	}
+	first, endSeq, err := collectSteps(ctx, baseSeq, seqFn, snapshot, now, log)
+	if err != nil {
+		return nil, err
+	}
+
+	if prompt != nil {
+		prompt(2)
+	}
+	// endSeq, not baseSeq and not seqFn() — see the Baselines section on
+	// CaptureConfirmed. Anything typed between the first Return and this
+	// point is already in the ring at or past endSeq, so it counts towards
+	// the second pass rather than being dropped.
+	second, _, err := collectSteps(ctx, endSeq, seqFn, snapshot, now, log)
+	if err != nil {
+		clear(first)
+		return nil, err
+	}
+
+	if !slices.Equal(first, second) {
+		// Both, immediately. A mismatch means one of them is the secret the
+		// user meant and the other is a typo, and there is no way to tell
+		// which — so neither may outlive this branch.
+		clear(first)
+		clear(second)
+		return nil, ErrCaptureMismatch
+	}
+
+	// The two are equal, so `second` is a redundant copy of the secret.
+	// `first` is returned and therefore not wiped here; its owner is the
+	// caller, which hashes it and drops it.
+	clear(second)
+	return first, nil
 }

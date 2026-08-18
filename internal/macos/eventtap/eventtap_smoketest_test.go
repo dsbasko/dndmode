@@ -9,6 +9,8 @@
 package eventtap
 
 import (
+	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"os"
@@ -386,5 +388,191 @@ func TestEventTap_Smoketest_MultiStepCodeMatches(t *testing.T) {
 		// Matched — the tap is torn down by t.Cleanup.
 	case <-time.After(20 * time.Second):
 		t.Fatalf("unlock code %q typed but no match reached the sink within 20s", code)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// --set-password capture
+// ---------------------------------------------------------------------------
+
+// captureResult is what a CaptureConfirmed run started on its own goroutine
+// hands back. The goroutine is not an implementation detail of the test
+// harness but the point of it: CaptureConfirmed blocks for as long as the
+// operator takes, and one of the scenarios below asserts that it is STILL
+// blocked at a moment of the test's choosing — which cannot be observed from
+// the goroutine that called it.
+type captureResult struct {
+	steps []hotkey.Spec
+	err   error
+}
+
+// startCapture runs CaptureConfirmed in the background under a bounded
+// context and returns the channel its result arrives on, plus a channel that
+// is signalled every time a prompt is printed.
+//
+// The context ceiling is a backstop for an operator who walks away: the
+// capture's own idle timeout would fire first in every ordinary case, but a
+// hung test here leaves the machine with no keyboard, so it gets a hard
+// bound in addition to the ones under test.
+//
+// The prompt callback prints through promptOperator's channel — stderr —
+// which still reaches the screen while the tap is up. Only INPUT is
+// suppressed during a capture; output is not.
+func startCapture(t *testing.T, timeout time.Duration, text map[int]string) (<-chan captureResult, <-chan int) {
+	t.Helper()
+
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	t.Cleanup(cancel)
+
+	prompts := make(chan int, 2)
+	done := make(chan captureResult, 1)
+
+	log := slog.New(slog.NewTextHandler(os.Stderr, nil))
+	go func() {
+		steps, err := CaptureConfirmed(ctx, func(pass int) {
+			fmt.Fprintf(os.Stderr, "\n>>> [pass %d] %s\n", pass, text[pass])
+			prompts <- pass
+		}, log)
+		done <- captureResult{steps: steps, err: err}
+	}()
+	return done, prompts
+}
+
+// awaitPrompt blocks until the given pass has been announced.
+func awaitPrompt(t *testing.T, prompts <-chan int, want int) {
+	t.Helper()
+	select {
+	case got := <-prompts:
+		if got != want {
+			t.Fatalf("prompt announced pass %d, want %d", got, want)
+		}
+	case <-time.After(20 * time.Second):
+		t.Fatalf("pass %d was never announced", want)
+	}
+}
+
+// awaitCapture blocks until the capture returns.
+func awaitCapture(t *testing.T, done <-chan captureResult, timeout time.Duration) captureResult {
+	t.Helper()
+	select {
+	case res := <-done:
+		return res
+	case <-time.After(timeout):
+		t.Fatalf("CaptureConfirmed did not return within %s", timeout)
+		return captureResult{}
+	}
+}
+
+// TestEventTap_Smoketest_CaptureConfirmed_SecondPassWaitsForInput is the one
+// scenario that can only be checked on live hardware, and the one that
+// distinguishes a working baseline hand-off from a tautological confirmation.
+//
+// After the first Return, the operator is told to keep their hands OFF the
+// keyboard. If CaptureConfirmed seeded its second pass from the install-time
+// baseline — or from anything at or before that Return — it would re-scan the
+// first pass's records, terminate on the first pass's Return, and return an
+// "agreeing" pair without a single new keystroke. The hold below is what
+// catches that: a return during the quiet window is a failure, not a fast
+// success.
+//
+// The pure-Go twin (TestConfirmPasses_SecondPassWaitsForFreshInput) pins the
+// same property against a fake ring. This test pins it against the real one,
+// where endSeq comes from records the C callback actually wrote.
+//
+// It doubles as the success path: step accumulation, Return as terminator,
+// and two agreeing entries producing exactly what hotkey.ParseSequence makes
+// of the same string.
+func TestEventTap_Smoketest_CaptureConfirmed_SecondPassWaitsForInput(t *testing.T) {
+	requireInteractiveSmoke(t)
+
+	const typed = "q w e"
+	const hold = 5 * time.Second
+
+	want, err := hotkey.ParseSequence(typed)
+	if err != nil {
+		t.Fatalf("ParseSequence(%q): %v", typed, err)
+	}
+
+	done, prompts := startCapture(t, 90*time.Second, map[int]string{
+		1: fmt.Sprintf("Type %s then press Return. Nothing is echoed — input is blocked.", typed),
+		2: fmt.Sprintf("DO NOT TOUCH THE KEYBOARD for %s. Then type %s and press Return.", hold, typed),
+	})
+
+	awaitPrompt(t, prompts, 1)
+	awaitPrompt(t, prompts, 2)
+
+	// The quiet window. A result arriving here means the second pass never
+	// waited for input.
+	select {
+	case res := <-done:
+		t.Fatalf("CaptureConfirmed returned during the no-typing window (steps=%d, err=%v) — "+
+			"the confirmation pass replayed the first pass instead of waiting for input",
+			len(res.steps), res.err)
+	case <-time.After(hold):
+	}
+
+	res := awaitCapture(t, done, 60*time.Second)
+	if res.err != nil {
+		t.Fatalf("CaptureConfirmed: %v", res.err)
+	}
+	if len(res.steps) != len(want) {
+		t.Fatalf("captured %d steps, want %d", len(res.steps), len(want))
+	}
+	for i := range want {
+		if res.steps[i] != want[i] {
+			t.Errorf("step %d differs from what was typed", i)
+		}
+	}
+}
+
+// TestEventTap_Smoketest_CaptureConfirmed_Mismatch checks the confirmation
+// actually confirms: two different entries must be refused, with nothing
+// returned for the caller to hash.
+func TestEventTap_Smoketest_CaptureConfirmed_Mismatch(t *testing.T) {
+	requireInteractiveSmoke(t)
+
+	done, prompts := startCapture(t, 90*time.Second, map[int]string{
+		1: "Type  q w e  then press Return.",
+		2: "Now type something DIFFERENT — e.g.  q w r  — then press Return.",
+	})
+
+	awaitPrompt(t, prompts, 1)
+	awaitPrompt(t, prompts, 2)
+
+	res := awaitCapture(t, done, 60*time.Second)
+	if !errors.Is(res.err, ErrCaptureMismatch) {
+		t.Fatalf("err = %v, want ErrCaptureMismatch", res.err)
+	}
+	if res.steps != nil {
+		t.Errorf("CaptureConfirmed returned %d steps alongside a mismatch", len(res.steps))
+	}
+}
+
+// TestEventTap_Smoketest_CaptureConfirmed_EscapeCancels exercises the only
+// voluntary way out of a capture. It matters more than an ordinary
+// error-path test: while this runs, the tap holds every key on the machine
+// and Ctrl-C does not reach the process, so an Escape that failed to cancel
+// would leave the operator waiting out the idle ceiling with a dead keyboard.
+func TestEventTap_Smoketest_CaptureConfirmed_EscapeCancels(t *testing.T) {
+	requireInteractiveSmoke(t)
+
+	done, prompts := startCapture(t, 60*time.Second, map[int]string{
+		1: "Type a letter or two, then press ESCAPE (not Return).",
+		2: "BUG: a second pass must never be reached after Escape.",
+	})
+
+	awaitPrompt(t, prompts, 1)
+
+	res := awaitCapture(t, done, 40*time.Second)
+	if !errors.Is(res.err, ErrCaptureCancelled) {
+		t.Fatalf("err = %v, want ErrCaptureCancelled", res.err)
+	}
+	if res.steps != nil {
+		t.Errorf("CaptureConfirmed returned %d steps after a cancelled pass", len(res.steps))
+	}
+	select {
+	case pass := <-prompts:
+		t.Errorf("pass %d was announced after Escape cancelled the first one", pass)
+	default:
 	}
 }
