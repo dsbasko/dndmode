@@ -622,7 +622,7 @@ func TestAcceptance_BothUnlockKeys_ExitOne(t *testing.T) {
 		// The path must be the REAL config path ($HOME is a temp dir here),
 		// not a hardcoded ~/... literal — the operator has to be able to
 		// open the file the diagnostic names.
-		[]string{"both unlock_code and the deprecated hotkey", ".config/dndmode/config.yml"},
+		[]string{"more than one unlock secret", "unlock_code and hotkey", ".config/dndmode/config.yml"},
 		// Neither key's value may surface in the diagnostic.
 		[]string{"s w o r d f i s h", "Ctrl+Option+Cmd+X"},
 	)

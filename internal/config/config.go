@@ -775,15 +775,7 @@ unlock_code: %s
 `
 
 // writeDefault creates the parent directory (0o700) and writes the default
-// config via atomic tmp+rename (protects against concurrent dndmode
-// starts; the loser of the rename race still ends up with a valid file).
-//
-// The tmp file name is generated via os.CreateTemp, which guarantees a
-// per-call unique suffix even when multiple goroutines (or two processes
-// with the same PID after fork) race on the same path. os.CreateTemp also
-// opens the file with 0o600 perms by default, so the published file
-// inherits the correct mode through Rename. macOS APFS makes the final
-// rename atomic, so readers always observe a fully-written file.
+// config via the atomic tmp+rename in writeAtomic.
 func writeDefault(path string, cfg Config) error {
 	dir := filepath.Dir(path)
 	if err := os.MkdirAll(dir, configDirPerm); err != nil {
@@ -798,7 +790,26 @@ func writeDefault(path string, cfg Config) error {
 	// deprecated `hotkey`, which MUST stay commented or ResolveUnlockCode would
 	// reject the generated file as an ambiguous secret. yaml.Strict() in Load
 	// re-parses our output round-trip, so any drift would surface there.
-	body := fmt.Appendf(nil, defaultConfigTemplate, cfg.UnlockCode)
+	return writeAtomic(path, fmt.Appendf(nil, defaultConfigTemplate, cfg.UnlockCode))
+}
+
+// writeAtomic publishes body at path via tmp+rename (protects against
+// concurrent dndmode starts; the loser of the rename race still ends up with a
+// valid file). Shared by writeDefault and SaveUnlockHash so there is exactly
+// one place in this package that publishes a config file.
+//
+// The tmp file name is generated via os.CreateTemp, which guarantees a
+// per-call unique suffix even when multiple goroutines (or two processes
+// with the same PID after fork) race on the same path. os.CreateTemp also
+// opens the file with 0o600 perms by default, so the published file
+// inherits the correct mode through Rename. macOS APFS makes the final
+// rename atomic, so readers always observe a fully-written file.
+//
+// The tmp file is created in path's OWN directory, never in TMPDIR: rename is
+// only atomic within a filesystem, and SaveUnlockHash resolves symlinks that
+// may well point at another volume.
+func writeAtomic(path string, body []byte) error {
+	dir := filepath.Dir(path)
 	base := filepath.Base(path)
 	tmpFile, err := os.CreateTemp(dir, base+".tmp.*")
 	if err != nil {
