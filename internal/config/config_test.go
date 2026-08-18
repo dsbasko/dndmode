@@ -3,6 +3,8 @@
 package config_test
 
 import (
+	"bytes"
+	"encoding/base64"
 	"math"
 	"os"
 	"path/filepath"
@@ -14,7 +16,30 @@ import (
 
 	"github.com/dsbasko/dndmode/internal/config"
 	"github.com/dsbasko/dndmode/internal/config/hotkey"
+	"github.com/dsbasko/dndmode/internal/matcher"
 )
+
+// digestPair returns the base64 unlock_salt / unlock_hash pair that
+// --set-password would write for the given steps. Built through
+// matcher.HashSteps rather than pasted as a literal so the fixture cannot
+// drift away from the scheme it is supposed to exercise; the salt is a fixed
+// pattern because these tests assert on resolution, not on randomness.
+func digestPair(t *testing.T, steps []hotkey.Spec) (saltB64, hashB64 string) {
+	t.Helper()
+	salt := bytes.Repeat([]byte{0xA5}, matcher.SaltLen)
+	return base64.StdEncoding.EncodeToString(salt),
+		base64.StdEncoding.EncodeToString(matcher.HashSteps(salt, steps))
+}
+
+// keyEvents mirrors what the poller hands a Verifier for a typed sequence:
+// the same steps, arriving as matcher.KeyEvent values.
+func keyEvents(steps []hotkey.Spec) []matcher.KeyEvent {
+	evs := make([]matcher.KeyEvent, len(steps))
+	for i, st := range steps {
+		evs[i] = matcher.KeyEvent{Modifiers: st.Modifiers, KeyCode: st.KeyCode}
+	}
+	return evs
+}
 
 type testDeps struct {
 	tmpDir string
@@ -1097,15 +1122,21 @@ func TestIsWeakUnlockCode(t *testing.T) {
 	}
 }
 
-// ResolveUnlockCode implements the four-row precedence table. Each row is
-// asserted on BOTH the returned steps and the returned source, because callers
-// phrase their diagnostics off the source.
+// ResolveUnlockCode implements the precedence table. Each row is asserted on
+// the returned VERIFIER, the returned source and the weak flag, because
+// callers phrase their diagnostics off the last two and match off the first.
+//
+// The verifier is probed through MaxLen and Match rather than by reaching for
+// the steps, because the steps are exactly what the Verifier return type
+// exists to withhold: main.go must not be able to print the secret it just
+// resolved.
 func TestResolveUnlockCode(t *testing.T) {
 	tests := []struct {
 		name       string
 		cfg        config.Config
 		wantLen    int
 		wantSource string
+		wantWeak   bool
 		wantErr    bool
 	}{
 		{
@@ -1115,16 +1146,31 @@ func TestResolveUnlockCode(t *testing.T) {
 			wantSource: config.UnlockSourceCode,
 		},
 		{
-			name:       "only unlock_code, single chord → code of length 1",
+			name:       "only unlock_code, single chord → code of length 1, weak",
 			cfg:        config.Config{UnlockCode: config.DefaultUnlockCode},
 			wantLen:    1,
 			wantSource: config.UnlockSourceCode,
+			wantWeak:   true,
 		},
 		{
-			name:       "only hotkey → works, source names the deprecated key",
+			name:       "only hotkey → works, source names the deprecated key, weak",
 			cfg:        config.Config{Hotkey: "Ctrl+Option+Cmd+X"},
 			wantLen:    1,
 			wantSource: config.UnlockSourceHotkey,
+			wantWeak:   true,
+		},
+		{
+			name:       "unlock_code of exactly WeakUnlockSteps → not weak",
+			cfg:        config.Config{UnlockCode: "s w o r d f"},
+			wantLen:    config.WeakUnlockSteps,
+			wantSource: config.UnlockSourceCode,
+		},
+		{
+			name:       "unlock_code one step below the threshold → weak",
+			cfg:        config.Config{UnlockCode: "s w o r d"},
+			wantLen:    config.WeakUnlockSteps - 1,
+			wantSource: config.UnlockSourceCode,
+			wantWeak:   true,
 		},
 		{
 			name:    "both → error (ambiguous secret)",
@@ -1175,27 +1221,41 @@ func TestResolveUnlockCode(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			cfg := tt.cfg
-			got, source, err := config.ResolveUnlockCode(&cfg)
+			got, source, weak, err := config.ResolveUnlockCode(&cfg)
 			if tt.wantErr {
 				if err == nil {
 					t.Fatalf("ResolveUnlockCode() = nil error, want error")
 				}
 				if got != nil {
-					t.Errorf("steps = %v on error, want nil", got)
+					t.Errorf("verifier = %v on error, want nil", got)
 				}
 				if source != tt.wantSource {
 					t.Errorf("source = %q on error, want %q", source, tt.wantSource)
+				}
+				if weak {
+					t.Error("weak = true on error, want false")
 				}
 				return
 			}
 			if err != nil {
 				t.Fatalf("ResolveUnlockCode() = %v, want nil", err)
 			}
-			if len(got) != tt.wantLen {
-				t.Errorf("len(steps) = %d, want %d", len(got), tt.wantLen)
+			if _, ok := got.(*matcher.Sequence); !ok {
+				t.Errorf("verifier = %T, want *matcher.Sequence for a plaintext source", got)
+			}
+			// A plaintext code admits exactly one window width, so MinLen ==
+			// MaxLen == the step count; that is the only length the resolver
+			// still exposes and it is not secret (the caller already holds the
+			// config it came from).
+			if got.MinLen() != tt.wantLen || got.MaxLen() != tt.wantLen {
+				t.Errorf("verifier window = [%d, %d], want [%d, %d]",
+					got.MinLen(), got.MaxLen(), tt.wantLen, tt.wantLen)
 			}
 			if source != tt.wantSource {
 				t.Errorf("source = %q, want %q", source, tt.wantSource)
+			}
+			if weak != tt.wantWeak {
+				t.Errorf("weak = %v, want %v", weak, tt.wantWeak)
 			}
 		})
 	}
@@ -1211,7 +1271,16 @@ func TestResolveUnlockCode(t *testing.T) {
 // interpolated ("nope") went unchecked and leaked for real. Every whitespace-
 // and '+'-separated token of the input is a step of the user's passphrase, so
 // every one of them is checked here.
+//
+// The salt/hash keys are held to the same rule even though base64 of a digest
+// is not the secret. Two reasons: decodeUnlockDigest is the newest place a
+// config VALUE reaches an error string, so it is the likeliest place for the
+// rule to be forgotten; and a config in the wild can carry a hand-edited
+// unlock_hash that is not a digest at all. Every field of the config is
+// tokenised here, not just the one the case is named after.
 func TestResolveUnlockCode_ErrorNeverEchoesSecret(t *testing.T) {
+	validSalt, validHash := digestPair(t, mustParse(t, "s w o r d f"))
+
 	cases := []struct {
 		name string
 		cfg  config.Config
@@ -1223,22 +1292,51 @@ func TestResolveUnlockCode_ErrorNeverEchoesSecret(t *testing.T) {
 		{"too short after parsing", config.Config{UnlockCode: "s w o"}},
 		{"legacy hotkey key", config.Config{Hotkey: "ctrl+option+zebra"}},
 		{"legacy hotkey, whole value unparsable", config.Config{Hotkey: "s w o r d f i s h"}},
+		{"salt is not base64", config.Config{
+			UnlockSalt: "zebraquokkanarwhal!!", UnlockHash: validHash}},
+		{"hash is not base64", config.Config{
+			UnlockSalt: validSalt, UnlockHash: "axolotlpangolinseahorse!!"}},
+		{"salt is valid base64 of the wrong width", config.Config{
+			UnlockSalt: base64.StdEncoding.EncodeToString([]byte("quokka")), UnlockHash: validHash}},
+		{"hash is valid base64 of the wrong width", config.Config{
+			UnlockSalt: validSalt, UnlockHash: base64.StdEncoding.EncodeToString([]byte("narwhal"))}},
+		{"half a pair: salt without hash", config.Config{UnlockSalt: validSalt}},
+		{"half a pair: hash without salt", config.Config{UnlockHash: validHash}},
+		{"ambiguous: hash pair alongside unlock_code", config.Config{
+			UnlockCode: "zebra quokka narwhal axolotl",
+			UnlockSalt: validSalt, UnlockHash: validHash}},
 	}
 
 	for _, tt := range cases {
 		t.Run(tt.name, func(t *testing.T) {
-			_, _, err := config.ResolveUnlockCode(&tt.cfg)
+			_, _, _, err := config.ResolveUnlockCode(&tt.cfg)
 			if err == nil {
 				t.Fatal("expected an error")
 			}
-			raw := tt.cfg.UnlockCode
-			if raw == "" {
-				raw = tt.cfg.Hotkey
-			}
 			msg := err.Error()
-			for _, tok := range strings.FieldsFunc(raw, func(r rune) bool {
-				return r == ' ' || r == '\t' || r == '+'
-			}) {
+
+			// EVERY value-carrying field is checked, not just the one this
+			// case is named after: a message that named the wrong key's value
+			// would still be a leak.
+			//
+			// The two field shapes tokenise differently, and mixing them would
+			// weaken the pin rather than strengthen it. A step-shaped value
+			// separates steps by whitespace and modifiers by '+', so both are
+			// separators. In base64 '+' is a DATA character, so splitting on it
+			// would shred the value into short fragments like "9w" that match
+			// ordinary prose and turn this assertion into noise. Each field is
+			// therefore split by its own grammar; every resulting token is
+			// checked.
+			var toks []string
+			for _, stepShaped := range []string{tt.cfg.UnlockCode, tt.cfg.Hotkey} {
+				toks = append(toks, strings.FieldsFunc(stepShaped, func(r rune) bool {
+					return r == ' ' || r == '\t' || r == '+'
+				})...)
+			}
+			for _, b64 := range []string{tt.cfg.UnlockSalt, tt.cfg.UnlockHash} {
+				toks = append(toks, strings.Fields(b64)...)
+			}
+			for _, tok := range toks {
 				// One-character tokens are excluded: a single letter matches
 				// ordinary prose ("a", "s" in "steps") and would make the
 				// assertion fire on messages that leak nothing. Every token
@@ -1252,6 +1350,17 @@ func TestResolveUnlockCode_ErrorNeverEchoesSecret(t *testing.T) {
 			}
 		})
 	}
+}
+
+// mustParse is the fixture spelling of hotkey.ParseSequence: these tests care
+// about what the resolver does with a valid code, not about the parser.
+func mustParse(t *testing.T, code string) []hotkey.Spec {
+	t.Helper()
+	steps, err := hotkey.ParseSequence(code)
+	if err != nil {
+		t.Fatalf("ParseSequence(%q): %v", code, err)
+	}
+	return steps
 }
 
 // The YAML layer must honour the same no-echo contract as the parser: a
@@ -1330,21 +1439,28 @@ func TestLoader_Load_UnlockCodeRoundTrip(t *testing.T) {
 		t.Errorf("cfg.UnlockCode = %q, want %q", cfg.UnlockCode, code)
 	}
 
-	got, source, rerr := config.ResolveUnlockCode(&cfg)
+	got, source, weak, rerr := config.ResolveUnlockCode(&cfg)
 	if rerr != nil {
 		t.Fatalf("ResolveUnlockCode: %v", rerr)
 	}
-	if len(got) != 6 {
-		t.Errorf("len(steps) = %d, want 6", len(got))
+	if got.MaxLen() != 6 {
+		t.Errorf("verifier window = %d, want 6", got.MaxLen())
 	}
 	if source != config.UnlockSourceCode {
 		t.Errorf("source = %q, want %q", source, config.UnlockSourceCode)
 	}
-	if got[0].Modifiers != hotkey.ModCtrl {
-		t.Errorf("step 1 modifiers = %#x, want ModCtrl", got[0].Modifiers)
+	if weak {
+		t.Error("weak = true for a 6-step code, want false (6 is the recommended floor)")
 	}
-	if got[5].Modifiers != hotkey.ModCmd {
-		t.Errorf("step 6 modifiers = %#x, want ModCmd", got[5].Modifiers)
+	// The per-step modifiers are no longer returned, so they are asserted the
+	// only way that still matters: by typing the code at the verifier. This is
+	// a stronger check than the old field comparison — it exercises the mask
+	// and the exact-equality rule the poller actually depends on.
+	if !got.Match(keyEvents(mustParse(t, code))) {
+		t.Error("the round-tripped verifier does not match the code it was built from")
+	}
+	if got.Match(keyEvents(mustParse(t, "Ctrl+z e b r a Cmd+q"))) {
+		t.Error("the round-tripped verifier matched a different 6-step code")
 	}
 }
 
@@ -1361,18 +1477,18 @@ func TestLoader_Load_GeneratedDefaultResolves(t *testing.T) {
 		t.Fatal("created = false, want true")
 	}
 
-	got, source, rerr := config.ResolveUnlockCode(&cfg)
+	got, source, weak, rerr := config.ResolveUnlockCode(&cfg)
 	if rerr != nil {
 		t.Fatalf("generated default config does not resolve: %v", rerr)
 	}
-	if len(got) != 1 {
-		t.Errorf("len(steps) = %d, want 1 (the default is a single chord)", len(got))
+	if got.MaxLen() != 1 {
+		t.Errorf("verifier window = %d, want 1 (the default is a single chord)", got.MaxLen())
 	}
 	if source != config.UnlockSourceCode {
 		t.Errorf("source = %q, want %q", source, config.UnlockSourceCode)
 	}
-	if !config.IsWeakUnlockCode(got) {
-		t.Error("the shipped default must report as weak so an untouched config still warns")
+	if !weak {
+		t.Error("the shipped default must resolve as weak so an untouched config still warns")
 	}
 }
 
@@ -1573,93 +1689,318 @@ func TestLoader_Load_ParsesUnlockSaltHash(t *testing.T) {
 	}
 }
 
-// The new fields are inert until ResolveUnlockCode learns about them (Task 4):
-// they park in the struct and the precedence table behaves exactly as it did
-// before. Pinning this here means the Task 4 diff is visible as a behavior
-// change in THIS test rather than as a silent side effect — every case below
-// must be revisited when the hash source lands, and the "pair alone → error"
-// case flips from "neither key set" to a resolved *matcher.Digest.
-func TestResolveUnlockCode_SaltHashInertBeforeHashSource(t *testing.T) {
-	const (
-		validSalt = "8Qk2vN1pRr7sT0uW3xYz4A=="
-		validHash = "n7Kx0Qe5RtY8uI3oP1aS2dF4gH6jK9lZ0xC7vB5nM8w="
-	)
+// The salted-digest source: a valid unlock_salt / unlock_hash pair resolves
+// to a *matcher.Digest that matches the very steps --set-password recorded,
+// and to nothing else.
+//
+// Building the fixture through matcher.HashSteps rather than pasting a
+// literal is deliberate: this test is the one place the config layer and the
+// hashing layer have to agree on the preimage, so a fixture that could not
+// have come out of HashSteps would pin the agreement to a stale constant.
+func TestResolveUnlockCode_HashSource(t *testing.T) {
+	steps := mustParse(t, "s w o r d f i s h")
+	saltB64, hashB64 := digestPair(t, steps)
+
+	cfg := config.Config{UnlockSalt: saltB64, UnlockHash: hashB64}
+	got, source, weak, err := config.ResolveUnlockCode(&cfg)
+	if err != nil {
+		t.Fatalf("ResolveUnlockCode() = %v, want nil", err)
+	}
+	if _, ok := got.(*matcher.Digest); !ok {
+		t.Errorf("verifier = %T, want *matcher.Digest", got)
+	}
+	if source != config.UnlockSourceHash {
+		t.Errorf("source = %q, want %q", source, config.UnlockSourceHash)
+	}
+	if weak {
+		t.Error("weak = true for a hash source, want false (a digest stores no length)")
+	}
+	// A digest betrays no length, so it must offer every window the grammar
+	// admits — anything narrower would make some legitimate secret unenterable.
+	if got.MinLen() != 1 || got.MaxLen() != hotkey.MaxSteps {
+		t.Errorf("verifier window = [%d, %d], want [1, %d]",
+			got.MinLen(), got.MaxLen(), hotkey.MaxSteps)
+	}
+	if !got.Match(keyEvents(steps)) {
+		t.Error("the resolved digest does not match the steps it was built from")
+	}
+	if got.Match(keyEvents(mustParse(t, "s w o r d f i s"))) {
+		t.Error("the resolved digest matched a prefix of the recorded steps")
+	}
+	if got.Match(keyEvents(mustParse(t, "z e b r a q u o k"))) {
+		t.Error("the resolved digest matched an unrelated code of the same length")
+	}
+}
+
+// The weak flag is identically false for a hash source, whatever the recorded
+// code's length was — including lengths that WOULD warn as plaintext.
+//
+// This is the property that makes the flag safe to compute in the resolver at
+// all. main.go prints the weak warning conditionally, so the warning's mere
+// presence is a statement about the secret's length; for the hashed form the
+// length is not on disk, so the honest answer is "never warn" rather than
+// "warn if we can guess". A regression that derived the flag from, say, the
+// digest's MaxLen would make every hashed config warn on every start.
+func TestResolveUnlockCode_HashSourceNeverWeak(t *testing.T) {
+	for _, code := range []string{
+		"Ctrl+Option+Cmd+X", // 1 step — weak as plaintext
+		"s w o r d",         // 5 steps — weak as plaintext
+		"s w o r d f",       // 6 steps — exactly the threshold
+		"s w o r d f i s h", // 9 steps — comfortably above it
+	} {
+		t.Run(code, func(t *testing.T) {
+			steps := mustParse(t, code)
+
+			// Sanity: the same steps as PLAINTEXT must reach the opposite
+			// verdict for the short cases, or this test proves nothing.
+			plain := config.Config{UnlockCode: code}
+			_, _, plainWeak, err := config.ResolveUnlockCode(&plain)
+			if err != nil {
+				t.Fatalf("plaintext control: ResolveUnlockCode() = %v", err)
+			}
+			if plainWeak != config.IsWeakUnlockCode(steps) {
+				t.Fatalf("plaintext control: weak = %v, want %v", plainWeak, config.IsWeakUnlockCode(steps))
+			}
+
+			saltB64, hashB64 := digestPair(t, steps)
+			hashed := config.Config{UnlockSalt: saltB64, UnlockHash: hashB64}
+			got, source, weak, err := config.ResolveUnlockCode(&hashed)
+			if err != nil {
+				t.Fatalf("ResolveUnlockCode() = %v, want nil", err)
+			}
+			if weak {
+				t.Errorf("weak = true for the hashed form of a %d-step code, want false", len(steps))
+			}
+			if source != config.UnlockSourceHash {
+				t.Errorf("source = %q, want %q", source, config.UnlockSourceHash)
+			}
+			if !got.Match(keyEvents(steps)) {
+				t.Error("the resolved digest does not match the steps it was built from")
+			}
+		})
+	}
+}
+
+// decodeUnlockDigest is unexported and is tested THROUGH ResolveUnlockCode:
+// config_test is a black-box package, and its only caller is already
+// exported, so exporting it to reach it would widen the package surface for
+// nothing.
+//
+// yaml.Strict() only guards unknown KEYS, so any of these values parses out
+// of the file happily and lands here — this is the real gate.
+func TestResolveUnlockCode_HashSourceDecodeErrors(t *testing.T) {
+	validSalt, validHash := digestPair(t, mustParse(t, "s w o r d f"))
 
 	tests := []struct {
-		name       string
-		cfg        config.Config
-		wantLen    int
-		wantSource string
-		wantErr    bool
+		name string
+		cfg  config.Config
 	}{
 		{
-			name: "pair alongside unlock_code → unlock_code still wins, untouched",
-			cfg: config.Config{
-				UnlockCode: "s w o r d f i s h",
-				UnlockSalt: validSalt,
-				UnlockHash: validHash,
-			},
-			wantLen:    9,
-			wantSource: config.UnlockSourceCode,
+			name: "salt is not base64",
+			cfg:  config.Config{UnlockSalt: "!!not-base64!!", UnlockHash: validHash},
 		},
 		{
-			name: "pair alongside the deprecated hotkey → hotkey still resolves",
-			cfg: config.Config{
-				Hotkey:     "Ctrl+Option+Cmd+X",
-				UnlockSalt: validSalt,
-				UnlockHash: validHash,
-			},
-			wantLen:    1,
-			wantSource: config.UnlockSourceHotkey,
+			name: "hash is not base64",
+			cfg:  config.Config{UnlockSalt: validSalt, UnlockHash: "!!not-base64!!"},
 		},
 		{
-			name: "pair alongside BOTH → still the ambiguous-secret error",
+			name: "salt is valid base64 but too short",
 			cfg: config.Config{
-				UnlockCode: "s w o r d",
-				Hotkey:     "Ctrl+Cmd+X",
-				UnlockSalt: validSalt,
+				UnlockSalt: base64.StdEncoding.EncodeToString(bytes.Repeat([]byte{1}, matcher.SaltLen-1)),
 				UnlockHash: validHash,
 			},
-			wantErr: true,
 		},
 		{
-			name: "pair alone → error, no source yet (hash source lands in Task 4)",
+			name: "salt is valid base64 but too long",
 			cfg: config.Config{
-				UnlockSalt: validSalt,
+				UnlockSalt: base64.StdEncoding.EncodeToString(bytes.Repeat([]byte{1}, matcher.SaltLen+1)),
 				UnlockHash: validHash,
 			},
-			wantErr: true,
+		},
+		{
+			name: "hash is valid base64 but too short",
+			cfg: config.Config{
+				UnlockSalt: validSalt,
+				UnlockHash: base64.StdEncoding.EncodeToString(bytes.Repeat([]byte{1}, 31)),
+			},
+		},
+		{
+			name: "hash is valid base64 but too long",
+			cfg: config.Config{
+				UnlockSalt: validSalt,
+				UnlockHash: base64.StdEncoding.EncodeToString(bytes.Repeat([]byte{1}, 33)),
+			},
 		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			cfg := tt.cfg
-			got, source, err := config.ResolveUnlockCode(&cfg)
-			if tt.wantErr {
-				if err == nil {
-					t.Fatal("ResolveUnlockCode() = nil error, want error")
-				}
-				if got != nil {
-					t.Errorf("steps = %v on error, want nil", got)
-				}
-				if source != tt.wantSource {
-					t.Errorf("source = %q on error, want %q", source, tt.wantSource)
-				}
-				return
+			got, source, weak, err := config.ResolveUnlockCode(&cfg)
+			// A malformed value still SELECTED a source — one key was
+			// unambiguously in play and merely unusable. That is what
+			// distinguishes these from the half-pair and ambiguity errors,
+			// which report no source at all.
+			if source != config.UnlockSourceHash {
+				t.Errorf("source = %q on a decode error, want %q", source, config.UnlockSourceHash)
 			}
-			if err != nil {
-				t.Fatalf("ResolveUnlockCode() = %v, want nil", err)
+			if err == nil {
+				t.Fatal("ResolveUnlockCode() = nil error, want error")
 			}
-			if len(got) != tt.wantLen {
-				t.Errorf("len(steps) = %d, want %d", len(got), tt.wantLen)
+			if got != nil {
+				t.Errorf("verifier = %v on error, want nil", got)
 			}
-			if source != tt.wantSource {
-				t.Errorf("source = %q, want %q", source, tt.wantSource)
+			if weak {
+				t.Error("weak = true on error, want false")
+			}
+		})
+	}
+}
+
+// A resolvable pair is one secret in two keys; half of it is a botched
+// --set-password, not a fallback to some other source. The error names the
+// key that IS set and the one that is missing, so the fix is obvious, and it
+// reports NO source: half a pair never selected one.
+func TestResolveUnlockCode_HalfPair(t *testing.T) {
+	validSalt, validHash := digestPair(t, mustParse(t, "s w o r d f"))
+
+	tests := []struct {
+		name     string
+		cfg      config.Config
+		wantMsgs []string
+	}{
+		{
+			name:     "salt without hash",
+			cfg:      config.Config{UnlockSalt: validSalt},
+			wantMsgs: []string{"unlock_salt", "unlock_hash"},
+		},
+		{
+			name:     "hash without salt",
+			cfg:      config.Config{UnlockHash: validHash},
+			wantMsgs: []string{"unlock_salt", "unlock_hash"},
+		},
+		{
+			// Precedence: the half-pair check runs ahead of the source count,
+			// so this reports the actionable diagnostic rather than "ambiguous".
+			name:     "salt without hash, alongside a valid unlock_code",
+			cfg:      config.Config{UnlockCode: "s w o r d f", UnlockSalt: validSalt},
+			wantMsgs: []string{"unlock_salt", "unlock_hash"},
+		},
+		{
+			name:     "whitespace-only hash counts as absent",
+			cfg:      config.Config{UnlockSalt: validSalt, UnlockHash: "  \t "},
+			wantMsgs: []string{"unlock_salt", "unlock_hash"},
+		},
+		{
+			name:     "whitespace-only salt counts as absent",
+			cfg:      config.Config{UnlockSalt: "   ", UnlockHash: validHash},
+			wantMsgs: []string{"unlock_salt", "unlock_hash"},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := tt.cfg
+			got, source, weak, err := config.ResolveUnlockCode(&cfg)
+			if err == nil {
+				t.Fatal("ResolveUnlockCode() = nil error, want error")
+			}
+			if got != nil {
+				t.Errorf("verifier = %v on error, want nil", got)
+			}
+			if source != "" {
+				t.Errorf("source = %q on a half pair, want \"\" (no key was selected)", source)
+			}
+			if weak {
+				t.Error("weak = true on error, want false")
+			}
+			for _, want := range tt.wantMsgs {
+				if !strings.Contains(err.Error(), want) {
+					t.Errorf("error %q does not name %q", err, want)
+				}
+			}
+		})
+	}
+}
+
+// Two secrets are no secret: every pairwise combination of the three sources,
+// plus all three at once, is an error that names the offending KEYS.
+//
+// Every combination is spelled out rather than sampled because they do not
+// share a code path in an obvious way — the hash source is detected by a pair
+// of fields while the other two are single fields, so a regression that only
+// counted the string-valued keys would pass a sampled test.
+func TestResolveUnlockCode_AmbiguousSources(t *testing.T) {
+	validSalt, validHash := digestPair(t, mustParse(t, "s w o r d f"))
+
+	tests := []struct {
+		name     string
+		cfg      config.Config
+		wantKeys []string
+	}{
+		{
+			name:     "unlock_code + hotkey",
+			cfg:      config.Config{UnlockCode: "s w o r d f", Hotkey: "Ctrl+Cmd+X"},
+			wantKeys: []string{config.UnlockSourceCode, config.UnlockSourceHotkey},
+		},
+		{
+			name: "unlock_code + hash pair",
+			cfg: config.Config{
+				UnlockCode: "s w o r d f",
+				UnlockSalt: validSalt, UnlockHash: validHash,
+			},
+			wantKeys: []string{config.UnlockSourceCode, config.UnlockSourceHash},
+		},
+		{
+			name: "hotkey + hash pair",
+			cfg: config.Config{
+				Hotkey:     "Ctrl+Option+Cmd+X",
+				UnlockSalt: validSalt, UnlockHash: validHash,
+			},
+			wantKeys: []string{config.UnlockSourceHotkey, config.UnlockSourceHash},
+		},
+		{
+			name: "all three",
+			cfg: config.Config{
+				UnlockCode: "s w o r d f",
+				Hotkey:     "Ctrl+Option+Cmd+X",
+				UnlockSalt: validSalt, UnlockHash: validHash,
+			},
+			wantKeys: []string{
+				config.UnlockSourceCode, config.UnlockSourceHotkey, config.UnlockSourceHash,
+			},
+		},
+		{
+			name: "two sources where the OTHER one is invalid — still ambiguous, not parsed",
+			cfg: config.Config{
+				UnlockCode: "s w nope d",
+				UnlockSalt: validSalt, UnlockHash: validHash,
+			},
+			wantKeys: []string{config.UnlockSourceCode, config.UnlockSourceHash},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := tt.cfg
+			got, source, weak, err := config.ResolveUnlockCode(&cfg)
+			if err == nil {
+				t.Fatal("ResolveUnlockCode() = nil error, want error")
+			}
+			if got != nil {
+				t.Errorf("verifier = %v on error, want nil", got)
+			}
+			if source != "" {
+				t.Errorf("source = %q on an ambiguous config, want \"\"", source)
+			}
+			if weak {
+				t.Error("weak = true on error, want false")
+			}
+			for _, key := range tt.wantKeys {
+				if !strings.Contains(err.Error(), key) {
+					t.Errorf("error %q does not name the offending key %q", err, key)
+				}
 			}
 			// The resolver must not have mutated the caller's config.
-			if cfg.UnlockSalt != tt.cfg.UnlockSalt || cfg.UnlockHash != tt.cfg.UnlockHash {
-				t.Errorf("ResolveUnlockCode mutated the salt/hash pair: got (%q, %q), want (%q, %q)",
-					cfg.UnlockSalt, cfg.UnlockHash, tt.cfg.UnlockSalt, tt.cfg.UnlockHash)
+			if !reflect.DeepEqual(cfg, tt.cfg) {
+				t.Errorf("ResolveUnlockCode mutated the config: got %+v, want %+v", cfg, tt.cfg)
 			}
 		})
 	}

@@ -3,6 +3,7 @@
 package eventtap
 
 import (
+	"bytes"
 	"errors"
 	"sync/atomic"
 	"testing"
@@ -447,11 +448,18 @@ func TestSeq_NoTapInstalled_IsZero(t *testing.T) {
 }
 
 // TestInstall_EmptyUnlockCode_Rejected pins the package-boundary guard that
-// arrived with the []hotkey.Spec signature. Before it, `steps` was a single
-// hotkey.Spec value and "no code at all" was unrepresentable; a nil slice now
-// is, and it is the worst possible input: matcher.Sequence.Len() == 0 makes
-// MatchTail agree with the empty tail, so the poller would fire on the first
-// keypress of the session and drop the overlay for whoever pressed it.
+// arrived with the []hotkey.Spec signature and survived the move to
+// matcher.Verifier. Before it, `steps` was a single hotkey.Spec value and "no
+// code at all" was unrepresentable; matcher.NewSequence(nil) now is, and it is
+// the worst possible input: matcher.Sequence.Len() == 0 makes MatchTail agree
+// with the empty tail, so the poller would fire on the first keypress of the
+// session and drop the overlay for whoever pressed it.
+//
+// The nil-interface case is covered separately from the zero-step Sequence
+// because the two are NOT the same value and the naive port of this guard —
+// `if v == nil` — accepts the second. A Sequence built over no steps is a
+// perfectly non-nil interface; installing over it raises the shield with no
+// input able to lower it.
 //
 // Both entry points are covered because they are separate exported surfaces
 // (InstallAll is production, installTapOnly is the smoke-test path) and a
@@ -466,14 +474,15 @@ func TestInstall_EmptyUnlockCode_Rejected(t *testing.T) {
 	sink := make(chan struct{}, 1)
 
 	for _, tc := range []struct {
-		name  string
-		steps []hotkey.Spec
+		name string
+		v    matcher.Verifier
 	}{
-		{name: "nil", steps: nil},
-		{name: "empty", steps: []hotkey.Spec{}},
+		{name: "nil interface", v: nil},
+		{name: "sequence over nil steps", v: matcher.NewSequence(nil)},
+		{name: "sequence over empty steps", v: matcher.NewSequence([]hotkey.Spec{})},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			r, err := InstallAll(tc.steps, sink, nil)
+			r, err := InstallAll(tc.v, sink, nil)
 			if !errors.Is(err, ErrEmptyUnlockCode) {
 				t.Errorf("InstallAll(%s) error = %v, want ErrEmptyUnlockCode", tc.name, err)
 			}
@@ -482,7 +491,7 @@ func TestInstall_EmptyUnlockCode_Rejected(t *testing.T) {
 				_ = r.Release()
 			}
 
-			r, err = installTapOnly(tc.steps, sink, nil)
+			r, err = installTapOnly(tc.v, sink, nil)
 			if !errors.Is(err, ErrEmptyUnlockCode) {
 				t.Errorf("installTapOnly(%s) error = %v, want ErrEmptyUnlockCode", tc.name, err)
 			}
@@ -495,6 +504,81 @@ func TestInstall_EmptyUnlockCode_Rejected(t *testing.T) {
 
 	// Nothing was installed, so nothing may have been signalled: a guard that
 	// bailed out AFTER starting the poller would show up here.
+	select {
+	case <-sink:
+		t.Error("rejected install still signalled the exit sink")
+	default:
+	}
+}
+
+// TestInstall_EmptyUnlockCode_DigestPasses is the other half of the guard:
+// having pinned what it REJECTS, pin that it does not reject the hashed
+// secret. A *matcher.Digest carries no step slice, so a guard rewritten
+// around `len(...)` or around a type switch would turn every --set-password
+// config into an unstartable one — and it would do so on exactly the path no
+// plaintext test covers.
+//
+// The assertion is negative (not ErrEmptyUnlockCode) rather than "install
+// succeeded", and it is made with the unclean-teardown latch deliberately
+// SET. That latch is checked immediately after the empty-code guard, so a
+// verifier that gets past the first gate stops at the second — proving the
+// first let it through without ever calling CGEventTapCreate. A positive
+// assertion would need a real Accessibility grant and would take the
+// machine's keyboard for the duration of the test run.
+//
+// NOT t.Parallel: it mutates the process-global latch.
+func TestInstall_EmptyUnlockCode_DigestPasses(t *testing.T) {
+	prev := teardownUnclean.Load()
+	t.Cleanup(func() { teardownUnclean.Store(prev) })
+	teardownUnclean.Store(true)
+
+	salt := bytes.Repeat([]byte{0x5A}, matcher.SaltLen)
+	steps, err := hotkey.ParseSequence("s w o r d f i s h")
+	if err != nil {
+		t.Fatalf("ParseSequence: %v", err)
+	}
+	d, err := matcher.NewDigest(salt, matcher.HashSteps(salt, steps))
+	if err != nil {
+		t.Fatalf("NewDigest: %v", err)
+	}
+
+	sink := make(chan struct{}, 1)
+
+	for name, install := range map[string]func(matcher.Verifier) (*Releaser, error){
+		"InstallAll": func(v matcher.Verifier) (*Releaser, error) {
+			return InstallAll(v, sink, nil)
+		},
+		"installTapOnly": func(v matcher.Verifier) (*Releaser, error) {
+			return installTapOnly(v, sink, nil)
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			// Control: the empty verifier still stops at the FIRST gate, so
+			// the two errors below distinguish the two gates rather than
+			// merely differing.
+			r, err := install(matcher.NewSequence(nil))
+			if !errors.Is(err, ErrEmptyUnlockCode) {
+				t.Errorf("%s(empty sequence) error = %v, want ErrEmptyUnlockCode", name, err)
+			}
+			if r != nil {
+				_ = r.Release()
+			}
+
+			r, err = install(d)
+			if errors.Is(err, ErrEmptyUnlockCode) {
+				t.Errorf("%s(*matcher.Digest) was rejected as an empty unlock code", name)
+			}
+			if !errors.Is(err, ErrTeardownUnclean) {
+				t.Errorf("%s(*matcher.Digest) error = %v, want ErrTeardownUnclean "+
+					"(it must reach the second gate, i.e. pass the first)", name, err)
+			}
+			if r != nil {
+				t.Errorf("%s(*matcher.Digest) returned a non-nil Releaser alongside the error", name)
+				_ = r.Release()
+			}
+		})
+	}
+
 	select {
 	case <-sink:
 		t.Error("rejected install still signalled the exit sink")
@@ -527,10 +611,10 @@ func TestInstall_AfterUncleanTeardown_Rejected(t *testing.T) {
 
 	sink := make(chan struct{}, 1)
 	// Non-empty on purpose: the empty-code guard is checked first, so a
-	// zero-step slice here would pass this test for the wrong reason.
-	steps := []hotkey.Spec{{Modifiers: 0, KeyCode: 0x00}}
+	// zero-step verifier here would pass this test for the wrong reason.
+	v := matcher.NewSequence([]hotkey.Spec{{Modifiers: 0, KeyCode: 0x00}})
 
-	r, err := InstallAll(steps, sink, nil)
+	r, err := InstallAll(v, sink, nil)
 	if !errors.Is(err, ErrTeardownUnclean) {
 		t.Errorf("InstallAll after unclean teardown: error = %v, want ErrTeardownUnclean", err)
 	}
@@ -539,7 +623,7 @@ func TestInstall_AfterUncleanTeardown_Rejected(t *testing.T) {
 		_ = r.Release()
 	}
 
-	r, err = installTapOnly(steps, sink, nil)
+	r, err = installTapOnly(v, sink, nil)
 	if !errors.Is(err, ErrTeardownUnclean) {
 		t.Errorf("installTapOnly after unclean teardown: error = %v, want ErrTeardownUnclean", err)
 	}

@@ -5,16 +5,19 @@
 // handful of look/behavior toggles); migration to nested/versioned schema is
 // deferred (the design notes).
 //
-// The unlock secret has two keys: `unlock_code` (a whitespace-separated
-// sequence of steps) and the deprecated single-combination `hotkey`. They are
-// resolved into one []hotkey.Spec by ResolveUnlockCode, which is the single
-// source of truth for the precedence table — setting BOTH is a startup error.
+// The unlock secret has three storable forms: `unlock_code` (a
+// whitespace-separated sequence of steps), the deprecated
+// single-combination `hotkey`, and the `unlock_salt` + `unlock_hash` pair
+// written by --set-password. They are resolved into one matcher.Verifier by
+// ResolveUnlockCode, which is the single source of truth for the precedence
+// table — setting more than one of them is a startup error.
 //
 // Hot-reload is NOT supported: Load() is invoked exactly once at
 // PreFlight. Loader has no Watch/Reload/Subscribe methods by design.
 package config
 
 import (
+	"encoding/base64"
 	"errors"
 	"fmt"
 	"io/fs"
@@ -24,6 +27,7 @@ import (
 	"strings"
 
 	"github.com/dsbasko/dndmode/internal/config/hotkey"
+	"github.com/dsbasko/dndmode/internal/matcher"
 	"github.com/goccy/go-yaml"
 )
 
@@ -309,52 +313,187 @@ func IsWeakUnlockCode(steps []hotkey.Spec) bool {
 	return len(steps) < WeakUnlockSteps
 }
 
-// ResolveUnlockCode is the single source of truth for the unlock-secret
-// precedence table. It collapses the two config keys into one []hotkey.Spec so
-// no branching on "which key was it" survives further down the call chain — a
-// legacy hotkey is just a code of length 1.
+// decodeUnlockDigest turns the stored base64 `unlock_salt` / `unlock_hash`
+// pair into a *matcher.Digest. It is the only place raw config base64
+// reaches the matcher package.
 //
-//	only unlock_code : primary path
-//	only hotkey      : works, caller emits a deprecation warning under --debug
-//	both             : ERROR — an ambiguous unlock secret is not resolvable
-//	neither          : ERROR
+// It lives here rather than beside the fields it decodes because this is the
+// file that holds its only caller: exported one task earlier it would have
+// been `unused` to the linter, and — config_test.go being a black-box
+// package — untestable except through ResolveUnlockCode anyway, which is
+// exactly how its tests are written.
+//
+// Every error names the KEY and never the VALUE. A base64 blob is not the
+// secret itself, but the no-echo rule is enforced uniformly across this
+// package precisely so no future reader has to re-derive which diagnostics
+// are safe to interpolate into; base64.CorruptInputError reports a byte
+// offset only, and matcher.NewDigest reports the expected and actual widths
+// only.
+func decodeUnlockDigest(saltB64, hashB64 string) (*matcher.Digest, error) {
+	salt, err := base64.StdEncoding.DecodeString(saltB64)
+	if err != nil {
+		return nil, fmt.Errorf("unlock_salt is not valid base64: %w", err)
+	}
+	sum, err := base64.StdEncoding.DecodeString(hashB64)
+	if err != nil {
+		return nil, fmt.Errorf("unlock_hash is not valid base64: %w", err)
+	}
+	d, err := matcher.NewDigest(salt, sum)
+	if err != nil {
+		return nil, fmt.Errorf("invalid unlock_salt/unlock_hash: %w", err)
+	}
+	return d, nil
+}
+
+// ResolveUnlockCode is the single source of truth for the unlock-secret
+// precedence table. It collapses the three storable forms of the secret into
+// one matcher.Verifier so no branching on "which key was it" survives further
+// down the call chain — a legacy hotkey is just a code of length 1, and a
+// stored digest is just a verifier that happens not to know its own length.
+//
+//	only unlock_salt + unlock_hash : the --set-password form, a *matcher.Digest
+//	only unlock_code               : primary plaintext path, a *matcher.Sequence
+//	only hotkey                    : works, caller emits a deprecation warning under --debug
+//	two sources or more            : ERROR — an ambiguous unlock secret is not resolvable
+//	neither                        : ERROR
+//	half of the salt/hash pair     : ERROR — half a pair carries no secret
+//
+// The half-pair check runs FIRST, ahead of the source count, because it is
+// the more actionable diagnostic: a config with `unlock_code` plus a stray
+// `unlock_salt` is a botched --set-password, and "you have half a pair" says
+// what to do about it while "your secret is ambiguous" does not.
 //
 // The second return value is the config key the code came from
-// (UnlockSourceCode / UnlockSourceHotkey), so callers can name it in
-// diagnostics; it is empty when no single key was in play (both/neither).
-// Errors never contain the value of either key.
-func ResolveUnlockCode(cfg *Config) ([]hotkey.Spec, string, error) {
+// (UnlockSourceCode / UnlockSourceHotkey / UnlockSourceHash), so callers can
+// name it in diagnostics. It is empty when no single key was in play —
+// nothing set, several set, or half a pair set — and it IS filled in on a
+// decode/parse error, where one source was unambiguously in play and merely
+// malformed.
+//
+// The third return value is the WEAK flag: true when the resolved code is
+// shorter than the recommended WeakUnlockSteps. It is computed here, while
+// the steps are still in hand, because they do not survive the return — a
+// Verifier does not expose them (and must not), and re-parsing the config to
+// recover them would put a second copy of the precedence table in the
+// caller. For a digest source it is identically false by construction: a
+// digest stores no length, so there is nothing to be weak about that this
+// package could observe.
+//
+// Errors never contain the value of any key.
+func ResolveUnlockCode(cfg *Config) (matcher.Verifier, string, bool, error) {
 	code := strings.TrimSpace(cfg.UnlockCode)
 	legacy := strings.TrimSpace(cfg.Hotkey)
+	salt := strings.TrimSpace(cfg.UnlockSalt)
+	sum := strings.TrimSpace(cfg.UnlockHash)
+
+	if (salt == "") != (sum == "") {
+		present, missing := UnlockSourceHash, "unlock_salt"
+		if salt != "" {
+			present, missing = "unlock_salt", UnlockSourceHash
+		}
+		return nil, "", false, fmt.Errorf(
+			"config sets %s without %s; the two are one secret — "+
+				"re-run `dndmode --set-password` to write both",
+			present, missing)
+	}
+	hashed := salt != "" // sum != "" too, per the check above.
+
+	if sources := countTrue(hashed, code != "", legacy != ""); sources > 1 {
+		return nil, "", false, fmt.Errorf(
+			"config sets more than one unlock secret (%s); "+
+				"keep exactly one — the unlock secret must be unambiguous",
+			strings.Join(setUnlockKeys(hashed, code != "", legacy != ""), " and "))
+	}
 
 	switch {
-	case code != "" && legacy != "":
-		return nil, "", fmt.Errorf(
-			"config sets both unlock_code and the deprecated hotkey; " +
-				"delete the hotkey line — the unlock secret must be unambiguous")
+	case hashed:
+		d, err := decodeUnlockDigest(salt, sum)
+		if err != nil {
+			return nil, UnlockSourceHash, false, err
+		}
+		// Weak is false and not IsWeakUnlockCode(anything): the length the
+		// digest commits to is inside the hash and deliberately absent from
+		// disk, so no caller of this function can ever warn about it.
+		return d, UnlockSourceHash, false, nil
 	case code != "":
 		steps, err := hotkey.ParseSequence(code)
 		if err != nil {
-			return nil, UnlockSourceCode, fmt.Errorf("invalid unlock_code: %w", err)
+			return nil, UnlockSourceCode, false, fmt.Errorf("invalid unlock_code: %w", err)
 		}
 		if verr := ValidateUnlockCode(steps); verr != nil {
-			return nil, UnlockSourceCode, fmt.Errorf("invalid unlock_code: %w", verr)
+			return nil, UnlockSourceCode, false, fmt.Errorf("invalid unlock_code: %w", verr)
 		}
-		return steps, UnlockSourceCode, nil
+		return newMaskedSequence(steps), UnlockSourceCode, IsWeakUnlockCode(steps), nil
 	case legacy != "":
 		// Parse (not ParseStep): the legacy key keeps its legacy requirement of
 		// at least one modifier, which is also what ValidateUnlockCode demands
 		// of any 1-step code.
 		spec, err := hotkey.Parse(legacy)
 		if err != nil {
-			return nil, UnlockSourceHotkey, fmt.Errorf("invalid hotkey: %w", err)
+			return nil, UnlockSourceHotkey, false, fmt.Errorf("invalid hotkey: %w", err)
 		}
-		return []hotkey.Spec{spec}, UnlockSourceHotkey, nil
+		steps := []hotkey.Spec{spec}
+		return newMaskedSequence(steps), UnlockSourceHotkey, IsWeakUnlockCode(steps), nil
 	default:
-		return nil, "", fmt.Errorf(
-			"config sets neither unlock_code nor hotkey: add an unlock_code line " +
+		return nil, "", false, fmt.Errorf(
+			"config sets none of unlock_code, unlock_hash or hotkey: add an unlock_code line " +
+				"or run `dndmode --set-password` " +
 				"(see the generated ~/.config/dndmode/config.yml for the grammar)")
 	}
+}
+
+// newMaskedSequence builds the plaintext Verifier from steps whose modifiers
+// have been AND'ed with matcher.UserIntentionalMask.
+//
+// The masking used to live in eventtap.installInternal, which was the place
+// the Sequence was constructed; it moved here with the construction itself
+// when that function started taking a Verifier. Losing it would be a silent
+// lockout rather than a compile error: matcher.Sequence.MatchTail masks the
+// EVENT side and then compares for exact equality, so an unmasked system bit
+// on the CONFIGURED side makes the code unenterable. hotkey.ParseStep does
+// not currently emit any bit outside the mask, which is exactly why this is
+// defence in depth and has to be carried rather than dropped as redundant.
+//
+// A *Digest needs no counterpart: matcher.encodeStep masks inside the hash
+// preimage, on both the recording and the matching side.
+func newMaskedSequence(steps []hotkey.Spec) *matcher.Sequence {
+	masked := make([]hotkey.Spec, len(steps))
+	for i, st := range steps {
+		masked[i] = hotkey.Spec{
+			Modifiers: st.Modifiers & matcher.UserIntentionalMask,
+			KeyCode:   st.KeyCode,
+		}
+	}
+	return matcher.NewSequence(masked)
+}
+
+// countTrue reports how many of the given flags are set. Used only to detect
+// "more than one unlock secret", where the count is the whole answer.
+func countTrue(flags ...bool) int {
+	n := 0
+	for _, f := range flags {
+		if f {
+			n++
+		}
+	}
+	return n
+}
+
+// setUnlockKeys names the unlock keys the config actually set, in precedence
+// order, so the ambiguity error can tell the user which lines to look at.
+// It returns KEY NAMES only — never a value.
+func setUnlockKeys(hashed, coded, legacy bool) []string {
+	var keys []string
+	if hashed {
+		keys = append(keys, UnlockSourceHash)
+	}
+	if coded {
+		keys = append(keys, UnlockSourceCode)
+	}
+	if legacy {
+		keys = append(keys, UnlockSourceHotkey)
+	}
+	return keys
 }
 
 // NormalizeTerminalLanguage maps "" => the default terminal language (Go),

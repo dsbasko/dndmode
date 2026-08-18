@@ -619,21 +619,25 @@ func (r *Releaser) Release() error {
 }
 
 // installTapOnly installs a CGEventTap at kCGHIDEventTap level and starts
-// the poller that watches for the given unlock code. The C callback records
+// the poller that watches for the given unlock secret. The C callback records
 // every non-autorepeat key press into a static ring; the poller goroutine
 // snapshots that ring on a 10ms ticker, matches every tail of it against the
-// code in pure Go (matcher.Sequence), and on a match forwards a struct{} send
-// to sink (capacity 1, non-blocking select-default).
+// secret in pure Go (matcher.Verifier), and on a match forwards a struct{}
+// send to sink (capacity 1, non-blocking select-default).
 //
-// `steps` is the whole unlock code, in order. A legacy single combination is
-// just a code of length 1, so there is one matching path in the codebase
-// rather than two; the C side never learns the code at all.
+// `v` is the whole unlock secret in whichever storable form the config used:
+// a *matcher.Sequence for plaintext `unlock_code` (a legacy single
+// combination is just a code of length 1) or a *matcher.Digest for the
+// salted hash written by --set-password. This function does not care which —
+// that is the point of the interface, and it is why the C side never learns
+// the secret at all.
 //
-// An empty `steps` is rejected with ErrEmptyUnlockCode BEFORE the tap is
-// created: a zero-length matcher.Sequence would match the empty tail of every
-// snapshot, i.e. unlock on the first tick without a single keypress.
-// config.ValidateUnlockCode already rejects it upstream, so this is a
-// defence-in-depth gate on the package boundary, not the primary check.
+// A verifier that admits no window is rejected with ErrEmptyUnlockCode
+// BEFORE the tap is created: a zero-length matcher.Sequence would match the
+// empty tail of every snapshot, i.e. unlock on the first tick without a
+// single keypress. config.ValidateUnlockCode already rejects it upstream, so
+// this is a defence-in-depth gate on the package boundary, not the primary
+// check.
 //
 // fix: previously exposed as exported `Install`, but the returned
 // `*Releaser` had nil `watchdogStop` + nil `wakeStop` — Release() silently
@@ -651,15 +655,17 @@ func (r *Releaser) Release() error {
 // Logger fallback: nil → slog.Default() (mirrors powerassert.Acquire +
 // state.NewRestoreState + cocoa.NewController convention).
 //
-// Pre-masking: every step's Modifiers is AND'ed with
-// matcher.UserIntentionalMask before the matcher.Sequence is built, so the
-// configured side of every comparison is already masked. The C callback masks each incoming
-// event's flags with the twin USER_INTENTIONAL_MASK before recording it, and
-// MatchTail masks the recorded value again for good measure — no system bits
-// (CapsLock 0x10000, NumPad 0x200000, Help 0x400000, NX_NONCOALSESCEDMASK
-// 0x100) affect the result (the design notes). The masking on the configured
-// side matters because MatchTail compares for EXACT equality: an unmasked
-// stray bit in the Spec would make the code unenterable.
+// Pre-masking now happens on the CONSTRUCTION side, in
+// config.ResolveUnlockCode (plaintext: config.newMaskedSequence) and in
+// matcher.encodeStep (hashed): by the time a Verifier reaches this function
+// its configured side is already masked with matcher.UserIntentionalMask.
+// The C callback masks each incoming event's flags with the twin
+// USER_INTENTIONAL_MASK before recording it, and MatchTail masks the recorded
+// value again for good measure — no system bits (CapsLock 0x10000, NumPad
+// 0x200000, Help 0x400000, NX_NONCOALSESCEDMASK 0x100) affect the result (the
+// design notes). The masking on the configured side matters because MatchTail
+// compares for EXACT equality: an unmasked stray bit in the Spec would make
+// the code unenterable.
 //
 // Worker thread pattern (the design notes): a dedicated goroutine is spawned
 // inside installTapOnly. It calls runtime.LockOSThread() (no Unlock — the
@@ -694,8 +700,8 @@ func (r *Releaser) Release() error {
 // their own GCD timer / notification token respectively; they are NOT
 // bundled here so the three plans can land in parallel and so the smoke
 // test stays minimal. Production callers MUST use InstallAll.
-func installTapOnly(steps []hotkey.Spec, sink chan<- struct{}, log *slog.Logger) (*Releaser, error) {
-	r, _, err := installInternal(steps, sink, log)
+func installTapOnly(v matcher.Verifier, sink chan<- struct{}, log *slog.Logger) (*Releaser, error) {
+	r, _, err := installInternal(v, sink, log)
 	return r, err
 }
 
@@ -710,7 +716,7 @@ func installTapOnly(steps []hotkey.Spec, sink chan<- struct{}, log *slog.Logger)
 //
 // Logger fallback, latch reset, and mask pre-computation are identical
 // to the original `Install` body — extracted verbatim during.
-func installInternal(steps []hotkey.Spec, sink chan<- struct{}, log *slog.Logger) (*Releaser, C.CFMachPortRef, error) {
+func installInternal(v matcher.Verifier, sink chan<- struct{}, log *slog.Logger) (*Releaser, C.CFMachPortRef, error) {
 	if log == nil {
 		log = slog.Default()
 	}
@@ -718,7 +724,14 @@ func installInternal(steps []hotkey.Spec, sink chan<- struct{}, log *slog.Logger
 	// Reject the empty code before touching CoreGraphics — see the
 	// ErrEmptyUnlockCode paragraph on installTapOnly for why a zero-step
 	// Sequence is an immediate unlock rather than a never-matching one.
-	if len(steps) == 0 {
+	//
+	// The condition is `MaxLen() == 0` and NOT just `v == nil`, and the
+	// difference is the whole guard. matcher.NewSequence(nil) is a perfectly
+	// non-nil interface value whose MatchTail returns false for every tail
+	// including the empty one — so a nil-only check would install the tap,
+	// raise the shield and leave no input able to lower it. *Digest reports
+	// MaxLen() == hotkey.MaxSteps unconditionally, so it never trips this.
+	if v == nil || v.MaxLen() == 0 {
 		var zero C.CFMachPortRef
 		return nil, zero, ErrEmptyUnlockCode
 	}
@@ -734,42 +747,20 @@ func installInternal(steps []hotkey.Spec, sink chan<- struct{}, log *slog.Logger
 		return nil, zero, ErrTeardownUnclean
 	}
 
-	// Pre-mask every step's modifiers with the user-intentional mask so the
-	// matcher compares pre-masked against pre-masked.
-	// matcher.UserIntentionalMask is the single source of truth for which
-	// modifier bits represent user intent (Cmd | Option | Ctrl | Shift — and
-	// deliberately NOT Fn, which macOS raises on the whole function-key group
-	// by itself; see the mask's doc comment in matcher/matcher.go before
-	// "restoring" it here).
+	// The unlock verifier arrives already built and already masked. Both
+	// implementations are immutable after construction and their Match is
+	// pure, so the poller goroutine can use one without any synchronisation.
+	// A ring reset happens inside eventtap_install_c below, so the poller
+	// starts against an empty ring no matter what a previous Install left
+	// behind.
 	//
-	// The copy is deliberate: the caller's slice is not retained, so a
-	// caller that reuses or mutates its backing array after Install cannot
-	// change the code the poller is matching against.
-	masked := make([]hotkey.Spec, len(steps))
-	for i, st := range steps {
-		masked[i] = hotkey.Spec{
-			Modifiers: st.Modifiers & matcher.UserIntentionalMask,
-			KeyCode:   st.KeyCode,
-		}
-	}
-
-	// The unlock verifier. Built once, here, from the masked copy —
-	// matcher.Sequence is immutable after construction and Match is pure, so
-	// the poller goroutine can use it without any synchronisation. A ring
-	// reset happens inside eventtap_install_c below, so the poller starts
-	// against an empty ring no matter what a previous Install left behind.
-	//
-	// pollSequence takes a matcher.Verifier, not a *matcher.Sequence: the
-	// hashed secret written by `--set-password` arrives as a *matcher.Digest
-	// through the same parameter. Constructing the Sequence HERE, from the
-	// []hotkey.Spec this function still takes, is deliberately temporary —
-	// it keeps InstallAll's signature (and therefore main.go and both test
-	// files) untouched while the poller moves onto the interface. The
-	// []hotkey.Spec parameter is replaced by a Verifier one task later,
-	// together with the ErrEmptyUnlockCode guard above, which then has to be
-	// expressed as `v == nil || v.MaxLen() == 0` because `len(steps)` will
-	// no longer be in scope.
-	var seqMatcher matcher.Verifier = matcher.NewSequence(masked)
+	// The parameter is the interface rather than a *matcher.Sequence because
+	// the hashed secret written by `--set-password` arrives here as a
+	// *matcher.Digest through the same path. This package deliberately holds
+	// no opinion about which one it got: everything it needs is MinLen /
+	// MaxLen / Match, and anything more would put a copy of the config's
+	// precedence table on the wrong side of the package boundary.
+	seqMatcher := v
 
 	var cTap C.CFMachPortRef
 	rc := C.eventtap_install_c(&cTap)
@@ -1128,9 +1119,9 @@ func installInternal(steps []hotkey.Spec, sink chan<- struct{}, log *slog.Logger
 // Error path is roll-back-on-failure (threat — partial
 // initialisation must not leak):
 //
-//   - empty `steps` → return (nil, ErrEmptyUnlockCode) before any resource is
-//     touched (see the sentinel's docstring: a zero-step code matches the
-//     empty tail and would unlock on the first keypress).
+//   - a nil or zero-window `v` → return (nil, ErrEmptyUnlockCode) before any
+//     resource is touched (see the sentinel's docstring: a zero-step code
+//     matches the empty tail and would unlock on the first keypress).
 //   - `Install` failure → return (nil, wrapped err). Nothing acquired.
 //   - `StartWatchdog` failure → call r.Release() to tear down the tap +
 //     poller, then return wrapped err.
@@ -1152,7 +1143,7 @@ func installInternal(steps []hotkey.Spec, sink chan<- struct{}, log *slog.Logger
 //
 // Logger fallback: nil → slog.Default() (mirrors all other Install-shaped
 // constructors in this codebase).
-func InstallAll(steps []hotkey.Spec, sink chan<- struct{}, log *slog.Logger) (*Releaser, error) {
+func InstallAll(v matcher.Verifier, sink chan<- struct{}, log *slog.Logger) (*Releaser, error) {
 	if log == nil {
 		log = slog.Default()
 	}
@@ -1162,7 +1153,7 @@ func InstallAll(steps []hotkey.Spec, sink chan<- struct{}, log *slog.Logger) (*R
 	// helpers without storing it on a Releaser field — see the
 	// Design note on the Releaser struct for the go-vet
 	// / GC-safety rationale).
-	r, cTap, err := installInternal(steps, sink, log)
+	r, cTap, err := installInternal(v, sink, log)
 	if err != nil {
 		// Nothing acquired; propagate the wrapped error so callers can
 		// `errors.Is(err, ErrTapInstallFailed)` for exit-code dispatch.

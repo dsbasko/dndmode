@@ -8,15 +8,17 @@ import "errors"
 //
 //  1. Accessibility permission missing or revoked between
 //     `permissions.IsTrusted()` (Step 9-10 in main.go) and `Install` (Step 16).
+//
 // The Phase 3 binary identity caveat (eclecticlight.co
-//     "Apple Silicon signed code requirement") applies here — every `go
-//     install` produces a new ad-hoc identity which silently invalidates the
-//     prior TCC grant.
-//  2. SecureEventInput is active (some other process — Terminal in secure
-//     mode, password fields focused, sudo prompt — holds the global lock
-//     that suppresses HID-level taps).
-//  3. Kernel out of mach ports (very rare; reported by Daniel Raffel TIL
-//     2026-02-19 in long-running dev environments).
+//
+//	   "Apple Silicon signed code requirement") applies here — every `go
+//	   install` produces a new ad-hoc identity which silently invalidates the
+//	   prior TCC grant.
+//	2. SecureEventInput is active (some other process — Terminal in secure
+//	   mode, password fields focused, sudo prompt — holds the global lock
+//	   that suppresses HID-level taps).
+//	3. Kernel out of mach ports (very rare; reported by Daniel Raffel TIL
+//	   2026-02-19 in long-running dev environments).
 //
 // install path wraps the raw cgo return-code into this sentinel
 // via `fmt.Errorf("%w: ...", ErrTapInstallFailed, rc, hint)` so that
@@ -29,9 +31,10 @@ import "errors"
 var ErrTapInstallFailed = errors.New("eventtap: CGEventTapCreate returned NULL (missing Accessibility, SecureEventInput, or kernel out of mach ports)")
 
 // ErrEmptyUnlockCode is returned by InstallAll / installTapOnly when the
-// `steps` slice is empty. It is a package-boundary guard, not the primary
-// validation: config.ValidateUnlockCode already rejects a zero-step code with
-// a user-facing message, and main.go never gets past Step 5b with one.
+// verifier they were handed admits no window — a nil interface, or one whose
+// MaxLen() is 0. It is a package-boundary guard, not the primary validation:
+// config.ValidateUnlockCode already rejects a zero-step code with a
+// user-facing message, and main.go never gets past Step 5b with one.
 //
 // The guard exists because the failure mode is silent and total rather than
 // noisy. A zero-step matcher.Sequence has Len() == 0, so MatchTail is handed a
@@ -41,8 +44,16 @@ var ErrTapInstallFailed = errors.New("eventtap: CGEventTapCreate returned NULL (
 // tap that unlocks itself.
 //
 // This became reachable only when the install signature moved from a single
-// hotkey.Spec (always a value) to a []hotkey.Spec (nil-able); it is checked
-// before CGEventTapCreate so no mach port is created on this path.
+// hotkey.Spec (always a value) to a []hotkey.Spec (nil-able). When that
+// parameter later became a matcher.Verifier the guard had to be RESTATED
+// rather than merely ported: `v == nil` is the obvious translation and it is
+// wrong, because matcher.NewSequence(nil) is a non-nil interface value with
+// exactly the dangerous behavior above. MaxLen() == 0 is the condition that
+// still catches it, and matcher.Sequence.MaxLen documents that it is
+// load-bearing outside its own package for this reason. A *matcher.Digest
+// reports hotkey.MaxSteps unconditionally and so is never caught here.
+//
+// Checked before CGEventTapCreate, so no mach port is created on this path.
 var ErrEmptyUnlockCode = errors.New("eventtap: unlock code has no steps")
 
 // ErrTeardownUnclean is returned by InstallAll / installTapOnly — and by

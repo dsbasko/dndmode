@@ -242,7 +242,7 @@ func main() {
 //  16. supervisor.New(log, stopper) + supervisor.Start(ctx) — swapped BEFORE
 // eventtap (Phase 4) because InstallAll needs sup.ExitTrigger() as
 //     its sink channel.
-// 17. eventtap.InstallAll(steps, sup.ExitTrigger(), log) — Phase 4;
+// 17. eventtap.InstallAll(unlockVerifier, sup.ExitTrigger(), log) — Phase 4;
 //     composes tap + watchdog + wake observer into a single Releaser;
 //     rs.Push(tapRel). Replaces the Phase 3 mock-tap placeholder.
 //  18. stdout "dndmode: active. press Ctrl-C.".
@@ -395,12 +395,18 @@ func run() int {
 	}
 
 	// --- Step 5b: Resolve + validate the unlock code ---
-	// config.ResolveUnlockCode owns the unlock_code / deprecated-hotkey
-	// precedence table and every length rule; main only phrases the outcome.
-	// The error text names the KEY, never the value — a diagnostic that echoed
-	// the secret would defeat the whole silent-by-default stance (see
-	// gatedWriter above).
-	unlockSteps, unlockSource, err := config.ResolveUnlockCode(&cfg)
+	// config.ResolveUnlockCode owns the unlock_code / unlock_hash /
+	// deprecated-hotkey precedence table and every length rule; main only
+	// phrases the outcome. The error text names the KEY, never the value — a
+	// diagnostic that echoed the secret would defeat the whole
+	// silent-by-default stance (see gatedWriter above).
+	//
+	// It returns a matcher.Verifier rather than the parsed steps, so main
+	// never holds the plaintext secret in a form it could print. That is also
+	// why the weak-code verdict comes back as a BOOLEAN computed in the
+	// resolver: the steps it is derived from do not survive the call, and
+	// re-parsing here to recover them would duplicate the precedence table.
+	unlockVerifier, unlockSource, unlockWeak, err := config.ResolveUnlockCode(&cfg)
 	if err != nil {
 		_, _ = fmt.Fprintf(errW, "dndmode: %v. Fix %s.\n", err, cfgPath)
 		return exitConfigErr
@@ -505,11 +511,17 @@ func run() int {
 		_, _ = fmt.Fprintf(outW,
 			"dndmode: the 'hotkey' config key is deprecated — rename it to 'unlock_code' (the same value is a 1-step code).\n")
 	}
-	if config.IsWeakUnlockCode(unlockSteps) {
+	if unlockWeak {
 		// Phrased against the public WeakUnlockSteps threshold rather than the
 		// actual length: the threshold is already documented in the README and
 		// the config template, so naming it reveals nothing the reader could
 		// not look up, while "%d steps" would hand out the exact width.
+		//
+		// The flag comes from Step 5b rather than from a second
+		// config.IsWeakUnlockCode call here, because the steps it judges are
+		// gone by now — see the note on unlockVerifier. For an unlock_hash
+		// source it is identically false: a stored digest keeps no length, so
+		// this warning is one the hashed form can never emit.
 		_, _ = fmt.Fprintf(outW,
 			"dndmode: warning — the unlock code is short; %d steps or more is strongly recommended (every keypress is a fresh match attempt).\n",
 			config.WeakUnlockSteps)
@@ -911,17 +923,20 @@ func run() int {
 	// on stopper.RequestStop → ctx.cancel → cocoa.RunApp returns →
 	// sup.Wait → defer LIFO unwinds.
 	//
-	// unlockSteps comes straight from Step 5b — `cfg` is not mutated between
-	// there and here, so re-resolving would return the same slice and its
-	// error branch could never fire. The single resolve is also the single
-	// place the precedence table is applied, which is the property
-	// config.ResolveUnlockCode's doc comment asks callers to preserve.
+	// unlockVerifier comes straight from Step 5b — `cfg` is not mutated
+	// between there and here, so re-resolving would return an equivalent
+	// verifier and its error branch could never fire. The single resolve is
+	// also the single place the precedence table is applied, which is the
+	// property config.ResolveUnlockCode's doc comment asks callers to
+	// preserve; re-resolving to "get the steps back" is specifically what the
+	// Verifier return type exists to prevent.
 	//
-	// The whole code goes to InstallAll: the poller matches every tail of the
-	// keystroke ring against it, so a 9-step passphrase and a 1-step legacy
-	// combination take the identical path. The matcher.UserIntentionalMask
-	// pre-masking happens inside Install.
-	tapRel, err := eventtap.InstallAll(unlockSteps, sup.ExitTrigger(), log)
+	// The whole secret goes to InstallAll behind the interface: the poller
+	// matches every tail of the keystroke ring against it, so a 9-step
+	// passphrase, a 1-step legacy combination and a stored salted digest take
+	// the identical path. matcher.UserIntentionalMask pre-masking already
+	// happened on the construction side, inside config.ResolveUnlockCode.
+	tapRel, err := eventtap.InstallAll(unlockVerifier, sup.ExitTrigger(), log)
 	if err != nil {
 		if errors.Is(err, eventtap.ErrTapInstallFailed) {
 			_, _ = fmt.Fprintf(errW,

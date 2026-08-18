@@ -73,7 +73,12 @@ func TestEventTap_Smoketest_InstallUninstall_Roundtrip(t *testing.T) {
 	log := slog.New(slog.NewTextHandler(os.Stderr, nil))
 	sink := make(chan struct{}, 1)
 
-	r, err := installTapOnly(steps, sink, log)
+	// installTapOnly takes the verifier, not the steps: masking and
+	// construction moved to config.ResolveUnlockCode when the parameter
+	// became a matcher.Verifier. ParseSequence-shaped Specs carry no bit
+	// outside UserIntentionalMask, so wrapping them directly is what
+	// production does too.
+	r, err := installTapOnly(matcher.NewSequence(steps), sink, log)
 	if err != nil {
 		// CGEventTapCreate returned NULL — the host's Accessibility grant
 		// is stale despite IsAccessibilityTrusted returning true (this is
@@ -201,7 +206,7 @@ func installSmokeTap(t *testing.T, steps []hotkey.Spec) chan struct{} {
 	sink := make(chan struct{}, 1)
 	log := slog.New(slog.NewTextHandler(os.Stderr, nil))
 
-	r, err := installTapOnly(steps, sink, log)
+	r, err := installTapOnly(matcher.NewSequence(steps), sink, log)
 	if err != nil {
 		t.Skipf("installTapOnly failed (likely stale TCC grant): %v", err)
 	}
