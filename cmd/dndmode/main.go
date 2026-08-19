@@ -212,6 +212,10 @@ func main() {
 //
 // 1. Parse --debug flag (P1) + --style overlay-style override flag.
 // 2. slog logger to stderr (P1 /).
+// 2.5. --set-password → runSetPassword and return. Deliberately ahead of Step
+//     3: the command rewrites one config key and exits, so it must not build a
+//     RestoreState, install the session signal handlers, or print the cleanup
+//     banner. See setpassword.go.
 // 3. signal.NotifyContext(ctx, SIGINT, SIGTERM, SIGHUP) (replaces the
 //     plain-context cancel pattern used in Phase 2; SIGINT/SIGTERM/SIGHUP now
 //     flow into ctx.Done directly).
@@ -346,6 +350,14 @@ func run() int {
 	// already await (see armTimer). Parsed at Step 5b.2 via parseTimer; junk /
 	// non-positive → exitConfigErr (mirrors invalid --style), naming --timer.
 	timerFlag := flag.String("timer", "", "auto-disable after this long, then exit 0 (Go duration, e.g. 30m, 1h30m, 90s); empty = run until the unlock code or a signal")
+	// --set-password is a one-shot maintenance command, not a session modifier:
+	// it captures a new unlock sequence from real keystrokes (twice, so a typo
+	// cannot lock the user out), rewrites unlock_code in the config as a salted
+	// unlock_salt / unlock_hash pair, and exits. Dispatched at Step 2.5 below,
+	// BEFORE Step 3, so it never builds a RestoreState and never touches Focus,
+	// audio, the IOPMAssertion or the single-instance lock. Every other session
+	// flag is refused alongside it (setPasswordFlags.conflictingFlag).
+	setPasswordFlag := flag.Bool("set-password", false, "capture a new unlock sequence and store it hashed in the config, then exit")
 	flag.Parse()
 	// Raise the output gate for the whole run when --debug is set. `debug: true`
 	// in config can also raise it after Load (Step 5); either source enables
@@ -357,6 +369,25 @@ func run() int {
 	// enabling debug from EITHER --debug or `debug: true` surfaces the same lines.
 	// When debugOn is false errW discards everything, so the logger stays silent.
 	log := slog.New(slog.NewTextHandler(errW, &slog.HandlerOptions{Level: slog.LevelDebug}))
+
+	// --- Step 2.5: --set-password (returns; never reaches the session steps) ---
+	// Placed AFTER the logger (so the branch has one) and BEFORE Step 3 on
+	// purpose: RestoreState and its deferred Cleanup exist to unwind a dndmode
+	// session, and this command starts none. Running it below Step 3 would make
+	// a config edit print "cleaning up… done." and, worse, put the branch on the
+	// same teardown path as a live overlay.
+	//
+	// os.Stdout is passed UNGATED for the two prompts and the success line;
+	// errW keeps every diagnostic behind the debug gate. runSetPassword's doc
+	// comment justifies both halves of that split.
+	if *setPasswordFlag {
+		return runSetPassword(context.Background(), setPasswordFlags{
+			style: *styleFlag,
+			timer: *timerFlag,
+			mute:  *muteFlag,
+			focus: *focusFlag,
+		}, os.Stdout, errW, debugOn, log)
+	}
 
 	// --- Step 3: RestoreState + deferred Cleanup with stdout banner ---
 	rs := state.NewRestoreState(log)
