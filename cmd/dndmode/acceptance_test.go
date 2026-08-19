@@ -29,6 +29,7 @@ package main_test
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -43,6 +44,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/dsbasko/dndmode/internal/config/hotkey"
+	"github.com/dsbasko/dndmode/internal/matcher"
 	runtimepkg "github.com/dsbasko/dndmode/internal/state/runtime"
 )
 
@@ -670,6 +673,236 @@ func TestAcceptance_UnparsableUnlockCode_ExitOne(t *testing.T) {
 		[]string{"invalid unlock_code", "step 1", "unknown token"},
 		[]string{"swan", "wolf", "zebra", "dawn"},
 	)
+}
+
+// hashedUnlockYAML renders a config body carrying a REAL unlock_salt /
+// unlock_hash pair for the given plaintext code, in exactly the byte shape
+// config.rewriteUnlockSecret writes (unquoted base64, one key per line).
+//
+// The pair is computed here from matcher.HashSteps rather than pasted in as a
+// golden literal on purpose: a hardcoded digest would keep passing after a
+// change to the preimage layout, and these tests would then be asserting the
+// banner of a config the shipped binary can no longer unlock.
+//
+// The salt is fixed, not random — the tests below never type the code, so the
+// only property that matters is that ResolveUnlockCode accepts the pair, and a
+// deterministic salt keeps a failure reproducible.
+func hashedUnlockYAML(t *testing.T, code, extra string) (yaml, saltB64, hashB64 string) {
+	t.Helper()
+
+	steps, err := hotkey.ParseSequence(code)
+	if err != nil {
+		t.Fatalf("ParseSequence(%q): %v", code, err)
+	}
+	salt := []byte("0123456789abcdef") // matcher.SaltLen bytes
+	if len(salt) != matcher.SaltLen {
+		t.Fatalf("test salt is %d bytes, want %d", len(salt), matcher.SaltLen)
+	}
+	saltB64 = base64.StdEncoding.EncodeToString(salt)
+	hashB64 = base64.StdEncoding.EncodeToString(matcher.HashSteps(salt, steps))
+
+	return "unlock_salt: " + saltB64 + "\nunlock_hash: " + hashB64 + "\n" + extra, saltB64, hashB64
+}
+
+// TestAcceptance_SetPasswordWithStyleFlag_ExitOne pins the mutual exclusion
+// between --set-password and every SESSION flag, with --style standing in for
+// the four of them (the other three go through the identical
+// setPasswordFlags.conflictingFlag switch, unit-covered in setpassword_test.go).
+//
+// Refusing beats ignoring because `dndmode --set-password --style black` reads
+// like "capture a code, then run with a black overlay" and would instead
+// capture and quit — leaving the user staring at a shell prompt believing the
+// machine is locked.
+//
+// The check is the FIRST statement in runSetPassword, ahead of the platform and
+// tty gates, which is what makes this assertion deterministic here: the test
+// harness has no controlling terminal, and any later ordering would surface the
+// tty diagnostic instead.
+func TestAcceptance_SetPasswordWithStyleFlag_ExitOne(t *testing.T) {
+	tmpHome := t.TempDir()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	cmd, _, stderr := dndmodeCmd(t, ctx, tmpHome)
+	cmd.Args = append(cmd.Args, "--set-password", "--style=black")
+	if err := cmd.Run(); err == nil {
+		t.Fatal("expected non-zero exit for --set-password --style, got nil")
+	}
+
+	if code := cmd.ProcessState.ExitCode(); code != 1 {
+		t.Errorf("exit code = %d, want 1 (flag conflict)", code)
+	}
+
+	stderrStr := stderr.String()
+	// The diagnostic must name BOTH flags: "cannot be combined" alone would
+	// leave the user guessing which of the flags on the line is the problem.
+	for _, want := range []string{"--set-password cannot be combined with", "--style"} {
+		if !strings.Contains(stderrStr, want) {
+			t.Errorf("stderr missing %q: %s", want, stderrStr)
+		}
+	}
+	// Refusal means refusal: no capture prompt may have been printed, because
+	// printing one and then exiting would look like a capture that silently
+	// failed mid-way.
+	if strings.Contains(stderrStr, "press the unlock sequence") {
+		t.Errorf("the conflict path reached the capture prompt: %s", stderrStr)
+	}
+}
+
+// TestAcceptance_HashPlusCodeConfig_ExitOne pins the hashed row of the
+// ambiguity rule: a config that carries BOTH the --set-password pair and a
+// plaintext unlock_code has two secrets and dndmode refuses to pick one.
+//
+// This is the shape a hand-edited config lands in — the user re-adds
+// `unlock_code` next to the pair to "go back to plaintext" without deleting the
+// pair. Preferring either one silently has the same unrecoverable worst case as
+// the unlock_code/hotkey collision: the machine locks with a secret the owner
+// does not believe is in effect.
+func TestAcceptance_HashPlusCodeConfig_ExitOne(t *testing.T) {
+	yaml, saltB64, hashB64 := hashedUnlockYAML(t, "s w o r d f i s h", "unlock_code: a b c d e f\n")
+
+	runUnlockRejection(t,
+		yaml,
+		[]string{"more than one unlock secret", "unlock_hash and unlock_code", ".config/dndmode/config.yml"},
+		// Not one of the three values may be quoted back. The base64 blobs are
+		// not the secret itself, but the no-echo rule is enforced uniformly —
+		// a salt in the scrollback is still half of what an offline attempt
+		// needs, and the plaintext code is the secret outright.
+		[]string{"a b c d e f", saltB64, hashB64},
+	)
+}
+
+// TestAcceptance_HalfHashPair_ExitOne pins the half-pair rule: unlock_salt
+// without unlock_hash carries NO secret at all, so there is nothing to fall
+// back to and nothing to start with.
+//
+// Failing loudly here matters more than it looks. The alternative — ignoring a
+// lone salt and falling through to "config sets none of unlock_code,
+// unlock_hash or hotkey" — would describe a config that visibly HAS an unlock
+// key in it, and send the user hunting for a typo that is not there. The
+// diagnostic instead names the missing half and the command that writes both.
+func TestAcceptance_HalfHashPair_ExitOne(t *testing.T) {
+	_, saltB64, _ := hashedUnlockYAML(t, "s w o r d f i s h", "")
+
+	runUnlockRejection(t,
+		"unlock_salt: "+saltB64+"\n",
+		[]string{"unlock_salt without unlock_hash", "one secret", "--set-password"},
+		[]string{saltB64},
+	)
+}
+
+// TestAcceptance_HashSource_BannerNamesSourceNotLength is the hashed
+// counterpart of TestAcceptance_Banner_NeverPrintsUnlockCodeValue: a config
+// whose secret lives as a salted digest must START (the pair is a first-class
+// unlock source, not a degraded one) and its banner must report the SOURCE key
+// while revealing neither the stored blobs nor the code's length.
+//
+// The length assertion is the point of the test, not decoration. The digest on
+// disk deliberately stores no length — that is the property `--set-password`
+// buys over plaintext — and a banner that printed one would hand it back for
+// free, under overlay_style glass to a bystander reading the terminal while
+// input is locked.
+//
+// overlay_style=none keeps the run headless, so this passes on any arm64 host
+// without a GUI, TCC or Shortcuts gate.
+func TestAcceptance_HashSource_BannerNamesSourceNotLength(t *testing.T) {
+	yaml, saltB64, hashB64 := hashedUnlockYAML(t, "s w o r d f i s h", "overlay_style: none\n")
+	tmpHome := writeUnlockConfig(t, yaml)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	// dndmodeCmd injects --debug: the gate is wide open here, which is the
+	// only mode in which a leak could reach a terminal at all.
+	cmd, stdout, stderr := dndmodeCmd(t, ctx, tmpHome)
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+
+	if !waitForStdout(stdout, "active (caffeinate-only", 10*time.Second) {
+		_ = cmd.Process.Kill()
+		_ = cmd.Wait()
+		t.Fatalf("a hashed config did not reach the active banner:\nstdout:\n%s\nstderr:\n%s",
+			stdout.String(), stderr.String())
+	}
+
+	signalAndWait(t, cmd, syscall.SIGINT, 10*time.Second)
+
+	out := stdout.String()
+	if !strings.Contains(out, "unlock_code=ok (source=unlock_hash)") {
+		t.Errorf("banner does not report the hashed source: %s", out)
+	}
+	// Both halves of the pair stay on disk. Neither is the secret, but a
+	// terminal is a durable place and the salt is exactly what an offline
+	// attempt is missing.
+	both := out + stderr.String()
+	if strings.Contains(both, saltB64) {
+		t.Errorf("output LEAKS unlock_salt: %s", both)
+	}
+	if strings.Contains(both, hashB64) {
+		t.Errorf("output LEAKS unlock_hash: %s", both)
+	}
+	// No "<n> steps" anywhere — neither the banner's own phrasing nor the
+	// strength advisory's. The regexp is deliberately wider than the one
+	// literal this config could produce: any future line that starts counting
+	// steps out loud must fail here.
+	if m := regexp.MustCompile(`\d+ steps`).FindString(both); m != "" {
+		t.Errorf("output LEAKS the unlock-code length (%q): %s", m, both)
+	}
+}
+
+// TestAcceptance_HashSource_NoWeakAdvisory pins the one advisory the hashed
+// form can never emit. The code hashed here is FOUR steps — accepted by
+// ValidateUnlockCode but below WeakUnlockSteps, so the identical plaintext
+// config prints "strongly recommended" (see
+// TestAcceptance_LegacyHotkeyOnly_StartsWithDeprecationWarning for the line in
+// its natural habitat).
+//
+// Through unlock_hash it must stay silent, and the reason is structural rather
+// than a policy choice: ResolveUnlockCode returns weak=false for a digest
+// because the length it would judge is inside the hash and absent from disk. A
+// conditional advisory here would therefore be a length ORACLE — its presence
+// alone would tell a terminal-watcher that the code is under six steps, which
+// is precisely the fact the digest exists to withhold.
+//
+// A shorter code cannot be used to make this point: three steps is rejected
+// outright on the plaintext path, so the weak branch would never be reachable
+// and the test would pass while proving nothing.
+func TestAcceptance_HashSource_NoWeakAdvisory(t *testing.T) {
+	yaml, _, _ := hashedUnlockYAML(t, "s w o r", "overlay_style: none\n")
+	tmpHome := writeUnlockConfig(t, yaml)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	cmd, stdout, stderr := dndmodeCmd(t, ctx, tmpHome)
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+
+	if !waitForStdout(stdout, "active (caffeinate-only", 10*time.Second) {
+		_ = cmd.Process.Kill()
+		_ = cmd.Wait()
+		t.Fatalf("a 4-step hashed config did not reach the active banner:\nstdout:\n%s\nstderr:\n%s",
+			stdout.String(), stderr.String())
+	}
+
+	signalAndWait(t, cmd, syscall.SIGINT, 10*time.Second)
+
+	both := stdout.String() + stderr.String()
+	if !strings.Contains(both, "unlock_code=ok (source=unlock_hash)") {
+		t.Errorf("banner does not report the hashed source: %s", both)
+	}
+	if strings.Contains(both, "strongly recommended") {
+		t.Errorf("the weak-code advisory fired for a hashed secret — the line is a length oracle: %s", both)
+	}
+	// The advisory names WeakUnlockSteps as a number, so the threshold literal
+	// must be absent too: catching "6 steps or more" only through the prose
+	// above would miss a reworded version of the same leak.
+	if strings.Contains(both, "steps or more") {
+		t.Errorf("output carries a step-count recommendation for a hashed secret: %s", both)
+	}
 }
 
 // TestAcceptance_LegacyHotkeyOnly_StartsWithDeprecationWarning pins the
