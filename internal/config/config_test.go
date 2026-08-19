@@ -1490,6 +1490,82 @@ func TestLoader_Load_GeneratedDefaultResolves(t *testing.T) {
 	if !weak {
 		t.Error("the shipped default must resolve as weak so an untouched config still warns")
 	}
+	if cfg.UnlockSalt != "" || cfg.UnlockHash != "" {
+		t.Errorf("generated default carries unlock_salt=%q unlock_hash=%q, want both empty: "+
+			"the template documents the pair in prose and must never emit it as an active key "+
+			"(an active pair next to unlock_code is an ambiguous secret)",
+			cfg.UnlockSalt, cfg.UnlockHash)
+	}
+}
+
+// The generated config documents the `--set-password` pair, and documents it
+// as COMMENT ONLY. Both halves of that are pinned here.
+//
+// The prose has to be there because the config file is the manual: a user who
+// runs `--set-password` and later reads their config must find out from the
+// file itself that the two base64 blobs are one secret, that they are mutually
+// exclusive with unlock_code, and how to get back to a plaintext code.
+//
+// The active-key half is the security property. An `unlock_salt:` or
+// `unlock_hash:` line at column 0 in the generated file would sit next to the
+// active `unlock_code:` and make every freshly-created config an ambiguous
+// secret that ResolveUnlockCode refuses — i.e. a dndmode that cannot start on
+// a clean machine. Line-anchored regexps, not Contains, because every mention
+// in the template is inside a comment and Contains would match those too.
+func TestLoader_Load_GeneratedDefaultDocumentsHashPair(t *testing.T) {
+	td := newTestDeps(t)
+	if _, _, err := td.loader.Load(); err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	raw, err := os.ReadFile(td.path)
+	if err != nil {
+		t.Fatalf("read generated config: %v", err)
+	}
+	body := string(raw)
+
+	for _, want := range []string{
+		"# --- unlock_salt / unlock_hash",
+		"--set-password",
+		"unlock_code",
+	} {
+		if !strings.Contains(body, want) {
+			t.Errorf("generated config never mentions %q; the pair must be documented where the user reads it:\n%s", want, body)
+		}
+	}
+
+	for _, key := range []string{"unlock_salt", "unlock_hash"} {
+		if regexp.MustCompile(`(?m)^` + key + `[ \t]*:`).MatchString(body) {
+			t.Errorf("generated config has an ACTIVE %q key alongside unlock_code — "+
+				"that is an ambiguous unlock secret and would refuse to start:\n%s", key, body)
+		}
+	}
+}
+
+// Nothing in defaultConfigTemplate may be a literal '%' except the single %s
+// that carries the unlock code: the body goes through fmt.Appendf, so a stray
+// one turns into `%!(NOVERB)` (or eats the next character as a verb) inside the
+// file the user reads as documentation.
+//
+// The check is on the OUTPUT rather than on the template constant, which is
+// unexported and out of reach from this black-box package — and the output is
+// the stronger place to look anyway, since it catches both the malformed-verb
+// rendering and a second verb that would consume an argument nobody passed.
+// It is exact rather than a `%!` prefix scan because the default unlock code
+// contains no '%' either, so a correctly-rendered file has none at all.
+func TestLoader_Load_GeneratedDefaultHasNoStrayPercent(t *testing.T) {
+	td := newTestDeps(t)
+	if _, _, err := td.loader.Load(); err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	raw, err := os.ReadFile(td.path)
+	if err != nil {
+		t.Fatalf("read generated config: %v", err)
+	}
+	if i := bytes.IndexByte(raw, '%'); i >= 0 {
+		line := 1 + bytes.Count(raw[:i], []byte("\n"))
+		t.Errorf("generated config contains '%%' at line %d — defaultConfigTemplate is fed through "+
+			"fmt.Appendf and may hold no literal '%%' beyond its single %%s:\n%s", line, raw)
+	}
 }
 
 // YAML scalars that look boolean in YAML 1.1 ("n", "no", "y", "yes", "on",

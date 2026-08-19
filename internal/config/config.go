@@ -611,7 +611,12 @@ func (l *Loader) Load() (Config, bool, error) {
 // and accepted values so the user can self-serve without opening the README.
 //
 // Only `unlock_code` is an ACTIVE key; every other field is shown commented-out
-// at its default value. This is load-bearing, not cosmetic: an absent key is
+// at its default value — with one deliberate exception: the `unlock_salt` /
+// `unlock_hash` block is documented in prose with NO commented-out sample line.
+// Those two keys have no meaningful default to show, their values are base64
+// blobs nobody can type, and a `# unlock_salt: ...` line would read as an
+// invitation to hand-edit a secret that only `--set-password` may write.
+// This is load-bearing, not cosmetic: an absent key is
 // what carries the documented default (mute nil => true via NormalizeMute,
 // focus false, overlay_style "" => black, allow_display_sleep/debug false), so
 // uncommenting a line only ever *overrides* a default rather than re-stating
@@ -685,6 +690,24 @@ const defaultConfigTemplate = `# dndmode configuration
 # forwarddelete are NOT affected: those are real key presses that merely carry
 # the Fn bit, which is stripped.
 unlock_code: %s
+
+# --- unlock_salt / unlock_hash (OPTIONAL, machine-written) -------------------
+# The hashed form of the unlock secret. Neither key is present in a generated
+# config, and neither is meant to be typed or edited by hand.
+#
+# 'dndmode --set-password' captures a new sequence from REAL keystrokes (twice,
+# so a typo cannot be stored), then DELETES the unlock_code line above and
+# writes the pair in its place, with its own explanatory comment. After that the
+# plaintext secret is no longer anywhere in this file, and the sequence cannot
+# be recovered from the two stored values — not even its length.
+#
+# The pair is ONE secret and is MUTUALLY EXCLUSIVE with unlock_code (and with
+# the deprecated hotkey below): a config carrying the pair AND a plaintext key
+# is an ambiguous unlock secret and startup fails with exit 1. Half a pair —
+# one of the two keys without the other — fails the same way.
+#
+# To change the code, run 'dndmode --set-password' again. To go back to a
+# plaintext code, delete both lines and add an unlock_code line.
 
 # --- hotkey (DEPRECATED) -----------------------------------------------------
 # The pre-sequence single-combination key. Still read, so upgrading does not

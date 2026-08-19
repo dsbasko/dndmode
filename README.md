@@ -305,13 +305,21 @@ A few notes on behavior:
 - **Invalid flag values** (`--timer 5x`, `--mute banana`, `--style neon`) exit with
   the config-error code `1`, and print the reason on stderr only under `--debug`.
 
+**One-shot command.** `dndmode --set-password` is not a session flag: it captures
+a new unlock sequence from real keystrokes, stores it in the config as a salted
+hash instead of plain text, and exits without locking anything. It refuses to be
+combined with any of the flags above. See
+[Hashing the code with `--set-password`](#hashing-the-code-with---set-password).
+
 ## Configuration
 
 The config file lives at `~/.config/dndmode/config.yml` and is created with defaults
 on first run. Only `unlock_code` is written as an active key; every other setting is
 shown commented at its default, so uncommenting a line only ever overrides. The
 default `unlock_code` is `Ctrl+Option+Cmd+X` — change it to a private sequence, since
-it is the only secret that ends a locked session.
+it is the only secret that ends a locked session. To keep it out of the file
+entirely, run [`dndmode --set-password`](#hashing-the-code-with---set-password),
+which stores a salted hash instead.
 
 ```yaml
 # dndmode configuration
@@ -375,6 +383,24 @@ it is the only secret that ends a locked session.
 # forwarddelete are NOT affected: those are real key presses that merely carry
 # the Fn bit, which is stripped.
 unlock_code: Ctrl+Option+Cmd+X
+
+# --- unlock_salt / unlock_hash (OPTIONAL, machine-written) -------------------
+# The hashed form of the unlock secret. Neither key is present in a generated
+# config, and neither is meant to be typed or edited by hand.
+#
+# 'dndmode --set-password' captures a new sequence from REAL keystrokes (twice,
+# so a typo cannot be stored), then DELETES the unlock_code line above and
+# writes the pair in its place, with its own explanatory comment. After that the
+# plaintext secret is no longer anywhere in this file, and the sequence cannot
+# be recovered from the two stored values — not even its length.
+#
+# The pair is ONE secret and is MUTUALLY EXCLUSIVE with unlock_code (and with
+# the deprecated hotkey below): a config carrying the pair AND a plaintext key
+# is an ambiguous unlock secret and startup fails with exit 1. Half a pair —
+# one of the two keys without the other — fails the same way.
+#
+# To change the code, run 'dndmode --set-password' again. To go back to a
+# plaintext code, delete both lines and add an unlock_code line.
 
 # --- hotkey (DEPRECATED) -----------------------------------------------------
 # The pre-sequence single-combination key. Still read, so upgrading does not
@@ -510,16 +536,23 @@ automated typist at 100 keypresses/second.
 Codes longer than 32 steps are rejected. A 1-step code without modifiers is
 rejected too: a bare key would unlock on the first thing a bystander types.
 
-**Which key is in effect.** `unlock_code` and the deprecated `hotkey` resolve
-through one table, and setting both is a startup error - an ambiguous unlock
-secret is not resolvable.
+**Which key is in effect.** The three storable forms of the secret - the
+`unlock_salt` + `unlock_hash` pair written by
+[`--set-password`](#hashing-the-code-with---set-password), the plaintext
+`unlock_code`, and the deprecated `hotkey` - resolve through one table. Setting
+more than one of them is a startup error: an ambiguous unlock secret is not
+resolvable.
 
-| `unlock_code` | `hotkey` | Result |
-| --- | --- | --- |
-| set | absent | Used. The normal path. |
-| absent | set | Used as a 1-step code; `--debug` prints a deprecation warning. |
-| set | set | **Error**, exit `1`. Delete the `hotkey` line. |
-| absent | absent | **Error**, exit `1`. |
+| pair | `unlock_code` | `hotkey` | Result |
+| --- | --- | --- | --- |
+| absent | set | absent | Used. The normal path. |
+| absent | absent | set | Used as a 1-step code; `--debug` prints a deprecation warning. |
+| set | absent | absent | Used. No warning is ever printed for it - see [`--set-password`](#hashing-the-code-with---set-password). |
+| absent | set | set | **Error**, exit `1`. Delete the `hotkey` line. |
+| set | set | any | **Error**, exit `1`. Delete the `unlock_code` line, or re-run `--set-password`. |
+| set | absent | set | **Error**, exit `1`. Delete the `hotkey` line, or re-run `--set-password`. |
+| half a pair | any | any | **Error**, exit `1`. One of `unlock_salt` / `unlock_hash` without the other is not a fallback. |
+| absent | absent | absent | **Error**, exit `1`. |
 
 Migration is a rename, with one caveat: **spaces separate steps** in
 `unlock_code`, so any spaces around the `+` have to go first. `hotkey: Ctrl + X`
@@ -566,6 +599,118 @@ The YAML parser is strict about unknown keys but not about values: a misspelled 
 (`overaly_style`) is rejected on load, while a bad value (`overlay_style: blak`) is
 caught a moment later. Either way the process exits `1` with a line-and-column error
 under `--debug`.
+
+### Hashing the code with `--set-password`
+
+By default the unlock code sits in `~/.config/dndmode/config.yml` **in plain
+text**. The file is `0600` inside a `0700` directory, which stops other accounts
+on the machine - and stops nothing else. `cat config.yml` on a screen share, a
+colleague reading over your shoulder, a dotfiles repository that swallowed
+`~/.config`, a Time Machine backup: the secret is right there in all four.
+
+`dndmode --set-password` replaces it with a salted digest.
+
+```bash
+dndmode --set-password
+```
+
+It captures a new sequence from **real keystrokes**, asks for it a second time to
+catch a typo, and then rewrites the config: the `unlock_code` line is **deleted**
+(not commented out) and an `unlock_salt` / `unlock_hash` pair takes its place.
+Every other key, and every comment, is copied through untouched. The command
+starts no session - it edits one key and exits.
+
+```yaml
+# before
+unlock_code: s w o r d f i s h
+
+# after
+unlock_salt: 3Qk2u9Yy1S6oZb0pP7fWzg==
+unlock_hash: 1n5m1p4dTn7B0k4kQd0cGqk4Y1lXNhE5nOo6yS2mQzE=
+```
+
+**What the capture looks like.** Two prompts, no echo, nothing else:
+
+```text
+Type your unlock sequence, then press Return. Esc cancels. Nothing is echoed. 6 or more steps recommended.
+Type it again to confirm.
+dndmode: unlock code updated in /Users/you/.config/dndmode/config.yml
+```
+
+Those three lines are the *only* output. Everything else - a refused code, a
+mismatch between the two passes, an unusable config - rides the `--debug` gate
+like the rest of dndmode, so a failure without `--debug` is exit `1` and silence.
+
+**`return` and `escape` cannot be steps of a captured code.** They are the two
+terminators: an unmodified Return ends a pass, an unmodified Escape cancels the
+whole command. Neither is recorded. With a modifier held they are ordinary steps
+(`shift+return` is captured like any other), but the bare keys are spoken for. A
+plaintext `unlock_code` has no such restriction - it is typed into a file, not
+into the capture.
+
+**The whole system's input is suppressed while the capture runs.** The same
+`kCGHIDEventTap` a locked session uses is installed for the duration, so the
+keystrokes never reach the terminal, the shell, or any other app - and neither
+does `Ctrl-C`. Four safeguards bound that:
+
+| Safeguard | Fires when |
+| --- | --- |
+| `Esc` | You press it, unmodified. The voluntary exit. |
+| Idle timeout | 10 seconds pass with no keystroke. |
+| Pass ceiling | 60 seconds elapse **within a single pass**. Each of the two passes gets its own fresh 60 s, so a slow confirmation never inherits what the first pass spent. |
+| Step ceiling | You type a 33rd step without pressing Return (the maximum code length is 32). |
+
+All four leave the config untouched: the old unlock code still works. Nothing is
+saved until both passes agree.
+
+**The recommendation is unconditional; there is no weak-code warning.** The first
+prompt always says "6 or more steps recommended", for a 4-step code and a 30-step
+one alike. dndmode deliberately never tells you that the code you just typed is
+short. At startup it does warn under `--debug`, because there it is describing a
+secret you can read in your own file - but after a capture, a warning that only
+appears below the threshold would announce the length of the new secret by the
+mere fact of appearing, no matter how carefully worded. The length is part of the
+secret, so it is never stored and never printed. A code shorter than 4 steps is
+still **rejected**, with a message that names the thresholds and not your count.
+
+**Going back to plain text.** Delete both `unlock_salt` and `unlock_hash` and add
+an `unlock_code` line. Nothing is one-way except the old secret itself, which is
+not recoverable from the pair. Half a pair is an error, not a fallback.
+
+**Symlinked configs.** If `~/.config/dndmode/config.yml` is a symlink - the usual
+dotfiles setup - the **target** is rewritten and the link itself is left alone. A
+dangling link is refused before anything is captured. Note what this means for a
+dotfiles repository: your working tree now holds the hashed config, and until you
+commit it, the repository still carries the **plaintext** version. A broken link
+also has to be fixed before `--set-password` will run at all, since there is no
+file to rewrite.
+
+**What this protects against, and what it does not.** The threat is *casual
+exposure* - a glance, a `cat`, a synced backup. It is explicitly **not**
+resistance to an offline brute force: the digest is a single salted SHA-256, not
+a memory-hard KDF, and an attacker with the config file and the patience to
+enumerate short key sequences will get the code back. Pick a long code; the
+[length table](#the-unlock-code) applies unchanged.
+
+Two more honest edges:
+
+- **The old bytes are still on the disk.** The rewrite publishes a new file via
+  `rename`, and APFS does not scrub the blocks the previous version occupied -
+  they linger until the filesystem reuses them, and a snapshot or a Time Machine
+  backup taken before the change keeps the plaintext indefinitely. This is
+  outside the threat model above (it is not something a passer-by can read), but
+  you should know it: if the plaintext code has been backed up somewhere, treat
+  it as still exposed and pick a new one rather than hashing the old one.
+- **No backup file is written.** No `config.yml.bak`, no anything - a backup
+  would hold the plaintext secret, which is the exact surface this removes. The
+  rewritten bytes are re-parsed and resolved back into a working unlock check
+  *before* the rename, so a config that cannot be unlocked is never published.
+
+`--set-password` needs the same Accessibility grant as a normal run (it installs
+the same tap), refuses to run from a pipe or a script, and cannot be combined
+with any session flag - `--style`, `--timer`, `--mute` or `--focus` alongside it
+exits `1`, because "capture, then run for 30 minutes" is what `--set-password
+--timer 30m` looks like and is not what it would do.
 
 ### Focus / Do Not Disturb
 
@@ -652,7 +797,7 @@ only thing it tells you.
 | Code | Meaning |
 | --- | --- |
 | `0` | Clean exit via the unlock code, a signal, or `--timer` expiry. |
-| `1` | Config error: bad YAML, an invalid or ambiguous unlock code, or an invalid flag value. |
+| `1` | Config error: bad YAML, an invalid or ambiguous unlock code, or an invalid flag value. Also every refusal of `--set-password` (cancelled, the two entries disagreed, a code too short, a flag conflict, no terminal). |
 | `2` | Platform error: not arm64, macOS < 14, IOKit/Cocoa failure, or (in `none` mode) an unexpected `caffeinate` death. |
 | `3` | Interrupted while waiting for Accessibility / Input Monitoring grants. |
 | `4` | Secure Event Input is held by another app, or the input tap was silently disabled and the watchdog gave up. |
@@ -687,6 +832,11 @@ only thing it tells you.
   no lockout or rate limit. A 1-step code (the shipped default) or a 4-step one
   is minutes-to-hours of effort; see the length table under
   [Configuration](#the-unlock-code).
+- An offline attack on the config file. `--set-password` hides the code from a
+  glance, a `cat` or a synced backup - not from someone enumerating short key
+  sequences against the stored digest, and not from the plaintext bytes an
+  earlier version of the file may have left on disk or in a snapshot. See
+  [Hashing the code with `--set-password`](#hashing-the-code-with---set-password).
 
 ### Per-layer coverage
 
@@ -766,8 +916,9 @@ key and the 1-based position of the bad step, and never echoes the value.
 
 | Message | Cause |
 | --- | --- |
-| `both unlock_code and the deprecated hotkey` | Delete the `hotkey` line. |
-| `sets neither unlock_code nor hotkey` | Add an `unlock_code` line. |
+| `sets more than one unlock secret` | Two or three of the pair / `unlock_code` / `hotkey` are set. The message names which; keep exactly one. |
+| `sets none of unlock_code, unlock_hash or hotkey` | Add an `unlock_code` line, or run `dndmode --set-password`. |
+| `... without ...; the two are one secret` | Only one of `unlock_salt` / `unlock_hash` is present. Re-run `dndmode --set-password` to write both. |
 | `step N: hotkey: unknown token` | Step N is not a key name. Only US-ANSI names are accepted (`x`, `f1`, `space`) - see the key table in [The unlock code](#the-unlock-code). |
 | `... is too short` | 2-3 steps are rejected outright. Use 4 or more; 6 or more is recommended. |
 | `must carry at least one modifier` | A 1-step code has to be a chord - a bare key would unlock on the first thing a bystander types. |

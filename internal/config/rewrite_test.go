@@ -516,7 +516,19 @@ func TestLoader_SaveUnlockHash_OverGeneratedDefault(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read: %v", err)
 	}
-	for _, want := range []string{"# dndmode configuration", "# --- overlay_style", "# --- debug"} {
+	//
+	// The template's own unlock_salt / unlock_hash block is in the list on
+	// purpose, and with its full heading rather than a prefix: the inserted
+	// block carries a heading that starts the same way, so a prefix would
+	// match the replacement and pass even if the documentation had been eaten.
+	// It is the one section sitting closest to the lines this surgery deletes,
+	// which makes it the likeliest casualty of a widened secretKeyRe.
+	for _, want := range []string{
+		"# dndmode configuration",
+		"# --- unlock_salt / unlock_hash (OPTIONAL, machine-written)",
+		"# --- overlay_style",
+		"# --- debug",
+	} {
 		if !strings.Contains(string(raw), want) {
 			t.Errorf("the rewrite lost the %q section of the generated config", want)
 		}
