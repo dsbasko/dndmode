@@ -308,7 +308,8 @@ A few notes on behavior:
 **One-shot command.** `dndmode --set-password` is not a session flag: it captures
 a new unlock sequence from real keystrokes, stores it in the config as a salted
 hash instead of plain text, and exits without locking anything. It refuses to be
-combined with any of the flags above. See
+combined with the session flags above; `--debug` is the one exception, and the
+only way to see why a refusal exited non-zero. See
 [Hashing the code with `--set-password`](#hashing-the-code-with---set-password).
 
 ## Configuration
@@ -712,6 +713,17 @@ with any session flag - `--style`, `--timer`, `--mute` or `--focus` alongside it
 exits `1`, because "capture, then run for 30 minutes" is what `--set-password
 --timer 30m` looks like and is not what it would do.
 
+It runs the same pre-flight checks as a session, in the same order and with the
+same exit codes, and all of them happen **before** the first prompt: a wrong
+platform exits `2`, and a
+[Secure Event Input](#secure-event-input-conflict-exit-4) holder - a `sudo`
+prompt, a password field, 1Password - exits `4` rather than starting a capture
+the tap would see nothing of. If the Accessibility grant is missing it waits for
+it exactly like a normal run, indefinitely and with the same prompt and deep
+link; `Ctrl-C` still works there, because the tap that swallows it is not up
+yet. Only `1` is reached after the config file has been opened. Every one of
+these is silent without `--debug` - the exit code is the whole message.
+
 ### Focus / Do Not Disturb
 
 Focus is off by default and opt-in for one reason: macOS syncs it across your Apple
@@ -797,7 +809,7 @@ only thing it tells you.
 | Code | Meaning |
 | --- | --- |
 | `0` | Clean exit via the unlock code, a signal, or `--timer` expiry. |
-| `1` | Config error: bad YAML, an invalid or ambiguous unlock code, or an invalid flag value. Also every refusal of `--set-password` (cancelled, the two entries disagreed, a code too short, a flag conflict, no terminal). |
+| `1` | Config error: bad YAML, an invalid or ambiguous unlock code, or an invalid flag value. Also the `--set-password` refusals that leave the config untouched (cancelled, the two entries disagreed, a code too short, a flag conflict, no terminal); its pre-flight checks report `2` and `4` like a normal run. |
 | `2` | Platform error: not arm64, macOS < 14, IOKit/Cocoa failure, or (in `none` mode) an unexpected `caffeinate` death. |
 | `3` | Interrupted while waiting for Accessibility / Input Monitoring grants. |
 | `4` | Secure Event Input is held by another app, or the input tap was silently disabled and the watchdog gave up. |
@@ -978,11 +990,11 @@ Rough layout:
 
 ```
 cmd/dndmode/          CLI entry point, startup pipeline, LIFO teardown
-internal/config/      YAML config + unlock-code sequence parser
-internal/matcher/     pure-Go sliding-window unlock-code matcher
+internal/config/      YAML config, unlock-code parser, line-surgery rewrite
+internal/matcher/     pure-Go unlock verifiers: plaintext sequence + salted digest
 internal/macos/
   cocoa/              per-screen shield windows and overlay styles
-  eventtap/           CGEventTap input lock + watchdog + wake re-arm
+  eventtap/           CGEventTap input lock + watchdog + wake re-arm + capture
   powerassert/        IOPMAssertion awake lock + orphan cleanup
   caffeinate/         awake-only (none) mode wrapper
   audiomute/          system audio mute and restore
