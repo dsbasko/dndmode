@@ -725,3 +725,90 @@ func TestSnapshotFn_DoesNotAllocate(t *testing.T) {
 		t.Errorf("snapshot closure allocated %v times per call, want 0", got)
 	}
 }
+
+// TestInstallForCapture_PassesTheEmptyVerifierGate pins the one thing that
+// makes `--set-password` installable at all: the capture shape — v == nil AND
+// sink == nil — is captureOnly, and captureOnly is exempt from the
+// empty-unlock-code guard.
+//
+// The guard exists because a verifier that matches nothing leaves the shield up
+// with no input able to lower it. The capture path has no shield and no unlock
+// to be locked out of: nothing matches the ring, the tap comes down when
+// CaptureConfirmed returns, and the ceilings inside collectSteps bound how long
+// it holds the keyboard. A guard rewritten to reject `v == nil` outright — the
+// obvious simplification, since that is what the other half of the condition
+// looks like — would make `--set-password` exit before the first prompt on every
+// machine, and no plaintext test would notice.
+//
+// Same latch technique as TestInstall_EmptyUnlockCode_DigestPasses: the
+// unclean-teardown gate sits immediately after the empty-code gate, so reaching
+// the SECOND error proves the FIRST one let this shape through, without ever
+// calling CGEventTapCreate or taking the machine's keyboard.
+//
+// NOT t.Parallel: it mutates the process-global latch.
+func TestInstallForCapture_PassesTheEmptyVerifierGate(t *testing.T) {
+	prev := teardownUnclean.Load()
+	t.Cleanup(func() { teardownUnclean.Store(prev) })
+	teardownUnclean.Store(true)
+
+	r, baseSeq, err := installForCapture(nil)
+	if r != nil {
+		_ = r.Release()
+	}
+	if errors.Is(err, ErrEmptyUnlockCode) {
+		t.Fatal("installForCapture was rejected as an empty unlock code; " +
+			"--set-password can never install its tap")
+	}
+	if !errors.Is(err, ErrTeardownUnclean) {
+		t.Errorf("error = %v, want ErrTeardownUnclean (it must reach the second gate, i.e. pass the first)", err)
+	}
+	if baseSeq != 0 {
+		t.Errorf("baseSeq = %d on a failed install, want 0", baseSeq)
+	}
+}
+
+// TestRelease_CaptureShapeDoesNotBlockOnNilPollerChannels pins that a Releaser
+// built by the capture path can actually be released.
+//
+// captureOnly leaves stopPoller and pollerDone nil — there is no poller on that
+// path, so there is nothing to signal and nothing to join. Release's two nil
+// checks in Step 3 are what make that shape legal. Drop them, or allocate the
+// channels unconditionally at the install site "for symmetry", and `<-nil`
+// blocks forever: the deferred Release inside CaptureConfirmed never returns,
+// the HID tap stays installed, and every key on the machine stays suppressed —
+// including the Ctrl-C that would end the process.
+//
+// The timeout is the assertion. A plain call would simply hang the test binary
+// until the package-level deadline, reporting a timeout rather than a cause.
+func TestRelease_CaptureShapeDoesNotBlockOnNilPollerChannels(t *testing.T) {
+	t.Parallel()
+
+	var disabled, uninstalled atomic.Int64
+	r := newReleaserWithDeps(
+		func() { disabled.Add(1) },
+		func() { uninstalled.Add(1) },
+		nil, // stopPoller — nil exactly as installInternal leaves it for a capture
+		nil, // pollerDone — likewise
+		nil,
+	)
+
+	done := make(chan error, 1)
+	go func() { done <- r.Release() }()
+
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Errorf("Release() = %v, want nil", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("Release() blocked on a nil poller channel; a real capture would " +
+			"leave the HID tap installed and the keyboard suppressed with no way out")
+	}
+
+	if got := disabled.Load(); got != 1 {
+		t.Errorf("disableFn called %d times, want 1", got)
+	}
+	if got := uninstalled.Load(); got != 1 {
+		t.Errorf("uninstallFn called %d times, want 1", got)
+	}
+}

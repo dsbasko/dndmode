@@ -111,9 +111,21 @@ func encodeStep(mods hotkey.ModFlag, keycode uint16, dst []byte) {
 // Callers pass a salt of SaltLen bytes; a shorter one is accepted here
 // (the digest simply commits to what it was given) because the length gate
 // belongs to NewDigest, which is what reads untrusted config values.
+//
+// Inputs WIDER than the documented contract get a heap preimage rather than a
+// panic. preimageMax is sized for SaltLen and hotkey.MaxSteps, so a longer
+// salt or a longer sequence would run off the end of the stack array — and
+// this is the one exported entry point through which both `--set-password` and
+// the config writer produce the value that gets stored, i.e. the worst place in
+// the project to fail by index-out-of-range. No caller reaches the fallback
+// today; it exists so that a future one cannot crash here.
 func HashSteps(salt []byte, steps []hotkey.Spec) []byte {
-	var buf [preimageMax]byte
-	n := copy(buf[:], hashDomain)
+	var arr [preimageMax]byte
+	buf := arr[:]
+	if need := len(hashDomain) + len(salt) + 1 + len(steps)*stepLen; need > len(buf) {
+		buf = make([]byte, need)
+	}
+	n := copy(buf, hashDomain)
 	n += copy(buf[n:], salt)
 	buf[n] = byte(len(steps))
 	n++

@@ -454,7 +454,7 @@
         <div><span class="n">02</span><p style="font-size:14.5px">Run <code>dndmode</code>. The first launch writes the default config to <code>~/.config/dndmode/config.yml</code>, then prompts for Accessibility. Click <strong style="color:var(--ink);font-weight:500">Open System Settings</strong> and enable dndmode under Privacy &amp; Security &rarr; Accessibility.</p></div>
         <div><span class="n">03</span><p style="font-size:14.5px">It then waits for Input Monitoring. There is no system prompt for this one &mdash; dndmode opens the pane, and the run continues once you flip the switch.</p></div>
         <div><span class="n">04</span><p style="font-size:14.5px"><span class="k">Only if you want Focus/DND.</span> In the Shortcuts app create two shortcuts: <strong style="color:var(--ink);font-weight:500">Set Focus &rarr; Do Not Disturb &rarr; Turn On Until Turned Off</strong>, saved as <code>dndmode-on</code>; and a second that turns it off, saved as <code>dndmode-off</code>. With the default <code>focus: false</code> you can skip this entirely.</p></div>
-        <div><span class="n">05</span><p style="font-size:14.5px">Run <code>dndmode</code> again. With <code>--debug</code> you will see <span class="mono" style="color:var(--ink)">dndmode: active. press Ctrl-C.</span> &mdash; and then change your unlock code before you rely on it.</p></div>
+        <div><span class="n">05</span><p style="font-size:14.5px">Run <code>dndmode</code> again. With <code>--debug</code> you will see <span class="mono" style="color:var(--ink)">dndmode: active. press Ctrl-C.</span> &mdash; and then change your unlock code before you rely on it: edit <code>unlock_code</code>, or run <code>dndmode --set-password</code> and type the new one at the prompt, which stores it hashed instead of in plaintext.</p></div>
       </div>
     </div>
 
@@ -491,7 +491,7 @@
     <div class="intro">
       <p class="eyebrow">CLI reference</p>
       <h2>Every flag is per-run. The tri-state ones fall back to the config file.</h2>
-      <p class="lead">There is no flag that writes to the config file, and no config key for <code>--timer</code>. A run is described entirely by the file plus the flags you typed for it.</p>
+      <p class="lead">No session flag writes to the config file, and there is no config key for <code>--timer</code>. A run is described entirely by the file plus the flags you typed for it. The one exception is <code>--set-password</code>, which starts no session at all: it rewrites a single key and exits.</p>
     </div>
 
     <div class="strip cols3" style="margin-top:clamp(30px,4.5vw,48px);border:1px solid var(--line)">
@@ -509,6 +509,7 @@
           <tr><th scope="row" class="m lead-cell">--focus</th><td class="m" data-label="Values">true | false</td><td class="m k" data-label="Default">config</td><td data-label="Effect">Toggle Do Not Disturb for this run through the <code>dndmode-on</code> / <code>dndmode-off</code> Shortcuts.</td></tr>
           <tr><th scope="row" class="m lead-cell">--timer</th><td class="m" data-label="Values">Go duration &mdash; 30m, 1h30m, 90s</td><td class="m k" data-label="Default">off</td><td data-label="Effect">Auto-unlock after the duration, then exit <code>0</code>. Counting starts once dndmode is active, so time spent granting permissions never eats into it. Works with every style including <code>none</code>. There is deliberately no config key &mdash; typing the flag is the opt-in.</td></tr>
           <tr><th scope="row" class="m lead-cell">--debug</th><td class="m k" data-label="Values">boolean</td><td class="m k" data-label="Default">off</td><td data-label="Effect">Un-silence banners, diagnostics and logs.</td></tr>
+          <tr><th scope="row" class="m lead-cell">--set-password</th><td class="m k" data-label="Values">boolean</td><td class="m k" data-label="Default">off</td><td data-label="Effect">Not a session flag. Captures a new unlock code from real keystrokes, twice, then deletes the plaintext <code>unlock_code</code> line and writes an <code>unlock_salt</code> / <code>unlock_hash</code> pair in its place &mdash; and exits without locking anything. Refuses to be combined with any of the four session flags above.</td></tr>
         </tbody>
       </table>
       <p class="small" style="padding-top:18px">Invalid flag values &mdash; <code>--timer 5x</code>, <code>--mute banana</code>, <code>--style neon</code> &mdash; exit with the config-error code <code>1</code>, and print the reason on stderr only under <code>--debug</code>.</p>
@@ -539,13 +540,14 @@
     <div class="intro">
       <p class="eyebrow">Configuration</p>
       <h2>One file. One required key. Everything else is a commented default.</h2>
-      <p class="lead">The config lives at <code>~/.config/dndmode/config.yml</code> and is created on first run. Only <code>unlock_code</code> is written as an active key; every other setting ships commented at its default, so uncommenting a line only ever overrides.</p>
+      <p class="lead">The config lives at <code>~/.config/dndmode/config.yml</code> and is created on first run. Only <code>unlock_code</code> is written as an active key &mdash; or the <code>unlock_salt</code> / <code>unlock_hash</code> pair once <code>--set-password</code> has replaced it; every other setting ships commented at its default, so uncommenting a line only ever overrides.</p>
     </div>
     <div class="head-gap">
       <table class="spec"><caption class="sr">Configuration keys</caption>
         <thead><tr><th scope="col" style="width:19%">Key</th><th scope="col" style="width:15%">Default</th><th scope="col" style="width:14%">Per-run flag</th><th scope="col">What it does</th></tr></thead>
         <tbody>
           <tr><th scope="row" class="m lead-cell" style="color:var(--accent)">unlock_code</th><td class="m" data-label="Default"><span class="k">required</span></td><td class="m" data-label="Flag"><span class="k">&mdash;</span></td><td data-label="What it does">The sequence of steps that ends the session. The only secret that unlocks a locked machine.</td></tr>
+          <tr><th scope="row" class="m lead-cell" style="color:var(--accent)">unlock_salt / unlock_hash</th><td class="m" data-label="Default"><span class="k">machine-written</span></td><td class="m" data-label="Flag">--set-password</td><td data-label="What it does">The same secret stored as a random salt plus a SHA-256 digest, written by <code>--set-password</code>. The two are ONE key: half a pair is a startup error, and so is a pair alongside a plaintext <code>unlock_code</code>. The sequence cannot be recovered from them &mdash; not even its length.</td></tr>
           <tr><th scope="row" class="m lead-cell">hotkey</th><td class="m" data-label="Default"><span class="k">deprecated</span></td><td class="m" data-label="Flag"><span class="k">&mdash;</span></td><td data-label="What it does">The pre-sequence single combination. Still read so upgrades do not break, but setting both it and <code>unlock_code</code> is a startup error &mdash; an ambiguous unlock secret is not resolvable.</td></tr>
           <tr><th scope="row" class="m lead-cell">overlay_style</th><td class="m" data-label="Default">black</td><td class="m" data-label="Flag">--style</td><td data-label="What it does">Which shield to draw: <code>black</code>, <code>matrix</code>, <code>terminal</code>, <code>dvd</code>, <code>glass</code> or <code>none</code>.</td></tr>
           <tr><th scope="row" class="m lead-cell">glass_blur</th><td class="m" data-label="Default">16</td><td class="m" data-label="Flag">--style glass:&lt;radius&gt;</td><td data-label="What it does">Blur radius in points for <code>glass</code>. ~8 is sharp enough that text starts to become legible; ~30 dissolves everything into frost. Ignored by other styles.</td></tr>
@@ -575,6 +577,11 @@
           <div class="t-com"># Grammar: steps separated by spaces, each step is</div>
           <div class="t-com"># (&lt;mod&gt;+)*&lt;key&gt;. 6+ steps strongly recommended.</div>
           <div><span class="t-key">unlock_code</span>: Ctrl+Option+Cmd+X</div>
+          <div style="height:10px"></div>
+          <div class="t-com"># --- unlock_salt / unlock_hash (machine-written) ---</div>
+          <div class="t-com"># Not present in a generated config. Written by</div>
+          <div class="t-com"># 'dndmode --set-password', which deletes the</div>
+          <div class="t-com"># plaintext line above and puts the pair in its place.</div>
           <div style="height:10px"></div>
           <div class="t-com"># --- hotkey (DEPRECATED) --------------------------</div>
           <div class="t-com"># hotkey: Ctrl+Option+Cmd+X</div>
@@ -610,12 +617,14 @@
         <div class="card">
           <h4>Which key is in effect</h4>
           <table class="spec" style="font-size:13px"><caption class="sr">Which unlock key takes effect</caption>
-            <thead><tr><th scope="col">unlock_code</th><th scope="col">hotkey</th><th scope="col">Result</th></tr></thead>
+            <thead><tr><th scope="col">salt+hash</th><th scope="col">unlock_code</th><th scope="col">hotkey</th><th scope="col">Result</th></tr></thead>
             <tbody>
-              <tr><td data-label="unlock_code">set</td><td data-label="hotkey">absent</td><td class="yes" data-label="Result">Used</td></tr>
-              <tr><td data-label="unlock_code">absent</td><td data-label="hotkey">set</td><td class="warn" data-label="Result">Used as length 1</td></tr>
-              <tr><td data-label="unlock_code">set</td><td data-label="hotkey">set</td><td class="no" data-label="Result">Error, exit 1</td></tr>
-              <tr><td data-label="unlock_code">absent</td><td data-label="hotkey">absent</td><td class="no" data-label="Result">Error, exit 1</td></tr>
+              <tr><td data-label="salt+hash">absent</td><td data-label="unlock_code">set</td><td data-label="hotkey">absent</td><td class="yes" data-label="Result">Used</td></tr>
+              <tr><td data-label="salt+hash">set</td><td data-label="unlock_code">absent</td><td data-label="hotkey">absent</td><td class="yes" data-label="Result">Used, hashed</td></tr>
+              <tr><td data-label="salt+hash">absent</td><td data-label="unlock_code">absent</td><td data-label="hotkey">set</td><td class="warn" data-label="Result">Used as length 1</td></tr>
+              <tr><td data-label="salt+hash">half</td><td data-label="unlock_code">any</td><td data-label="hotkey">any</td><td class="no" data-label="Result">Error, exit 1</td></tr>
+              <tr><td data-label="salt+hash">any</td><td data-label="unlock_code" colspan="2">more than one source set</td><td class="no" data-label="Result">Error, exit 1</td></tr>
+              <tr><td data-label="salt+hash">absent</td><td data-label="unlock_code">absent</td><td data-label="hotkey">absent</td><td class="no" data-label="Result">Error, exit 1</td></tr>
             </tbody>
           </table>
         </div>
@@ -623,6 +632,7 @@
           <h4>Migrating from hotkey</h4>
           <p style="font-size:14px">Migration is a rename, with one caveat: spaces separate <em>steps</em> in <code>unlock_code</code>, so any spaces around the <code>+</code> have to go first. <code>hotkey: Ctrl + X</code> is a legal chord but reads as three steps and fails with exit <code>1</code>.</p>
           <p style="font-size:14px"><code>fn</code> is no longer a modifier: <code>ctrl+fn+x</code> now unlocks on Ctrl+X, and <code>fn+x</code> is a startup error because no modifier is left.</p>
+          <p style="font-size:14px">Or skip the editing: <code>dndmode --set-password</code> deletes the <code>hotkey</code> line along with <code>unlock_code</code> and writes a salted hash where it was, so the migration and the de-plaintexting happen in one command.</p>
         </div>
       </div>
     </div>

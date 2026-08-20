@@ -704,6 +704,17 @@ func hashedUnlockYAML(t *testing.T, code, extra string) (yaml, saltB64, hashB64 
 	return "unlock_salt: " + saltB64 + "\nunlock_hash: " + hashB64 + "\n" + extra, saltB64, hashB64
 }
 
+// capturePromptMarker is the opening of the first --set-password prompt.
+//
+// It is spelled out rather than imported because these tests live in an
+// external package and `package main` cannot be imported. That makes it exactly
+// the kind of literal that goes stale silently — the assertions below are
+// NEGATIVE ("this refusal path printed no prompt"), so a reworded prompt would
+// stop matching and they would quietly lose the ability to fail. Keeping them
+// honest is Test_promptFirstPass_CarriesTheAcceptanceMarker in
+// setpassword_test.go, which pins the real constant against this string.
+const capturePromptMarker = "Type your unlock sequence"
+
 // TestAcceptance_SetPasswordWithStyleFlag_ExitOne pins the mutual exclusion
 // between --set-password and every SESSION flag, with --style standing in for
 // the four of them (the other three go through the identical
@@ -724,7 +735,7 @@ func TestAcceptance_SetPasswordWithStyleFlag_ExitOne(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
-	cmd, _, stderr := dndmodeCmd(t, ctx, tmpHome)
+	cmd, stdout, stderr := dndmodeCmd(t, ctx, tmpHome)
 	cmd.Args = append(cmd.Args, "--set-password", "--style=black")
 	if err := cmd.Run(); err == nil {
 		t.Fatal("expected non-zero exit for --set-password --style, got nil")
@@ -745,8 +756,57 @@ func TestAcceptance_SetPasswordWithStyleFlag_ExitOne(t *testing.T) {
 	// Refusal means refusal: no capture prompt may have been printed, because
 	// printing one and then exiting would look like a capture that silently
 	// failed mid-way.
-	if strings.Contains(stderrStr, "press the unlock sequence") {
-		t.Errorf("the conflict path reached the capture prompt: %s", stderrStr)
+	//
+	// BOTH streams are checked. The prompts go to stdout (setPasswordPrompt is
+	// handed the ungated writer, which is os.Stdout), so an assertion that only
+	// grepped stderr could never fail no matter what the conflict path printed.
+	for name, stream := range map[string]string{"stdout": stdout.String(), "stderr": stderrStr} {
+		if strings.Contains(stream, capturePromptMarker) {
+			t.Errorf("the conflict path reached the capture prompt on %s: %s", name, stream)
+		}
+	}
+}
+
+// TestAcceptance_SetPasswordRedirectedStdout_ExitOne pins that the command
+// refuses to run when its PROMPTS cannot reach a terminal, not only when its
+// keystrokes cannot come from one.
+//
+// The trap this closes: `dndmode --set-password > log.txt` leaves stdin a tty,
+// so a stdin-only check passes, MakeRaw succeeds and the HID tap goes up —
+// while both prompts land in the file. The operator gets a frozen terminal, a
+// dead keyboard, and nothing on screen to explain it until a capture ceiling
+// fires up to a minute later.
+//
+// The harness gives the redirected case for free: exec.Cmd wires stdout to a
+// pipe. The refusal must land BEFORE the config is touched and before any tap
+// is attempted, which is what makes this deterministic under `go test` on a
+// machine with no Accessibility grant.
+func TestAcceptance_SetPasswordRedirectedStdout_ExitOne(t *testing.T) {
+	tmpHome := t.TempDir()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	cmd, stdout, stderr := dndmodeCmd(t, ctx, tmpHome)
+	cmd.Args = append(cmd.Args, "--set-password")
+	if err := cmd.Run(); err == nil {
+		t.Fatal("expected non-zero exit for --set-password with a redirected stdout, got nil")
+	}
+
+	if code := cmd.ProcessState.ExitCode(); code != 1 {
+		t.Errorf("exit code = %d, want 1 (not interactive)", code)
+	}
+	if got := stderr.String(); !strings.Contains(got, "stdout cannot be redirected") {
+		t.Errorf("stderr does not explain that stdout must be a terminal: %s", got)
+	}
+	// Nothing may have been created: the refusal precedes the config load, so a
+	// user who redirects output is not left with a fresh config carrying the
+	// well-known default unlock_code.
+	if _, err := os.Stat(filepath.Join(tmpHome, ".config", "dndmode", "config.yml")); !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("the refusal path created a config anyway (stat err = %v)", err)
+	}
+	if strings.Contains(stdout.String(), capturePromptMarker) {
+		t.Errorf("a capture prompt was printed to the redirected stdout: %s", stdout.String())
 	}
 }
 

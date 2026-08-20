@@ -398,11 +398,14 @@ func ResolveUnlockCode(cfg *Config) (matcher.Verifier, string, bool, error) {
 	}
 	hashed := salt != "" // sum != "" too, per the check above.
 
-	if sources := countTrue(hashed, code != "", legacy != ""); sources > 1 {
+	// One call, not two: setUnlockKeys already answers "how many" by how long
+	// its result is, and computing the same three booleans twice invites the
+	// count and the names to drift apart.
+	if keys := setUnlockKeys(hashed, code != "", legacy != ""); len(keys) > 1 {
 		return nil, "", false, fmt.Errorf(
 			"config sets more than one unlock secret (%s); "+
 				"keep exactly one — the unlock secret must be unambiguous",
-			strings.Join(setUnlockKeys(hashed, code != "", legacy != ""), " and "))
+			strings.Join(keys, " and "))
 	}
 
 	switch {
@@ -465,18 +468,6 @@ func newMaskedSequence(steps []hotkey.Spec) *matcher.Sequence {
 		}
 	}
 	return matcher.NewSequence(masked)
-}
-
-// countTrue reports how many of the given flags are set. Used only to detect
-// "more than one unlock secret", where the count is the whole answer.
-func countTrue(flags ...bool) int {
-	n := 0
-	for _, f := range flags {
-		if f {
-			n++
-		}
-	}
-	return n
 }
 
 // setUnlockKeys names the unlock keys the config actually set, in precedence
@@ -696,8 +687,9 @@ unlock_code: %s
 # config, and neither is meant to be typed or edited by hand.
 #
 # 'dndmode --set-password' captures a new sequence from REAL keystrokes (twice,
-# so a typo cannot be stored), then DELETES the unlock_code line above and
-# writes the pair in its place, with its own explanatory comment. After that the
+# so a typo cannot be stored), then DELETES the plaintext unlock_code line (and
+# a deprecated hotkey line, if there is one) and writes the pair where it was,
+# with its own explanatory comment. After that the
 # plaintext secret is no longer anywhere in this file, and the sequence cannot
 # be recovered from the two stored values — not even its length.
 #

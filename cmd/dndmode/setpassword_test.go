@@ -5,6 +5,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -130,26 +131,71 @@ func Test_validateCapturedCode_NeverEchoesTheLength(t *testing.T) {
 	}
 }
 
-// Test_captureFailure pins that every capture outcome exits 1 — the config was
-// not touched and the old code still works, whichever safeguard fired — and
-// that no message carries a digit. The sentinels themselves are bare static
-// strings (eventtap pins that separately); this checks the wrapping around
-// them, including the pass-mismatch case, which is the one outcome that
-// describes the two entries rather than one.
+// Test_promptFirstPass_CarriesTheAcceptanceMarker keeps the acceptance suite
+// honest.
+//
+// acceptance_test.go lives in an external test package and cannot import
+// `package main`, so it greps subprocess output for a hand-written literal. Its
+// prompt assertions are NEGATIVE ("this refusal path printed no prompt"), which
+// is the shape that rots without a sound: reword the prompt, the grep stops
+// matching, the assertion stops being able to fail, and a regression that
+// prints a prompt on a refusal path sails through. This test is the tripwire —
+// it fails the moment the constant and the literal disagree.
+func Test_promptFirstPass_CarriesTheAcceptanceMarker(t *testing.T) {
+	t.Parallel()
+
+	const marker = "Type your unlock sequence" // keep in sync with capturePromptMarker
+	if !strings.Contains(promptFirstPass, marker) {
+		t.Errorf("promptFirstPass = %q no longer contains %q; "+
+			"update capturePromptMarker in acceptance_test.go or the assertions there can never fail",
+			promptFirstPass, marker)
+	}
+}
+
+// Test_captureFailure pins the split that decides the exit code: an outcome
+// that describes the INPUT exits 1 (the config was not touched and the old code
+// still works, whichever safeguard fired), an outcome that describes the
+// MACHINE exits 2. Reporting a refused tap as exit 1 would send the operator
+// hunting for a typo in a config file that is in fact fine — and main.go maps
+// the identical eventtap.ErrTapInstallFailed to exit 2 on the session path, so
+// the two commands must not disagree about one failure.
+//
+// The no-digit rule covers the input outcomes only. It exists so a message
+// cannot leak how many steps were typed; a kernel return code in a tap error
+// describes the machine, not the secret.
+//
+// The sentinels themselves are bare static strings (eventtap pins that
+// separately); this checks the wrapping around them, including the
+// pass-mismatch case, which is the one outcome that describes the two entries
+// rather than one.
 func Test_captureFailure(t *testing.T) {
 	t.Parallel()
 
 	tests := []struct {
-		name string
-		err  error
+		name       string
+		err        error
+		want       int
+		aboutInput bool // describes what was typed, so it may not carry a digit
 	}{
-		{name: "escape cancels", err: eventtap.ErrCaptureCancelled},
-		{name: "the two passes disagree", err: eventtap.ErrCaptureMismatch},
-		{name: "too many steps", err: eventtap.ErrCaptureTooLong},
-		{name: "ring lagged", err: eventtap.ErrCaptureLostEvents},
-		{name: "ceiling fired", err: eventtap.ErrCaptureTimedOut},
-		{name: "signal aborted the branch", err: context.Canceled},
-		{name: "wrapped sentinel still matches", err: fmt.Errorf("install: %w", eventtap.ErrCaptureMismatch)},
+		{name: "escape cancels", err: eventtap.ErrCaptureCancelled, want: exitConfigErr, aboutInput: true},
+		{name: "the two passes disagree", err: eventtap.ErrCaptureMismatch, want: exitConfigErr, aboutInput: true},
+		{name: "too many steps", err: eventtap.ErrCaptureTooLong, want: exitConfigErr, aboutInput: true},
+		{name: "ring lagged", err: eventtap.ErrCaptureLostEvents, want: exitConfigErr, aboutInput: true},
+		{name: "ceiling fired", err: eventtap.ErrCaptureTimedOut, want: exitConfigErr, aboutInput: true},
+		{name: "signal aborted the branch", err: context.Canceled, want: exitConfigErr, aboutInput: true},
+		{
+			name:       "wrapped sentinel still matches",
+			err:        fmt.Errorf("install: %w", eventtap.ErrCaptureMismatch),
+			want:       exitConfigErr,
+			aboutInput: true,
+		},
+		{name: "the machine refused the tap", err: eventtap.ErrTapInstallFailed, want: exitPlatformErr},
+		{
+			name: "a wrapped tap refusal still matches",
+			err:  fmt.Errorf("%w: rc=-1", eventtap.ErrTapInstallFailed),
+			want: exitPlatformErr,
+		},
+		{name: "anything else is the machine too", err: errors.New("run loop went away"), want: exitPlatformErr},
 	}
 
 	for _, tt := range tests {
@@ -157,13 +203,13 @@ func Test_captureFailure(t *testing.T) {
 			t.Parallel()
 
 			msg, code := captureFailure(tt.err)
-			if code != exitConfigErr {
-				t.Errorf("exit code = %d, want %d", code, exitConfigErr)
+			if code != tt.want {
+				t.Errorf("exit code = %d, want %d", code, tt.want)
 			}
 			if msg == "" {
 				t.Fatal("message is empty; the operator learns nothing about which safeguard fired")
 			}
-			if strings.ContainsAny(msg, "0123456789") {
+			if tt.aboutInput && strings.ContainsAny(msg, "0123456789") {
 				t.Errorf("message carries a digit: %s", msg)
 			}
 		})
@@ -205,7 +251,7 @@ func Test_prepareConfigForCapture_CreatesMissingConfig(t *testing.T) {
 
 	cfgPath := filepath.Join(t.TempDir(), "dndmode", "config.yml")
 
-	loader, created, err := prepareConfigForCapture(cfgPath)
+	loader, _, created, err := prepareConfigForCapture(cfgPath)
 	if err != nil {
 		t.Fatalf("prepareConfigForCapture on a missing config: %v", err)
 	}
@@ -236,7 +282,7 @@ func Test_prepareConfigForCapture_RejectsDanglingSymlink(t *testing.T) {
 		t.Fatalf("symlink: %v", err)
 	}
 
-	if _, _, err := prepareConfigForCapture(cfgPath); err == nil {
+	if _, _, _, err := prepareConfigForCapture(cfgPath); err == nil {
 		t.Fatal("a dangling symlink was accepted; Load would have replaced it with a default config")
 	}
 
@@ -265,7 +311,7 @@ func Test_prepareConfigForCapture_RejectsUnsurgeableConfig(t *testing.T) {
 		t.Fatalf("write config: %v", err)
 	}
 
-	if _, _, err := prepareConfigForCapture(cfgPath); err == nil {
+	if _, _, _, err := prepareConfigForCapture(cfgPath); err == nil {
 		t.Fatal("an indented root mapping passed the dry run; the surgery cannot rewrite it")
 	}
 
@@ -292,7 +338,7 @@ func Test_prepareConfigForCapture_AcceptsAnAlreadyHashedConfig(t *testing.T) {
 		t.Fatalf("write config: %v", err)
 	}
 
-	if _, created, err := prepareConfigForCapture(cfgPath); err != nil {
+	if _, _, created, err := prepareConfigForCapture(cfgPath); err != nil {
 		t.Fatalf("an already-hashed config was rejected: %v", err)
 	} else if created {
 		t.Error("created = true for an existing config")
@@ -320,7 +366,8 @@ func Test_runSetPasswordAt_NonTTYRejectedBeforeTheTap(t *testing.T) {
 	defer func() { _ = f.Close() }()
 
 	var out, errOut bytes.Buffer
-	code := runSetPasswordAt(context.Background(), cfgPath, int(f.Fd()), &out, &errOut, false, nil)
+	debugOff := false
+	code := runSetPasswordAt(context.Background(), cfgPath, int(f.Fd()), &out, &errOut, &debugOff, nil)
 
 	if code != exitConfigErr {
 		t.Errorf("exit code = %d, want %d", code, exitConfigErr)
@@ -330,6 +377,61 @@ func Test_runSetPasswordAt_NonTTYRejectedBeforeTheTap(t *testing.T) {
 	}
 	if out.Len() != 0 {
 		t.Errorf("the ungated writer was used on a failure path: %q", out.String())
+	}
+}
+
+// Test_runSetPasswordAt_ConfigDebugRaisesTheGate pins that `debug: true` in the
+// config file un-silences this branch, exactly as the --debug flag does.
+//
+// The branch runs BEFORE run()'s Step 5, which is where a session applies
+// cfg.Debug, so the gate is still down when it starts and it has to raise the
+// gate itself off the config it loads. Getting this wrong hurts more here than
+// anywhere else: a user who configured debug in the file rather than on the
+// command line would get a --set-password that fails in complete silence, and
+// most of its diagnostics fire when the keyboard is already dead.
+//
+// The gate is what is checked, not the output: errW in this test is a plain
+// buffer with no gate around it, so only the *bool the real gatedWriter holds
+// can show whether the gate went up.
+func Test_runSetPasswordAt_ConfigDebugRaisesTheGate(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name string
+		body string
+		want bool
+	}{
+		{name: "debug true raises it", body: "debug: true\nunlock_code: ctrl+option+cmd+x\n", want: true},
+		{name: "an ordinary config leaves it down", body: "unlock_code: ctrl+option+cmd+x\n", want: false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			cfgPath := filepath.Join(t.TempDir(), "config.yml")
+			if err := os.WriteFile(cfgPath, []byte(tt.body), 0o600); err != nil {
+				t.Fatalf("write config: %v", err)
+			}
+			// A regular file stands in for the terminal, so the run stops at the
+			// tty refusal — which is AFTER the load, i.e. after the only line
+			// under test, and before anything tries to install a tap.
+			f, err := os.Create(filepath.Join(t.TempDir(), "not-a-tty"))
+			if err != nil {
+				t.Fatalf("create: %v", err)
+			}
+			defer func() { _ = f.Close() }()
+
+			var out, errOut bytes.Buffer
+			debugOn := false
+			code := runSetPasswordAt(context.Background(), cfgPath, int(f.Fd()), &out, &errOut, &debugOn, nil)
+			if code != exitConfigErr {
+				t.Fatalf("exit code = %d, want %d", code, exitConfigErr)
+			}
+			if debugOn != tt.want {
+				t.Errorf("debug gate = %v, want %v", debugOn, tt.want)
+			}
+		})
 	}
 }
 
@@ -347,7 +449,8 @@ func Test_runSetPasswordAt_ConfigFailureIsSilentAndUngated(t *testing.T) {
 	}
 
 	var out, errOut bytes.Buffer
-	code := runSetPasswordAt(context.Background(), cfgPath, int(os.Stdin.Fd()), &out, &errOut, false, nil)
+	debugOff := false
+	code := runSetPasswordAt(context.Background(), cfgPath, int(os.Stdin.Fd()), &out, &errOut, &debugOff, nil)
 
 	if code != exitConfigErr {
 		t.Errorf("exit code = %d, want %d", code, exitConfigErr)

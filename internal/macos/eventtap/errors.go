@@ -8,26 +8,23 @@ import "errors"
 //
 //  1. Accessibility permission missing or revoked between
 //     `permissions.IsTrusted()` (Step 9-10 in main.go) and `Install` (Step 16).
+//     The binary identity caveat (eclecticlight.co, "Apple Silicon signed code
+//     requirement") applies here — every `go install` produces a new ad-hoc
+//     identity which silently invalidates the prior TCC grant.
+//  2. SecureEventInput is active (some other process — Terminal in secure
+//     mode, password fields focused, sudo prompt — holds the global lock
+//     that suppresses HID-level taps).
+//  3. Kernel out of mach ports (very rare; reported by Daniel Raffel TIL
+//     2026-02-19 in long-running dev environments).
 //
-// The Phase 3 binary identity caveat (eclecticlight.co
-//
-//	   "Apple Silicon signed code requirement") applies here — every `go
-//	   install` produces a new ad-hoc identity which silently invalidates the
-//	   prior TCC grant.
-//	2. SecureEventInput is active (some other process — Terminal in secure
-//	   mode, password fields focused, sudo prompt — holds the global lock
-//	   that suppresses HID-level taps).
-//	3. Kernel out of mach ports (very rare; reported by Daniel Raffel TIL
-//	   2026-02-19 in long-running dev environments).
-//
-// install path wraps the raw cgo return-code into this sentinel
-// via `fmt.Errorf("%w: ...", ErrTapInstallFailed, rc, hint)` so that
-// `cmd/dndmode/main.go` can `errors.Is(err, eventtap.ErrTapInstallFailed)`
-// and print a user-facing remediation message (re-grant Accessibility,
-// check Activity Monitor for `secured` flag) before exiting.
-//
-// ships the bare sentinel so downstream tests + main.go can already
-// reference it without waiting for the install implementation to land.
+// The install path wraps the raw cgo return-code into this sentinel via
+// `fmt.Errorf("%w: ...", ErrTapInstallFailed, rc)` so that callers can
+// `errors.Is(err, eventtap.ErrTapInstallFailed)` and print a user-facing
+// remediation message (re-grant Accessibility, check Activity Monitor for the
+// `secured` flag) before exiting. Both callers do: `cmd/dndmode/main.go`
+// Step 17 on the session path and `captureFailure` on the `--set-password`
+// path, and both exit 2 — the same machine failure must not carry two
+// different exit codes depending on which command hit it.
 var ErrTapInstallFailed = errors.New("eventtap: CGEventTapCreate returned NULL (missing Accessibility, SecureEventInput, or kernel out of mach ports)")
 
 // ErrEmptyUnlockCode is returned by InstallAll / installTapOnly when the

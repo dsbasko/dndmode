@@ -148,13 +148,22 @@ func validateCapturedCode(steps []hotkey.Spec) error {
 // captureFailure maps an eventtap capture error onto the line to print and the
 // exit code to return.
 //
-// Every outcome is exitConfigErr because every outcome means the same thing to
+// Every INPUT outcome is exitConfigErr because they all mean the same thing to
 // a caller: the config was not touched and the old unlock code still works.
 // They are enumerated rather than collapsed into a default so the operator
 // learns WHICH safeguard fired — Escape, a ceiling, a ring that lagged, two
 // entries that disagreed — without any of the messages carrying a step, a
 // keycode or a count. eventtap's sentinels are bare static strings for the same
 // reason and pin the property with their own test.
+//
+// ErrTapInstallFailed is the one outcome that is NOT about the input, so it is
+// the one that does not exit 1. The machine refused the tap — Accessibility
+// revoked between the pre-check and the install, SecureEventInput acquired in
+// that window, the kernel out of mach ports — and a caller that sees exit 1
+// would go looking for a typo in a config file that is in fact fine. main.go
+// maps the identical sentinel to exitPlatformErr on the session path (Step 17);
+// the same failure must not carry two different codes depending on which
+// command hit it.
 //
 // context.Canceled arrives from the branch's private signal handler (a kill
 // from another terminal, or SIGHUP when the window closes); it is not a
@@ -174,10 +183,15 @@ func captureFailure(err error) (string, int) {
 		return "timed out waiting for the unlock code — the config was not changed.", exitConfigErr
 	case errors.Is(err, context.Canceled):
 		return "aborted — the config was not changed.", exitConfigErr
+	case errors.Is(err, eventtap.ErrTapInstallFailed):
+		return fmt.Sprintf(
+			"the input tap could not be installed, so nothing was captured: %v. "+
+				"Re-grant Accessibility (System Settings → Privacy & Security → Accessibility) "+
+				"and close any sudo prompt or password field, then re-run.", err), exitPlatformErr
 	default:
-		// Not an input error: whatever reaches here describes the event tap
-		// (install refused, run loop, teardown), never what was typed.
-		return fmt.Sprintf("capturing the unlock code failed: %v", err), exitConfigErr
+		// Not an input error either: whatever reaches here describes the event
+		// tap run loop or its teardown, never what was typed.
+		return fmt.Sprintf("capturing the unlock code failed: %v", err), exitPlatformErr
 	}
 }
 
@@ -213,30 +227,38 @@ func captureFailure(err error) (string, int) {
 // to be rejected while rejecting it is still cheap. The alternative is finding
 // out after the user has typed a secret twice under a tap that owns the
 // keyboard, which is the worst possible moment.
-func prepareConfigForCapture(cfgPath string) (*config.Loader, bool, error) {
+func prepareConfigForCapture(cfgPath string) (*config.Loader, config.Config, bool, error) {
+	var zero config.Config
+
 	fi, err := os.Lstat(cfgPath)
 	switch {
 	case errors.Is(err, fs.ErrNotExist):
 		// Ordinary first run — fall through to Load, which creates the default.
 	case err != nil:
-		return nil, false, fmt.Errorf("cannot inspect config %s: %w", cfgPath, err)
+		return nil, zero, false, fmt.Errorf("cannot inspect config %s: %w", cfgPath, err)
 	case fi.Mode()&os.ModeSymlink != 0:
 		if _, serr := os.Stat(cfgPath); serr != nil {
-			return nil, false, fmt.Errorf(
+			return nil, zero, false, fmt.Errorf(
 				"config %s is a symlink whose target cannot be read: %w — "+
 					"repoint or remove the link, then re-run", cfgPath, serr)
 		}
 	}
 
 	loader := config.NewLoader(cfgPath)
-	_, created, err := loader.Load()
+	// cfg travels back to the caller for ONE field: Debug. This branch runs
+	// ahead of run()'s Step 5, so `debug: true` in the file has not raised the
+	// output gate yet and every diagnostic below would be discarded on a
+	// machine whose owner asked for output in the config rather than on the
+	// command line. Nothing else here reads cfg — the surgery works on raw
+	// bytes on purpose.
+	cfg, created, err := loader.Load()
 	if err != nil {
-		return nil, false, err
+		return nil, zero, false, err
 	}
 
 	raw, err := os.ReadFile(cfgPath)
 	if err != nil {
-		return nil, created, fmt.Errorf("read config %s: %w", cfgPath, err)
+		return nil, cfg, created, fmt.Errorf("read config %s: %w", cfgPath, err)
 	}
 	// Placeholders of the real widths, so the dry run exercises the same
 	// decode gate RewriteSecretAsHash applies to the values it will really
@@ -246,12 +268,12 @@ func prepareConfigForCapture(cfgPath string) (*config.Loader, bool, error) {
 	hashB64 := base64.StdEncoding.EncodeToString(make([]byte, sha256.Size))
 	newRaw, err := config.RewriteSecretAsHash(raw, saltB64, hashB64)
 	if err != nil {
-		return nil, created, fmt.Errorf("cannot rewrite %s: %w", cfgPath, err)
+		return nil, cfg, created, fmt.Errorf("cannot rewrite %s: %w", cfgPath, err)
 	}
 	if verr := config.VerifyStructure(raw, newRaw, saltB64, hashB64); verr != nil {
-		return nil, created, fmt.Errorf("cannot rewrite %s: %w", cfgPath, verr)
+		return nil, cfg, created, fmt.Errorf("cannot rewrite %s: %w", cfgPath, verr)
 	}
-	return loader, created, nil
+	return loader, cfg, created, nil
 }
 
 // runSetPassword is the --set-password branch: capture a new unlock sequence
@@ -275,7 +297,7 @@ func prepareConfigForCapture(cfgPath string) (*config.Loader, bool, error) {
 // keyboard, and prompts that name neither a value nor a length leak nothing.
 // The errors go back INTO the gate because their text is where lengths and
 // counts would surface.
-func runSetPassword(ctx context.Context, fl setPasswordFlags, outW, errW io.Writer, debugOn bool, log *slog.Logger) int {
+func runSetPassword(ctx context.Context, fl setPasswordFlags, outW, errW io.Writer, debugOn *bool, log *slog.Logger) int {
 	if name := fl.conflictingFlag(); name != "" {
 		_, _ = fmt.Fprintf(errW,
 			"dndmode: --set-password cannot be combined with %s — it rewrites the config and exits without starting a session.\n",
@@ -310,6 +332,22 @@ func runSetPassword(ctx context.Context, fl setPasswordFlags, outW, errW io.Writ
 		return exitPlatformErr
 	}
 
+	// The prompts go to stdout, the keystrokes come from stdin, and BOTH have
+	// to be a terminal. runSetPasswordAt checks the input side (that is the
+	// descriptor it is handed, and the one MakeRaw works on); the output side
+	// can only be checked here, where the concrete *os.File still exists —
+	// below this line the sink is an io.Writer with no descriptor.
+	//
+	// Checking only stdin would let `dndmode --set-password > log.txt` through:
+	// stdin is still a tty, so MakeRaw succeeds and the HID tap goes up, while
+	// both prompts land in the file. The operator sees a frozen terminal with a
+	// dead keyboard and no explanation until a capture ceiling fires.
+	if !term.IsTerminal(int(os.Stdout.Fd())) {
+		_, _ = fmt.Fprintln(errW,
+			"dndmode: --set-password is interactive — its prompts must reach a terminal, so stdout cannot be redirected to a file or a pipe.")
+		return exitConfigErr
+	}
+
 	return runSetPasswordAt(ctx, filepath.Join(home, configRelPath), int(os.Stdin.Fd()), outW, errW, debugOn, log)
 }
 
@@ -321,15 +359,26 @@ func runSetPassword(ctx context.Context, fl setPasswordFlags, outW, errW io.Writ
 // test`: the symlink guard, the first-run creation, the surgery dry run and
 // the non-tty refusal, none of which may reach the real ~/.config/dndmode or
 // try to install an event tap.
-func runSetPasswordAt(ctx context.Context, cfgPath string, ttyFD int, outW, errW io.Writer, debugOn bool, log *slog.Logger) int {
+func runSetPasswordAt(ctx context.Context, cfgPath string, ttyFD int, outW, errW io.Writer, debugOn *bool, log *slog.Logger) int {
 	if log == nil {
 		log = slog.Default()
 	}
 
-	loader, created, err := prepareConfigForCapture(cfgPath)
+	loader, cfg, created, err := prepareConfigForCapture(cfgPath)
 	if err != nil {
 		_, _ = fmt.Fprintf(errW, "dndmode: %v\n", err)
 		return exitConfigErr
+	}
+	// `debug: true` in the config raises the gate here, exactly as run() Step 5
+	// does for a session — "either source enables output" is a property of the
+	// whole binary, not of the session path. This branch runs BEFORE Step 5, so
+	// without this line a user who put `debug: true` in their config instead of
+	// typing --debug would get a --set-password that fails in total silence,
+	// which is the one command where silence is least affordable: the keyboard
+	// is already dead by the time most of these diagnostics fire. errW and the
+	// logger both hold this same *bool, so raising it here opens both.
+	if cfg.Debug {
+		*debugOn = true
 	}
 	// Through the GATE, not through outW: "exactly three ungated lines" is a
 	// property of this command, and a first run must not quietly make it four.
@@ -352,18 +401,32 @@ func runSetPasswordAt(ctx context.Context, cfgPath string, ttyFD int, outW, errW
 	// Accessibility: without it CGEventTapCreate returns NULL and the capture
 	// cannot start. Same seams and same 500ms cadence as run() Step 9.
 	statusOut := io.Discard
-	if debugOn {
+	if *debugOn {
 		// The real *os.File, not the gated writer: NewStatusWriter detects a TTY
 		// to decide between \r-repaint and plain lines, and a wrapper defeats it.
 		statusOut = os.Stdout
 	}
-	if err := permissions.WaitForGrants(ctx,
+	// Signals during the grant wait. The branch runs before run()'s
+	// signal.NotifyContext and its own raw-mode handler is not installed until
+	// MakeRaw succeeds, so this window would otherwise be watched by nobody:
+	// ctx is context.Background() from run(), the context.Canceled branch below
+	// could never be taken, and a Ctrl-C on a machine that has never granted
+	// Accessibility would kill the process through the default disposition
+	// rather than through exit 3 the way a session does.
+	//
+	// Stopped before MakeRaw, so the raw-mode handler installed further down is
+	// the only one holding the channel while the terminal is unusable.
+	grantCtx, stopGrantSignals := signal.NotifyContext(ctx,
+		syscall.SIGINT, syscall.SIGTERM, syscall.SIGHUP)
+	err = permissions.WaitForGrants(grantCtx,
 		permissions.NewCgoChecker(),
 		permissions.NewDeepLinker(),
 		permissions.NewStatusWriter(statusOut),
 		func() { permissions.PromptAccessibility() },
 		log, 500*time.Millisecond,
-	); err != nil {
+	)
+	stopGrantSignals()
+	if err != nil {
 		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 			_, _ = fmt.Fprintln(errW, "dndmode: aborted while waiting for permissions.")
 			return exitPermissionDenied
@@ -453,10 +516,14 @@ func runSetPasswordAt(ctx context.Context, cfgPath string, ttyFD int, outW, errW
 		restore()
 	}()
 
+	// Every diagnostic from here to the deferred restore() is terminated with
+	// CRLF for the same reason the prompt constants are: the tty is raw, ONLCR
+	// is cleared, and a bare "\n" leaves the cursor in the column it was in, so
+	// the shell prompt comes back indented under the tail of the message.
 	steps, err := eventtap.CaptureConfirmed(capCtx, setPasswordPrompt(outW), log)
 	if err != nil {
 		msg, code := captureFailure(err)
-		_, _ = fmt.Fprintf(errW, "dndmode: %s\n", msg)
+		_, _ = fmt.Fprintf(errW, "dndmode: %s\r\n", msg)
 		return code
 	}
 	// The captured plaintext lives exactly as long as the two calls below need
@@ -464,7 +531,7 @@ func runSetPasswordAt(ctx context.Context, cfgPath string, ttyFD int, outW, errW
 	defer func() { clear(steps) }()
 
 	if verr := validateCapturedCode(steps); verr != nil {
-		_, _ = fmt.Fprintf(errW, "dndmode: %v.\n", verr)
+		_, _ = fmt.Fprintf(errW, "dndmode: %v.\r\n", verr)
 		return exitConfigErr
 	}
 
@@ -479,7 +546,7 @@ func runSetPasswordAt(ctx context.Context, cfgPath string, ttyFD int, outW, errW
 	// the first prompt.
 
 	if serr := loader.SaveUnlockHash(steps); serr != nil {
-		_, _ = fmt.Fprintf(errW, "dndmode: %v\n", serr)
+		_, _ = fmt.Fprintf(errW, "dndmode: %v\r\n", serr)
 		return exitConfigErr
 	}
 

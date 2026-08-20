@@ -21,18 +21,21 @@
 //
 // Public API:
 //
-//	func InstallAll(steps []hotkey.Spec, sink chan<- struct{}, log *slog.Logger) (*Releaser, error)
+//	func InstallAll(v matcher.Verifier, sink chan<- struct{}, log *slog.Logger) (*Releaser, error)
 //
 // `InstallAll` is THE production entry point. It creates the tap, starts
 // the watchdog (GCD `dispatch_source_t` 5s timer), registers the wake
 // observer (NSWorkspace DidWake + SessionDidBecomeActive), and spawns the
-// polling goroutine that watches the keystroke ring for `steps` — the
-// unlock code, resolved by `config.ResolveUnlockCode` from either
-// `unlock_code` or the deprecated `hotkey` key, so a legacy single
-// combination is simply a code of length 1. The returned `*Releaser`
+// polling goroutine that watches the keystroke ring for `v` — the unlock
+// secret, resolved by `config.ResolveUnlockCode` from `unlock_code`, from
+// the `unlock_salt`/`unlock_hash` pair, or from the deprecated `hotkey`
+// key. The interface is what keeps the storage form out of this package:
+// a plaintext sequence arrives as a `*matcher.Sequence`, a hashed one as a
+// `*matcher.Digest`, and nothing here branches on which. A legacy single
+// combination is simply a sequence of length 1. The returned `*Releaser`
 // satisfies `state.Releaser` (`Release() error` + `Name() string`) and is
 // pushed onto the `RestoreState` LIFO chain in `cmd/dndmode/main.go`
-// Step 17, replacing the Phase 3 `mock-tap` placeholder.
+// Step 17.
 //
 //	func CaptureConfirmed(ctx context.Context, prompt func(pass int), log *slog.Logger) ([]hotkey.Spec, error)
 //
@@ -114,8 +117,11 @@
 //  3. On a changed counter it calls `snapshot()`, which memcpys the whole
 //     ring into a reused Go buffer and returns the press count that copy
 //     describes, then runs `matchAny` — pure Go, allocation-free — over
-//     every window ending in the newly-arrived range, comparing each
-//     against `matcher.Sequence.MatchTail`.
+//     every window ending in the newly-arrived range, offering each to
+//     `matcher.Verifier.Match`. Window lengths run from `v.MinLen()` to
+//     `v.MaxLen()`: a `*Sequence` knows its own length and is asked once,
+//     a `*Digest` does not and is asked for every length up to
+//     `hotkey.MaxSteps`.
 //  4. A match sends one `struct{}` to `sink` (non-blocking) and the poller
 //     returns: the unlock is a one-shot event.
 //

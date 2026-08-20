@@ -225,6 +225,11 @@ hotkey: Ctrl+Option+Cmd+X
 unlock_code: s w o r d f i s h
 ```
 
+Or skip the editing entirely: `dndmode --set-password` deletes the `hotkey` line
+along with `unlock_code` and writes a salted hash where it was, so a legacy
+config migrates and stops carrying a plaintext secret in one command. See
+[Hashing the code](#hashing-the-code-with---set-password).
+
 Renaming is not always enough: **spaces separate steps** in `unlock_code`, so
 any spaces around the `+` have to go. `hotkey: Ctrl + Option + X` is a legal
 chord, but as an `unlock_code` it reads as five steps - the first of them a bare
@@ -262,8 +267,11 @@ the owner does not believe is in effect. See
 > Open `~/.config/dndmode/config.yml` and set `unlock_code` to a private
 > sequence of **6 or more steps** (`unlock_code: s w o r d f i s h`); the
 > grammar, the key list, and the length table are in
-> [Configuration](#configuration). Running with the default is accepted, but
-> `--debug` prints a warning about it on every start.
+> [Configuration](#configuration). Or run
+> [`dndmode --set-password`](#hashing-the-code-with---set-password) and type the
+> new code at the prompt - it stores a salted hash instead of the plaintext, so
+> the secret never appears in the file at all. Running with the default is
+> accepted, but `--debug` prints a warning about it on every start.
 
 ## Usage
 
@@ -287,6 +295,7 @@ when omitted.
 | `--focus` | `true` \| `false` | config | Toggle Do Not Disturb for this run. |
 | `--timer` | Go duration (`30m`, `1h30m`, `90s`) | off | Auto-unlock after the duration, then exit `0`. |
 | `--debug` | (boolean) | off | Un-silence banners, diagnostics, and logs. |
+| `--set-password` | (boolean) | off | Not a session flag. Captures a new unlock code from real keystrokes and rewrites the config as a salted hash, then exits - see [Hashing the code](#hashing-the-code-with---set-password). Refuses to be combined with any of the four flags above. |
 
 A few notes on behavior:
 
@@ -616,8 +625,9 @@ dndmode --set-password
 ```
 
 It captures a new sequence from **real keystrokes**, asks for it a second time to
-catch a typo, and then rewrites the config: the `unlock_code` line is **deleted**
-(not commented out) and an `unlock_salt` / `unlock_hash` pair takes its place.
+catch a typo, and then rewrites the config: the plaintext line is **deleted**
+(not commented out) - `unlock_code`, and a deprecated `hotkey` line if the config
+still has one - and an `unlock_salt` / `unlock_hash` pair takes its place.
 Every other key, and every comment, is copied through untouched. The command
 starts no session - it edits one key and exits.
 
@@ -640,7 +650,9 @@ dndmode: unlock code updated in /Users/you/.config/dndmode/config.yml
 
 Those three lines are the *only* output. Everything else - a refused code, a
 mismatch between the two passes, an unusable config - rides the `--debug` gate
-like the rest of dndmode, so a failure without `--debug` is exit `1` and silence.
+like the rest of dndmode, so a failure without `--debug` is an exit code and
+silence: `1` when the refusal is about what you typed or what is in the file,
+`2` when the machine refused the tap itself.
 
 **`return` and `escape` cannot be steps of a captured code.** They are the two
 terminators: an unmodified Return ends a pass, an unmodified Escape cancels the
@@ -663,6 +675,14 @@ does `Ctrl-C`. Four safeguards bound that:
 
 All four leave the config untouched: the old unlock code still works. Nothing is
 saved until both passes agree.
+
+One exception on a machine that has never run dndmode: the command loads the
+config before it prompts, and loading a missing config **creates** it, exactly as
+a normal run does. Cancel the capture there and you are left with a freshly
+generated `~/.config/dndmode/config.yml` carrying the well-known default
+`unlock_code` - harmless, but not nothing. The line announcing the creation
+rides the debug gate, so without `--debug` you will not see it happen. Re-run
+`--set-password`, or edit the file, before you rely on the shield.
 
 **The recommendation is unconditional; there is no weak-code warning.** The first
 prompt always says "6 or more steps recommended", for a 4-step code and a 30-step
@@ -713,16 +733,29 @@ with any session flag - `--style`, `--timer`, `--mute` or `--focus` alongside it
 exits `1`, because "capture, then run for 30 minutes" is what `--set-password
 --timer 30m` looks like and is not what it would do.
 
-It runs the same pre-flight checks as a session, in the same order and with the
-same exit codes, and all of them happen **before** the first prompt: a wrong
-platform exits `2`, and a
-[Secure Event Input](#secure-event-input-conflict-exit-4) holder - a `sudo`
-prompt, a password field, 1Password - exits `4` rather than starting a capture
-the tap would see nothing of. If the Accessibility grant is missing it waits for
-it exactly like a normal run, indefinitely and with the same prompt and deep
-link; `Ctrl-C` still works there, because the tap that swallows it is not up
-yet. Only `1` is reached after the config file has been opened. Every one of
-these is silent without `--debug` - the exit code is the whole message.
+It runs the same pre-flight checks as a session and reports them with the same
+exit codes, and all of them happen **before** the first prompt. The order is its
+own, though, because the config has to be proven rewritable before anyone is
+asked to type into a dead keyboard:
+
+1. Flag conflicts, then the platform check - a wrong platform exits `2`.
+2. Stdout must be a terminal: the prompts have nowhere to go if you redirect it,
+   and a run that got past this point would take the keyboard away with nothing
+   on screen to say so. Exits `1`.
+3. The config: symlink inspection, load (which **creates** a default on a first
+   run), and a dry run of the line surgery. Exits `1`.
+4. Stdin must be a terminal - exits `1`.
+5. Accessibility. If the grant is missing it waits exactly like a normal run,
+   indefinitely and with the same prompt and deep link; `Ctrl-C` still works
+   there, because the tap that swallows it is not up yet, and it exits `3`.
+6. [Secure Event Input](#secure-event-input-conflict-exit-4) - a `sudo` prompt, a
+   password field, 1Password - exits `4` rather than starting a capture the tap
+   would see nothing of.
+
+So `1` is not the only code reachable after the config file has been opened:
+steps 5 and 6 run after it, and on a first run they can leave a freshly created
+config behind. Every one of these is silent without `--debug` - the exit code is
+the whole message.
 
 ### Focus / Do Not Disturb
 
@@ -809,8 +842,8 @@ only thing it tells you.
 | Code | Meaning |
 | --- | --- |
 | `0` | Clean exit via the unlock code, a signal, or `--timer` expiry. |
-| `1` | Config error: bad YAML, an invalid or ambiguous unlock code, or an invalid flag value. Also the `--set-password` refusals that leave the config untouched (cancelled, the two entries disagreed, a code too short, a flag conflict, no terminal); its pre-flight checks report `2` and `4` like a normal run. |
-| `2` | Platform error: not arm64, macOS < 14, IOKit/Cocoa failure, or (in `none` mode) an unexpected `caffeinate` death. |
+| `1` | Config error: bad YAML, an invalid or ambiguous unlock code, or an invalid flag value. Also the `--set-password` refusals that are about you or your file (cancelled, the two entries disagreed, a code too short, a flag conflict, stdin or stdout not a terminal). |
+| `2` | Platform error: not arm64, macOS < 14, IOKit/Cocoa failure, or (in `none` mode) an unexpected `caffeinate` death. Also a `--set-password` whose event tap the machine refused - the same failure a session reports as `2`. |
 | `3` | Interrupted while waiting for Accessibility / Input Monitoring grants. |
 | `4` | Secure Event Input is held by another app, or the input tap was silently disabled and the watchdog gave up. |
 | `5` | Another live dndmode instance is already running. |

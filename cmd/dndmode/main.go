@@ -380,13 +380,17 @@ func run() int {
 	// os.Stdout is passed UNGATED for the two prompts and the success line;
 	// errW keeps every diagnostic behind the debug gate. runSetPassword's doc
 	// comment justifies both halves of that split.
+	//
+	// &debugOn, not debugOn: the branch loads the config itself (Step 5 is
+	// below it and it never gets there), so it is the one that has to apply
+	// `debug: true` to the gate errW and the logger already hold.
 	if *setPasswordFlag {
 		return runSetPassword(context.Background(), setPasswordFlags{
 			style: *styleFlag,
 			timer: *timerFlag,
 			mute:  *muteFlag,
 			focus: *focusFlag,
-		}, os.Stdout, errW, debugOn, log)
+		}, os.Stdout, errW, &debugOn, log)
 	}
 
 	// --- Step 3: RestoreState + deferred Cleanup with stdout banner ---
