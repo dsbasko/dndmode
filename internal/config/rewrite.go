@@ -317,7 +317,14 @@ func verifyRewrite(oldRaw, newRaw []byte, saltB64, hashB64 string, steps []hotke
 	if !ok {
 		return errors.New("the rewritten config did not resolve to a digest verifier")
 	}
-	if !d.Match(stepsAsEvents(steps)) {
+	// Wiped like every other copy of the plaintext on this path (the capture
+	// ring, the captured steps, the tap's own buffers). matcher.KeyEvent is
+	// pointer-free, so the GC never zeroes this span before reusing it, and
+	// without the clear a full copy of the sequence just typed would outlive
+	// the command that was called to REMOVE it from the machine.
+	evs := stepsAsEvents(steps)
+	defer clear(evs)
+	if !d.Match(evs) {
 		return errors.New("the digest written to the config does not match the unlock code that was typed")
 	}
 	return nil

@@ -7,6 +7,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -514,4 +516,121 @@ func Test_resultUpdated_CarriesNeitherLengthNorValue(t *testing.T) {
 	if strings.ContainsAny(rest, "0123456789") {
 		t.Errorf("the success line carries a digit outside the path: %q", line)
 	}
+}
+
+// Test_runSetPasswordAt_RefusesBesideALiveInstance pins the live-peer gate.
+//
+// The capture installs its own kCGHIDEventTap with kCGHeadInsertEventTap and
+// suppresses everything it sees, so a capture started while a session holds the
+// shield would sit in FRONT of that session's tap and eat the unlock code the
+// owner types — leaving a machine that looks dead to the only person allowed to
+// wake it. The refusal is therefore not a nicety: it is the difference between
+// "re-run later" and "the shield cannot be lifted for the next two minutes".
+//
+// Exit 5 and the warn-not-fatal read failure are lifted verbatim from run()
+// Step 5c: two peer checks that disagreed about what "already running" means
+// would be worse than one.
+func Test_runSetPasswordAt_RefusesBesideALiveInstance(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name     string
+		pid      int
+		wantCode int
+	}{
+		// This process is unquestionably alive, so kill(pid, 0) succeeds.
+		{name: "live peer", pid: os.Getpid(), wantCode: exitConcurrentInstance},
+		// PID 0 is the corrupted-snapshot case IsLiveInstance short-circuits
+		// without probing (kill(0, sig) means "my whole process group"). It must
+		// fall through to the ordinary tty refusal, not stop the command.
+		{name: "invalid pid falls through", pid: 0, wantCode: exitConfigErr},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			dir := t.TempDir()
+			cfgPath := filepath.Join(dir, "config.yml")
+			if err := os.WriteFile(cfgPath, []byte("unlock_code: ctrl+option+cmd+x\n"), 0o600); err != nil {
+				t.Fatalf("write config: %v", err)
+			}
+			// Sibling of the config, which is how the branch resolves it — the
+			// same file run() Step 5c reads through $HOME.
+			runtimePath := filepath.Join(dir, filepath.Base(runtimeRelPath))
+			body := fmt.Sprintf(`{"pid":%d,"started_at":"2026-08-25T00:00:00Z"}`, tt.pid)
+			if err := os.WriteFile(runtimePath, []byte(body), 0o600); err != nil {
+				t.Fatalf("write runtime.json: %v", err)
+			}
+			// A regular file stands in for the terminal: the fall-through case
+			// has to stop at the tty refusal rather than try to install a tap.
+			f, err := os.Create(filepath.Join(dir, "not-a-tty"))
+			if err != nil {
+				t.Fatalf("create: %v", err)
+			}
+			defer func() { _ = f.Close() }()
+
+			var out, errOut bytes.Buffer
+			debugOff := false
+			code := runSetPasswordAt(context.Background(), cfgPath, int(f.Fd()), &out, &errOut, &debugOff, discardLogger())
+
+			if code != tt.wantCode {
+				t.Fatalf("exit code = %d, want %d", code, tt.wantCode)
+			}
+			if out.Len() != 0 {
+				t.Errorf("the ungated writer was used on a failure path: %q", out.String())
+			}
+			if tt.wantCode == exitConcurrentInstance {
+				if !strings.Contains(errOut.String(), strconv.Itoa(tt.pid)) {
+					t.Errorf("the refusal does not name the peer PID: %q", errOut.String())
+				}
+			}
+		})
+	}
+}
+
+// Test_runSetPasswordAt_ConfigDebugRaisesTheGateBeforeTheError pins the
+// ORDERING of the gate against the config-failure branch.
+//
+// prepareConfigForCapture hands a loaded cfg back on every failure that happens
+// after Load precisely so `debug: true` in the file can un-silence those
+// failures too. If the gate were raised only after the error branch, the one
+// user who asked for diagnostics in the config — and whose config is the one
+// that cannot be rewritten — would get a completely silent exit 1.
+//
+// The quoted key is what makes the fixture fail late: the surgery matches
+// secret keys at column zero, so `"unlock_code"` survives the rewrite, the
+// structural check sees a plaintext code still in the file and refuses. Load,
+// and therefore cfg.Debug, has already succeeded by then.
+func Test_runSetPasswordAt_ConfigDebugRaisesTheGateBeforeTheError(t *testing.T) {
+	t.Parallel()
+
+	cfgPath := filepath.Join(t.TempDir(), "config.yml")
+	body := "debug: true\n\"unlock_code\": ctrl+option+cmd+x\n"
+	if err := os.WriteFile(cfgPath, []byte(body), 0o600); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+
+	var out, errOut bytes.Buffer
+	debugOn := false
+	code := runSetPasswordAt(context.Background(), cfgPath, int(os.Stdin.Fd()), &out, &errOut, &debugOn, discardLogger())
+
+	if code != exitConfigErr {
+		t.Fatalf("exit code = %d, want %d", code, exitConfigErr)
+	}
+	if !debugOn {
+		t.Error("the gate stayed down on a post-Load config failure; `debug: true` would explain nothing")
+	}
+	if errOut.Len() == 0 {
+		t.Error("the gated writer got nothing")
+	}
+	if out.Len() != 0 {
+		t.Errorf("the ungated writer was used on a failure path: %q", out.String())
+	}
+}
+
+// discardLogger keeps IsLiveInstance's warn lines out of the test output. The
+// branch's own diagnostics go to errW, which the tests assert on directly.
+func discardLogger() *slog.Logger {
+	return slog.New(slog.NewTextHandler(io.Discard, nil))
 }

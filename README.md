@@ -744,18 +744,22 @@ asked to type into a dead keyboard:
    on screen to say so. Exits `1`.
 3. The config: symlink inspection, load (which **creates** a default on a first
    run), and a dry run of the line surgery. Exits `1`.
-4. Stdin must be a terminal - exits `1`.
-5. Accessibility. If the grant is missing it waits exactly like a normal run,
+4. No other dndmode may be running - exits `5`. The capture installs the same
+   HID tap a session does and swallows everything it sees, so starting one
+   beside a live session would take the keyboard away from the shield and eat
+   the unlock code its owner is typing. Run it after that session ends.
+5. Stdin must be a terminal - exits `1`.
+6. Accessibility. If the grant is missing it waits exactly like a normal run,
    indefinitely and with the same prompt and deep link; `Ctrl-C` still works
    there, because the tap that swallows it is not up yet, and it exits `3`.
-6. [Secure Event Input](#secure-event-input-conflict-exit-4) - a `sudo` prompt, a
+7. [Secure Event Input](#secure-event-input-conflict-exit-4) - a `sudo` prompt, a
    password field, 1Password - exits `4` rather than starting a capture the tap
    would see nothing of.
 
 So `1` is not the only code reachable after the config file has been opened:
-steps 5 and 6 run after it, and on a first run they can leave a freshly created
-config behind. Every one of these is silent without `--debug` - the exit code is
-the whole message.
+steps 4, 6 and 7 run after it, and on a first run they can leave a freshly
+created config behind. Every one of these is silent without `--debug` - the exit
+code is the whole message.
 
 ### Focus / Do Not Disturb
 
@@ -846,7 +850,7 @@ only thing it tells you.
 | `2` | Platform error: not arm64, macOS < 14, IOKit/Cocoa failure, or (in `none` mode) an unexpected `caffeinate` death. Also a `--set-password` whose event tap the machine refused - the same failure a session reports as `2`. |
 | `3` | Interrupted while waiting for Accessibility / Input Monitoring grants. |
 | `4` | Secure Event Input is held by another app, or the input tap was silently disabled and the watchdog gave up. |
-| `5` | Another live dndmode instance is already running. |
+| `5` | Another live dndmode instance is already running - for a session, and for a `--set-password` that would otherwise capture over it. |
 | `6` | Required Shortcuts `dndmode-on` / `dndmode-off` not found (only when `focus: true`). |
 | `7` | Cannot delete a stale `~/.config/dndmode/runtime.json`. |
 | `8` | Internal panic, recovered after cleanup. |

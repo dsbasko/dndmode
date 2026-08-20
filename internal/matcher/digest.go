@@ -134,6 +134,12 @@ func HashSteps(salt []byte, steps []hotkey.Spec) []byte {
 		n += stepLen
 	}
 	sum := sha256.Sum256(buf[:n])
+	// The preimage holds the plaintext sequence in canonical form — the same
+	// bytes the capture path wipes everywhere else. Zeroed before the digest
+	// goes back so the one buffer that is built FROM the secret does not
+	// outlive the call that consumed it. Cheap: this runs once per
+	// --set-password, not per poller tick.
+	clear(buf)
 	return sum[:]
 }
 

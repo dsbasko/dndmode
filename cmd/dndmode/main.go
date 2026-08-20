@@ -53,6 +53,13 @@ const (
 	// os.UserHomeDir (mitigation).
 	configRelPath = ".config/dndmode/config.yml"
 
+	// runtimeRelPath is the user-relative runtime.json path — the single
+	// source for that name. Step 5c reads it through $HOME; the
+	// --set-password branch resolves it as a sibling of the config path it
+	// was handed, so both must agree on the file name or the two live-peer
+	// checks would be looking at different files.
+	runtimeRelPath = ".config/dndmode/runtime.json"
+
 	// Granular exit codes per the design notes (Phase 3 expansion). Slots 6/7
 	// are Phase 5 (Shortcuts missing / runtime JSON
 	// non-recoverable); slot 8 added by Phase 4 for top-level
@@ -663,7 +670,7 @@ func run() int {
 	// 11 + 12 + 13.3 (single-instance discipline applies to all
 	// seam constructors, not just runtimeMgr — Phase 5 promise made
 	// general across powerassert.LiveChecker too).
-	runtimeMgr := runtimepkg.NewManager(filepath.Join(home, ".config/dndmode/runtime.json"), log)
+	runtimeMgr := runtimepkg.NewManager(filepath.Join(home, runtimeRelPath), log)
 	liveChecker := powerassert.NewKernLiveChecker()
 	if alive, peerPID, err := runtimepkg.IsLiveInstance(runtimeMgr, liveChecker, log); err != nil {
 		// Read failure (corrupted file, permission denied) — not fatal here.

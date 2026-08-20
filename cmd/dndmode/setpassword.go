@@ -25,7 +25,9 @@ import (
 	"github.com/dsbasko/dndmode/internal/config/hotkey"
 	"github.com/dsbasko/dndmode/internal/macos/eventtap"
 	"github.com/dsbasko/dndmode/internal/macos/permissions"
+	"github.com/dsbasko/dndmode/internal/macos/powerassert"
 	"github.com/dsbasko/dndmode/internal/matcher"
+	runtimepkg "github.com/dsbasko/dndmode/internal/state/runtime"
 )
 
 // setPasswordFlags carries the flags --set-password refuses to be combined
@@ -365,10 +367,6 @@ func runSetPasswordAt(ctx context.Context, cfgPath string, ttyFD int, outW, errW
 	}
 
 	loader, cfg, created, err := prepareConfigForCapture(cfgPath)
-	if err != nil {
-		_, _ = fmt.Fprintf(errW, "dndmode: %v\n", err)
-		return exitConfigErr
-	}
 	// `debug: true` in the config raises the gate here, exactly as run() Step 5
 	// does for a session — "either source enables output" is a property of the
 	// whole binary, not of the session path. This branch runs BEFORE Step 5, so
@@ -377,13 +375,50 @@ func runSetPasswordAt(ctx context.Context, cfgPath string, ttyFD int, outW, errW
 	// which is the one command where silence is least affordable: the keyboard
 	// is already dead by the time most of these diagnostics fire. errW and the
 	// logger both hold this same *bool, so raising it here opens both.
+	//
+	// AHEAD of the error branch, not after it: prepareConfigForCapture returns
+	// a loaded cfg on every failure that happens after Load for exactly this
+	// reason, and a gate raised only on the success path would swallow the
+	// diagnostic for the config that needs it most — the one that cannot be
+	// rewritten. On the failures that happen BEFORE Load cfg is the zero value,
+	// so this reads false and nothing is raised.
 	if cfg.Debug {
 		*debugOn = true
+	}
+	if err != nil {
+		_, _ = fmt.Fprintf(errW, "dndmode: %v\n", err)
+		return exitConfigErr
 	}
 	// Through the GATE, not through outW: "exactly three ungated lines" is a
 	// property of this command, and a first run must not quietly make it four.
 	if created {
 		_, _ = fmt.Fprintf(errW, "dndmode: created default config at %s\n", cfgPath)
+	}
+
+	// A live dndmode owns the keyboard; this command must not take it away.
+	// installForCapture head-inserts its own kCGHIDEventTap and its callback
+	// returns NULL for everything, so a capture started beside a running
+	// session would sit IN FRONT of that session's tap and swallow the unlock
+	// code the owner types — for as long as the capture ceilings allow, i.e.
+	// up to two full passes. The shield would still be up and the machine
+	// would look dead to the one person it is supposed to let back in.
+	//
+	// Read-only, and deliberately not the lock: this branch never writes
+	// runtime.json and never takes ownership, it only refuses to run beside an
+	// owner. Same triple, same warn-not-fatal read failure and same exit 5 as
+	// run() Step 5c — a peer check that disagreed with the session path about
+	// what "already running" means would be worse than none.
+	//
+	// After the config work so `debug: true` can explain the refusal, and
+	// before the tty check, the grant wait and anything that installs a tap.
+	runtimeMgr := runtimepkg.NewManager(filepath.Join(filepath.Dir(cfgPath), filepath.Base(runtimeRelPath)), log)
+	if alive, peerPID, lerr := runtimepkg.IsLiveInstance(runtimeMgr, powerassert.NewKernLiveChecker(), log); lerr != nil {
+		log.Warn("pre-check inconclusive", slog.Any("err", lerr))
+	} else if alive {
+		_, _ = fmt.Fprintf(errW,
+			"dndmode: another instance is already active (PID=%d) — capturing a new code now would take the keyboard away from it. End that session first, then re-run.\n",
+			peerPID)
+		return exitConcurrentInstance
 	}
 
 	// The tty check sits ahead of WaitForGrants rather than next to MakeRaw
