@@ -701,7 +701,7 @@ func (r *Releaser) Release() error {
 // bundled here so the three plans can land in parallel and so the smoke
 // test stays minimal. Production callers MUST use InstallAll.
 func installTapOnly(v matcher.Verifier, sink chan<- struct{}, log *slog.Logger) (*Releaser, error) {
-	r, _, _, err := installInternal(v, sink, log)
+	r, _, _, err := installInternal(v, sink, false, log)
 	return r, err
 }
 
@@ -726,7 +726,7 @@ func installTapOnly(v matcher.Verifier, sink chan<- struct{}, log *slog.Logger) 
 // and its ring wipe still runs, which matters more here than anywhere else —
 // the ring this tap filled holds the secret the user just typed.
 func installForCapture(log *slog.Logger) (*Releaser, uint64, error) {
-	r, _, baseSeq, err := installInternal(nil, nil, log)
+	r, _, baseSeq, err := installInternal(nil, nil, true, log)
 	return r, baseSeq, err
 }
 
@@ -747,20 +747,26 @@ func installForCapture(log *slog.Logger) (*Releaser, uint64, error) {
 //
 // Logger fallback, latch reset, and mask pre-computation are identical
 // to the original `Install` body — extracted verbatim during.
-func installInternal(v matcher.Verifier, sink chan<- struct{}, log *slog.Logger) (*Releaser, C.CFMachPortRef, uint64, error) {
+func installInternal(v matcher.Verifier, sink chan<- struct{}, captureOnly bool, log *slog.Logger) (*Releaser, C.CFMachPortRef, uint64, error) {
 	if log == nil {
 		log = slog.Default()
 	}
 
 	// captureOnly is the --set-password shape: a tap installed to READ the
 	// keystroke ring rather than to watch it for a configured secret, so it
-	// arrives with neither a verifier nor a sink and gets no poller
-	// goroutine. Both halves are required to be absent — a verifier with no
-	// sink would match into nowhere, a sink with no verifier is the
-	// empty-code lockout the guard below exists to refuse — so the mode is
-	// keyed on the pair and not on either one alone.
-	captureOnly := v == nil && sink == nil
-
+	// arrives with neither a verifier nor a sink and gets no poller goroutine.
+	//
+	// It is a PARAMETER and not `v == nil && sink == nil`, and the difference
+	// is a lockout. Inferring it would key the exemption below on an argument
+	// coincidence: `InstallAll(nil, nil, log)` — the exact call its own
+	// docstring promises returns ErrEmptyUnlockCode before any resource is
+	// touched — would instead land in the capture branch, put up a
+	// shield-grade kCGHIDEventTap and start no poller, which is the
+	// fail-deadly the sentinel exists to refuse. A mode this consequential is
+	// declared by the caller that means it (installForCapture, the only
+	// `true` in the package) rather than deduced from what the caller left
+	// out.
+	//
 	// Reject the empty code before touching CoreGraphics — see the
 	// ErrEmptyUnlockCode paragraph on installTapOnly for why a zero-step
 	// Sequence is an immediate unlock rather than a never-matching one.
@@ -772,11 +778,20 @@ func installInternal(v matcher.Verifier, sink chan<- struct{}, log *slog.Logger)
 	// raise the shield and leave no input able to lower it. *Digest reports
 	// MaxLen() == hotkey.MaxSteps unconditionally, so it never trips this.
 	//
+	// `sink == nil` is in the same guard for the same reason, one step further
+	// down the chain: the poller's send is a non-blocking `select` (a blocking
+	// send on a nil channel would hang the goroutine forever), so a nil sink
+	// takes the `default` arm and DROPS the one signal this package emits. The
+	// code would match, the log would say so, and the shield would stay up
+	// with nothing left to lower it — an unlock that verifies and then goes
+	// nowhere, which is indistinguishable from an empty code at the only place
+	// it matters.
+	//
 	// captureOnly is exempt because there is no unlock to be locked out of:
 	// nothing matches the ring on that path, the tap comes down when
 	// CaptureConfirmed returns, and the ceilings inside collectSteps — not a
 	// verifier — are what bound how long it holds the keyboard.
-	if !captureOnly && (v == nil || v.MaxLen() == 0) {
+	if !captureOnly && (v == nil || v.MaxLen() == 0 || sink == nil) {
 		var zero C.CFMachPortRef
 		return nil, zero, 0, ErrEmptyUnlockCode
 	}
@@ -1182,9 +1197,13 @@ func installInternal(v matcher.Verifier, sink chan<- struct{}, log *slog.Logger)
 // Error path is roll-back-on-failure (threat — partial
 // initialisation must not leak):
 //
-//   - a nil or zero-window `v` → return (nil, ErrEmptyUnlockCode) before any
-//     resource is touched (see the sentinel's docstring: a zero-step code
-//     matches the empty tail and would unlock on the first keypress).
+//   - a nil or zero-window `v`, or a nil `sink` → return
+//     (nil, ErrEmptyUnlockCode) before any resource is touched (see the
+//     sentinel's docstring: a zero-step code matches the empty tail and would
+//     unlock on the first keypress; a nil sink verifies the code and then
+//     drops the signal, which locks the machine just as thoroughly).
+//     InstallAll never reaches installInternal's capture-only exemption —
+//     that mode is a parameter only installForCapture passes.
 //   - `Install` failure → return (nil, wrapped err). Nothing acquired.
 //   - `StartWatchdog` failure → call r.Release() to tear down the tap +
 //     poller, then return wrapped err.
@@ -1216,7 +1235,7 @@ func InstallAll(v matcher.Verifier, sink chan<- struct{}, log *slog.Logger) (*Re
 	// helpers without storing it on a Releaser field — see the
 	// Design note on the Releaser struct for the go-vet
 	// / GC-safety rationale).
-	r, cTap, _, err := installInternal(v, sink, log)
+	r, cTap, _, err := installInternal(v, sink, false, log)
 	if err != nil {
 		// Nothing acquired; propagate the wrapped error so callers can
 		// `errors.Is(err, ErrTapInstallFailed)` for exit-code dispatch.
