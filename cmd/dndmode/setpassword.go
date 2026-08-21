@@ -15,6 +15,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"runtime"
+	"sync"
 	"syscall"
 	"time"
 
@@ -194,6 +195,86 @@ func captureFailure(err error) (string, int) {
 		// Not an input error either: whatever reaches here describes the event
 		// tap run loop or its teardown, never what was typed.
 		return fmt.Sprintf("capturing the unlock code failed: %v", err), exitPlatformErr
+	}
+}
+
+// Tails for the peer refusals. They are constants rather than literals at the
+// call sites because the same probe fires three times — on arrival, again under
+// the publish lock just before the tap goes in, and once more immediately
+// before the rename — and they have to agree on what the user is being told to
+// do.
+const (
+	peerBeforeCapture = "Capturing a new unlock code now would head-insert an input tap in front of " +
+		"that session and swallow the keystrokes meant to unlock it. " +
+		"Make sure no dndmode is running, then re-run."
+	peerAfterCapture = "The config was NOT changed and your old unlock code still works — " +
+		"a session that started during the capture is matching against it. " +
+		"Re-run --set-password once that session has ended."
+	// lockBeforeCapture names no peer, because the lock does not say who holds
+	// it: a session publishing runtime.json and a second --set-password already
+	// capturing look identical from here, and either is a reason not to install
+	// a tap.
+	lockBeforeCapture = "Capturing a new unlock code now would head-insert an input tap in front of " +
+		"whatever else is claiming the keyboard. " +
+		"Wait for the other dndmode to finish, then re-run."
+)
+
+// probeLivePeer asks runtime.json whether another dndmode owns the keyboard.
+// It returns ("", exitOK) only when the answer is a definite no; the caller
+// prints "dndmode: <detail>. <tail>" and returns the code otherwise.
+//
+// Both non-OK outcomes are refusals, and that is the whole point of the
+// helper. run() Step 5c can afford to warn-and-continue on an unreadable
+// runtime.json because Step 10.5 RecoverFromCrash re-examines the same file a
+// moment later and turns a persistent IO or permission failure into exit 7.
+// This branch has no such second gate: everything after the probe installs a
+// kCGHIDEventTap whose callback returns NULL for every event, so "I could not
+// tell whether a session is live" has to mean "do not install it". An
+// inconclusive read that failed open would put the capture's tap in front of a
+// live session's and eat the unlock code its owner is typing — the machine
+// looks dead to the one person allowed back in, for as long as the capture
+// ceilings allow.
+//
+// Read-only in every branch: this command never writes runtime.json, never
+// takes ownership and never deletes a stale file. Deciding an unreadable file
+// is stale is recovery's job, and recovery only runs on the session path.
+//
+// # An unusable PID is inconclusive, not "no peer"
+//
+// IsLiveInstance collapses two very different answers into the same
+// (false, 0, nil) triple: "there is no runtime.json" and "there is one, but its
+// PID field is missing, zero or negative, so kill(pid, 0) was never asked". The
+// second is defensible on the session path — kill(0, sig) means "my whole
+// process group" and kill(-N, sig) is a broadcast, so probing such a PID is
+// worse than not probing it, and Step 10.5 RecoverFromCrash re-reads the file
+// moments later anyway. Here it is the SAME failure as unparseable JSON: a file
+// exists, some dndmode or something pretending to be one wrote it, and its
+// liveness cannot be established. Letting it through means the tap goes in
+// front of a session that may well be running.
+//
+// So the snapshot is read once more, ahead of the delegation, purely to tell
+// those two cases apart — Manager.Read is stateless and sync, and the extra
+// read costs one open of a file this branch is about to make a decision on. A
+// read error is NOT handled here: it falls through to IsLiveInstance, which
+// already turns fs.ErrNotExist into the happy path and everything else into the
+// wrapped error the switch below reports as exit 7. One phrasing per outcome.
+func probeLivePeer(mgr *runtimepkg.Manager, log *slog.Logger) (detail string, code int) {
+	if snap, rerr := mgr.Read(); rerr == nil && snap.PID <= 0 {
+		log.Warn("peer pre-check inconclusive: snapshot has invalid PID", slog.Int("pid", snap.PID))
+		return fmt.Sprintf(
+			"%s names no usable PID, so a running dndmode cannot be ruled out", mgr.Path()), exitRuntimeJSON
+	}
+
+	alive, peerPID, err := runtimepkg.IsLiveInstance(mgr, powerassert.NewKernLiveChecker(), log)
+	switch {
+	case err != nil:
+		log.Warn("peer pre-check inconclusive", slog.Any("err", err))
+		return fmt.Sprintf(
+			"cannot read %s, so a running dndmode cannot be ruled out: %v", mgr.Path(), err), exitRuntimeJSON
+	case alive:
+		return fmt.Sprintf("another instance is already active (PID=%d)", peerPID), exitConcurrentInstance
+	default:
+		return "", exitOK
 	}
 }
 
@@ -405,20 +486,17 @@ func runSetPasswordAt(ctx context.Context, cfgPath string, ttyFD int, outW, errW
 	//
 	// Read-only, and deliberately not the lock: this branch never writes
 	// runtime.json and never takes ownership, it only refuses to run beside an
-	// owner. Same triple, same warn-not-fatal read failure and same exit 5 as
-	// run() Step 5c — a peer check that disagreed with the session path about
-	// what "already running" means would be worse than none.
+	// owner. It reads the same file as run() Step 5c and agrees with it about
+	// what "already running" means; where it deliberately does NOT agree is on
+	// an unreadable file — see probeLivePeer for why an inconclusive answer has
+	// to abort here and may warn-and-continue there.
 	//
 	// After the config work so `debug: true` can explain the refusal, and
 	// before the tty check, the grant wait and anything that installs a tap.
 	runtimeMgr := runtimepkg.NewManager(filepath.Join(filepath.Dir(cfgPath), filepath.Base(runtimeRelPath)), log)
-	if alive, peerPID, lerr := runtimepkg.IsLiveInstance(runtimeMgr, powerassert.NewKernLiveChecker(), log); lerr != nil {
-		log.Warn("pre-check inconclusive", slog.Any("err", lerr))
-	} else if alive {
-		_, _ = fmt.Fprintf(errW,
-			"dndmode: another instance is already active (PID=%d) — capturing a new code now would take the keyboard away from it. End that session first, then re-run.\n",
-			peerPID)
-		return exitConcurrentInstance
+	if detail, code := probeLivePeer(runtimeMgr, log); code != exitOK {
+		_, _ = fmt.Fprintf(errW, "dndmode: %s. %s\n", detail, peerBeforeCapture)
+		return code
 	}
 
 	// The tty check sits ahead of WaitForGrants rather than next to MakeRaw
@@ -480,6 +558,53 @@ func runSetPasswordAt(ctx context.Context, cfgPath string, ttyFD int, outW, errW
 		return exitSecureInputConflict
 	}
 
+	// --- The reservation, taken BEFORE anything can install a tap ---
+	//
+	// The probe on arrival proved nothing about the stretch since: the tty
+	// check is instant, but WaitForGrants is unbounded by construction — it
+	// sits there until the operator finishes clicking through System Settings.
+	// A session started inside that window publishes runtime.json and installs
+	// its own kCGHIDEventTap, and the capture below would then head-insert ITS
+	// tap in front of that one and swallow every keystroke meant to unlock the
+	// shield, for as long as the capture ceilings allow. That is precisely the
+	// outcome probeLivePeer fails closed to avoid, so it may not be left
+	// reachable through a stale answer.
+	//
+	// Re-probing alone would only narrow the window; nothing stops a session
+	// from arriving one instruction later. What closes it is holding the
+	// publish lock from HERE — ahead of the tap — through the save: a session
+	// that starts now blocks on the same lock at its Step 13.3 and refuses
+	// before it raises anything, and a second --set-password refuses before it
+	// captures, rather than both capturing and racing their saves.
+	//
+	// After WaitForGrants and not before it, deliberately: the lock is what
+	// makes every session refuse to start, and a --set-password parked forever
+	// on a permission prompt that has never been granted must not be able to
+	// hold it. From here on the hold is bounded by the capture ceilings.
+	//
+	// Fails CLOSED, unlike the session path, and for the reason that governs
+	// every other refusal on this branch: not capturing is always available
+	// here, and the failures this guards against — a swallowed unlock code, a
+	// config naming a secret the live shield rejects — are the ones the whole
+	// command exists to avoid.
+	releaseLock, lockErr := acquirePublishLock(filepath.Dir(cfgPath))
+	// Released when the branch returns, i.e. just after the save. Explicitly
+	// NOT released before the deferred terminal restore: nothing between them
+	// touches config.yml, and the ordering that matters is only that no session
+	// may publish between this probe and the rename.
+	defer releaseLock()
+	if lockErr != nil {
+		_, _ = fmt.Fprintf(errW,
+			"dndmode: cannot claim the publish lock, so another dndmode cannot be ruled out: %v. %s\n",
+			lockErr, lockBeforeCapture)
+		return exitRuntimeJSON
+	}
+
+	if detail, code := probeLivePeer(runtimeMgr, log); code != exitOK {
+		_, _ = fmt.Fprintf(errW, "dndmode: %s. %s\n", detail, peerBeforeCapture)
+		return code
+	}
+
 	// The state to restore comes from unix, NOT from term.MakeRaw's return
 	// value. *term.State wraps an unexported struct with no accessor, so a
 	// *unix.Termios cannot be recovered from it and IoctlSetTermios would not
@@ -529,13 +654,32 @@ func runSetPasswordAt(ctx context.Context, cfgPath string, ttyFD int, outW, errW
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM, syscall.SIGHUP)
 	capCtx, capCancel := context.WithCancel(ctx)
+	// commitMu makes "has this run been abandoned?" and "publish the new
+	// secret" one indivisible decision. Without it the handler could land in
+	// the window between CaptureConfirmed returning and SaveUnlockHash's
+	// rename: it would restore the terminal — which is what an abort looks
+	// like from the outside — and the rename would go through anyway. The user
+	// would walk away believing the old code survived, and learn otherwise
+	// from behind a shield that no longer answers to it. Held by the commit
+	// section below for exactly one atomic file write.
+	var commitMu sync.Mutex
 	go func() {
 		select {
 		case <-sigCh:
-			// Terminal first, then unwind: cancelling capCtx makes
-			// CaptureConfirmed return, and its own defer takes the tap down.
-			restore()
+			// Cancel under the mutex, so only two orderings exist: cancel
+			// before the commit reads capCtx.Err() (the capture aborts and the
+			// config is left alone) or after the rename (the new code is live
+			// and this run must not claim otherwise).
+			commitMu.Lock()
 			capCancel()
+			commitMu.Unlock()
+			// Then the terminal. Cancelling capCtx is what makes
+			// CaptureConfirmed return, and its own defer takes the tap down;
+			// restoring after the cancel rather than before it costs the
+			// uncontended lock and nothing else, and during a commit the delay
+			// is the one the deferred restore() would have imposed anyway —
+			// that defer already runs AFTER the config write on purpose.
+			restore()
 		case <-capCtx.Done():
 		}
 	}()
@@ -545,10 +689,26 @@ func runSetPasswordAt(ctx context.Context, cfgPath string, ttyFD int, outW, errW
 	// time it returns, so everything typed during validation, salt generation
 	// and the file write lands in the tty queue — and TIOCSETAF is what throws
 	// it away instead of handing it to the shell.
+	//
+	// Inside it the ORDER is load-bearing, and it is the reverse of the
+	// obvious one. signal.Stop puts SIGTERM/SIGHUP back on their default
+	// disposition — process death, no handler — so calling it while the tty is
+	// still raw reopens, for the width of the two calls after it, exactly the
+	// hole the handler was installed to close: a signal landing there kills the
+	// process with ONLCR and ISIG cleared and leaves the user typing `stty
+	// sane` blind. restore() therefore goes FIRST, signal.Stop last. The two
+	// orderings that this leaves are both benign: a signal before restore() is
+	// still caught by the goroutine, which restores the tty itself (TIOCSETAF
+	// twice with the same termios is idempotent, and the second flush only
+	// discards more of what the shell must not receive), and a signal after
+	// restore() but before signal.Stop is either swallowed by an already-armed
+	// handler or kills a process whose terminal is already sane. capCancel sits
+	// between them so the goroutine cannot be left parked on a select whose
+	// signal arm has just been unregistered.
 	defer func() {
-		signal.Stop(sigCh)
-		capCancel()
 		restore()
+		capCancel()
+		signal.Stop(sigCh)
 	}()
 
 	// Every diagnostic from here to the deferred restore() is terminated with
@@ -580,7 +740,50 @@ func runSetPasswordAt(ctx context.Context, cfgPath string, ttyFD int, outW, errW
 	// file. Its UX value is carried here by the unconditional recommendation in
 	// the first prompt.
 
-	if serr := loader.SaveUnlockHash(steps); serr != nil {
+	// The last probe, immediately before the rename, still under the lock taken
+	// ahead of the capture.
+	//
+	// Under that lock the two orderings that matter are already safe: a session
+	// that published BEFORE the lock was taken was seen by the probe up there
+	// and this branch never captured, and a session that starts after it blocks
+	// at its own Step 13.3 until the save lands, then finds a live peer or a
+	// stale fingerprint and refuses. So this call is not what closes the race —
+	// it is the backstop for a publisher the lock cannot reach at all.
+	//
+	// flock coordinates the processes that take it, and one class of peer never
+	// will: a session started from a dndmode binary that predates this lock and
+	// is still running across the upgrade. It publishes runtime.json without
+	// contending for anything, and it owns a tap this capture would sit in front
+	// of. Only runtime.json shows it, and only a read this late shows it in
+	// time — the probe before the capture ran minutes ago by then.
+	//
+	// Cheap enough to be worth it regardless: one stat-and-read of a file this
+	// branch is about to make an irreversible decision against.
+	if detail, code := probeLivePeer(runtimeMgr, log); code != exitOK {
+		_, _ = fmt.Fprintf(errW, "dndmode: %s. %s\r\n", detail, peerAfterCapture)
+		return code
+	}
+
+	// Read the abandonment flag and publish under one lock — see commitMu.
+	// capCtx.Err() is checked here rather than right after CaptureConfirmed
+	// because everything between the two is still abortable; the rename is the
+	// first step that is not.
+	commitMu.Lock()
+	capErr := capCtx.Err()
+	var serr error
+	if capErr == nil {
+		serr = loader.SaveUnlockHash(steps)
+	}
+	commitMu.Unlock()
+
+	if capErr != nil {
+		// Same sentence a signal during the capture itself produces: from the
+		// user's side both are "I killed it and my config was left alone".
+		msg, code := captureFailure(capErr)
+		_, _ = fmt.Fprintf(errW, "dndmode: %s\r\n", msg)
+		return code
+	}
+	if serr != nil {
 		_, _ = fmt.Fprintf(errW, "dndmode: %v\r\n", serr)
 		return exitConfigErr
 	}

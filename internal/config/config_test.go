@@ -2099,3 +2099,108 @@ func TestUnlockSourceHash_Constant(t *testing.T) {
 		seen[s] = true
 	}
 }
+
+// TestLoader_LoadWithSource_ReturnsTheBytesItParsed pins the reason the method
+// exists: the returned bytes must be the ones the returned Config was parsed
+// from, on both paths.
+//
+// A session hashes them and re-checks that hash against config.yml under the
+// publish lock before it raises the shield, so that a --set-password committing
+// mid-startup is caught. If these bytes came from a SECOND read of the path
+// instead, an atomic rename landing between the two reads would pair the old
+// Config with the new file's digest, the re-check would find nothing changed,
+// and the shield would go up answering to the superseded secret — the failure
+// the check was added to catch, produced by the check itself.
+func TestLoader_LoadWithSource_ReturnsTheBytesItParsed(t *testing.T) {
+	t.Run("existing file", func(t *testing.T) {
+		td := newTestDeps(t)
+		body := []byte("unlock_code: ctrl+option+cmd+x ctrl+option+cmd+y\nfocus: true\n")
+		if err := os.MkdirAll(filepath.Dir(td.path), 0o700); err != nil {
+			t.Fatalf("mkdir: %v", err)
+		}
+		if err := os.WriteFile(td.path, body, 0o600); err != nil {
+			t.Fatalf("write: %v", err)
+		}
+
+		cfg, raw, created, err := td.loader.LoadWithSource()
+		if err != nil {
+			t.Fatalf("LoadWithSource: %v", err)
+		}
+		if created {
+			t.Error("created = true for a file that already existed")
+		}
+		if !bytes.Equal(raw, body) {
+			t.Errorf("raw = %q, want the file's own bytes %q", raw, body)
+		}
+		if !cfg.Focus {
+			t.Error("cfg came from different bytes than raw (focus lost)")
+		}
+	})
+
+	t.Run("first run returns what it wrote", func(t *testing.T) {
+		td := newTestDeps(t)
+
+		cfg, raw, created, err := td.loader.LoadWithSource()
+		if err != nil {
+			t.Fatalf("LoadWithSource: %v", err)
+		}
+		if !created {
+			t.Fatal("created = false on a fresh path")
+		}
+		if cfg.UnlockCode != config.DefaultUnlockCode {
+			t.Errorf("cfg.UnlockCode = %q, want the default", cfg.UnlockCode)
+		}
+		onDisk, rerr := os.ReadFile(td.path)
+		if rerr != nil {
+			t.Fatalf("read back: %v", rerr)
+		}
+		if !bytes.Equal(raw, onDisk) {
+			t.Error("the bytes returned on the first run differ from the ones published")
+		}
+	})
+
+	t.Run("no bytes on the error paths", func(t *testing.T) {
+		td := newTestDeps(t)
+		if err := os.MkdirAll(filepath.Dir(td.path), 0o700); err != nil {
+			t.Fatalf("mkdir: %v", err)
+		}
+		// Unknown key → yaml.Strict rejects it. A caller must not be handed
+		// bytes it could fingerprint alongside a zero Config.
+		if err := os.WriteFile(td.path, []byte("nope: 1\n"), 0o600); err != nil {
+			t.Fatalf("write: %v", err)
+		}
+		_, raw, _, err := td.loader.LoadWithSource()
+		if err == nil {
+			t.Fatal("LoadWithSource accepted an unknown key")
+		}
+		if raw != nil {
+			t.Errorf("raw = %q on the parse-error path, want nil", raw)
+		}
+	})
+}
+
+// Load stays a thin wrapper over LoadWithSource: same Config, same created
+// flag, same errors. The two must not drift into separate read paths — a second
+// implementation is a second place for the split above to reopen.
+func TestLoader_Load_AgreesWithLoadWithSource(t *testing.T) {
+	td := newTestDeps(t)
+
+	cfg1, raw, created1, err1 := td.loader.LoadWithSource()
+	if err1 != nil {
+		t.Fatalf("LoadWithSource: %v", err1)
+	}
+	if !created1 || len(raw) == 0 {
+		t.Fatalf("first call: created = %v, len(raw) = %d", created1, len(raw))
+	}
+
+	cfg2, created2, err2 := td.loader.Load()
+	if err2 != nil {
+		t.Fatalf("Load: %v", err2)
+	}
+	if created2 {
+		t.Error("Load reported created = true for a file LoadWithSource just wrote")
+	}
+	if cfg2.UnlockCode != cfg1.UnlockCode {
+		t.Errorf("Load unlock_code = %q, LoadWithSource = %q", cfg2.UnlockCode, cfg1.UnlockCode)
+	}
+}

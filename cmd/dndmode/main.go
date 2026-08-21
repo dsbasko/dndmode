@@ -239,13 +239,21 @@ func main() {
 // 9. permissions.WaitForGrants — polling; ctx.Canceled → exit 3.
 // 9.5. focus.CheckShortcuts —..; ErrShortcutsMissing → exit 6.
 // 10. permissions.IsSecureEventInputActive —; true → exit 4.
-// 10.5. runtimepkg.RecoverFromCrash —..; live-PID → exit 5;
-//     ErrFileDeletePersistent → exit 7; other → exit 2.
+// 10.5. runtimepkg.RecoverFromCrash under withPublishLock (busy → exit 5,
+//     broken → exit 7) —..; live-PID → exit 5;
+//     ErrFileDeletePersistent → exit 7; other → exit 2. The lock is the same
+// one Step 13.3 takes and is dropped before this step returns: recovery
+//     deletes runtime.json, and an unserialized delete lands on a peer's
+//     freshly published snapshot.
 // 11. powerassert.CleanupOrphans —; ErrConcurrentInstance → exit 5.
 //  12. rs.Push(runtimepkg.NewManager(...)) — Phase 5 replaces mock-runtime-file.
 // 13. powerassert.Acquire("dndmode active") —; rs.Push(assertion).
-//     13.3. runtimepkg.Manager.Write({pid, started_at, prior_focus=nil, assertion_id})
-// atomic temp+rename per the design notes.
+//     13.3. acquirePublishLock (busy → exit 5, broken → exit 7) → peer re-check
+// (live → exit 5) → config fingerprint re-check (changed → exit 1) →
+//     runtimepkg.Manager.Write({pid, started_at, prior_focus=nil, assertion_id})
+// atomic temp+rename per the design notes → release. Every refusal
+// inside that section calls Manager.Disown first: the file it would
+// otherwise delete belongs to a peer, not to this process.
 // 13.7. focus.Activate (warn on fail per) + rs.Push(focus.NewReleaser(...))
 // slot #4 in LIFO.
 // 14. cocoa.Init — (moved DOWN after permission checks).
@@ -421,7 +429,9 @@ func run() int {
 
 	// --- Step 5: Load config ---
 	loader := config.NewLoader(cfgPath)
-	cfg, created, err := loader.Load()
+	// LoadWithSource, not Load: the raw bytes are what Step 5a fingerprints,
+	// and they have to be the ones this parse consumed. See below.
+	cfg, cfgRaw, created, err := loader.LoadWithSource()
 	if err != nil {
 		_, _ = fmt.Fprintln(errW, err)
 		return exitConfigErr
@@ -435,6 +445,23 @@ func run() int {
 	if cfg.Debug {
 		debugOn = true
 	}
+
+	// --- Step 5a: fingerprint the bytes Load just parsed ---
+	// Compared again under the publish lock at Step 13.3. Everything between
+	// those two points — the platform check, an unbounded WaitForGrants, crash
+	// recovery, the IOPMAssertion acquire — runs while a concurrent `dndmode
+	// --set-password` is free to rewrite this exact file, and the verifier
+	// resolved at Step 5b below would then be a secret the config no longer
+	// names. See acquirePublishLock for the full shape of that race and why the
+	// two sides cannot see each other without a shared lock.
+	//
+	// Over cfgRaw and NEVER over a fresh read of cfgPath: SaveUnlockHash
+	// publishes by atomic rename, so a rename landing between Load's read and a
+	// re-read here would pair the OLD verifier with the NEW file's fingerprint,
+	// and Step 13.3 would then find nothing changed and start the shield with
+	// the superseded secret — the failure this check exists to catch, produced
+	// by the check itself. See config.Loader.LoadWithSource.
+	cfgFingerprint := configFingerprintOf(cfgRaw)
 
 	// --- Step 5b: Resolve + validate the unlock code ---
 	// config.ResolveUnlockCode owns the unlock_code / unlock_hash /
@@ -764,13 +791,45 @@ func run() int {
 	// (runtimeMgr and liveChecker were constructed at Step 5c — reused here
 	// per Phase 5 single-instance discipline; extends this to
 	// powerassert.LiveChecker.)
-	if err := runtimepkg.RecoverFromCrash(ctx, runtimeMgr,
-		powerassert.NewCgoReleaser(),
-		runner,
-		audiomute.NewExecRunner(),
-		liveChecker,
-		log,
-	); err != nil {
+	//
+	// Under the publish lock, and under it for the whole call: recovery reads
+	// the snapshot, acts on it for as long as two 5s subprocesses take, and
+	// then deletes the file at that path — which by then can be a peer's newly
+	// published runtime.json rather than the stale one it read. See
+	// withPublishLock for the full sequence; the short version is that a
+	// delete landing there makes a LIVE session invisible to the peer re-check
+	// at Step 13.3 and to --set-password's probe, which is the failure the lock
+	// exists to prevent. The lock is dropped before this block returns, so the
+	// second acquire at Step 13.3 cannot contend with this one.
+	if err := withPublishLock(filepath.Dir(runtimeMgr.Path()), func() error {
+		return runtimepkg.RecoverFromCrash(ctx, runtimeMgr,
+			powerassert.NewCgoReleaser(),
+			runner,
+			audiomute.NewExecRunner(),
+			liveChecker,
+			log,
+		)
+	}); err != nil {
+		// Nothing to Disown on any branch here: rs.Push(runtimeMgr) is still a
+		// step away (Step 12), so the cleanup stack cannot reach the file.
+		if errors.Is(err, errPublishLockBusy) {
+			// Same two holders as at Step 13.3, and the same answer — refuse
+			// before anything is acquired rather than recover against a file
+			// someone else is about to replace.
+			_, _ = fmt.Fprintln(errW,
+				"dndmode: another dndmode is publishing its state, or a --set-password is setting a new unlock code. Wait for it to finish, then re-run.")
+			return exitConcurrentInstance
+		}
+		if errors.Is(err, errPublishLockUnusable) {
+			// exit 7 to match what the publish section and --set-password
+			// return for the same broken lock; the sentence names the
+			// directory because that is the thing to fix.
+			_, _ = fmt.Fprintf(errW,
+				"dndmode: cannot claim the publish lock, so crash recovery cannot be serialized against a concurrent dndmode or --set-password: %v.\n"+
+					"Check that %s is writable, then re-run.\n",
+				err, filepath.Dir(runtimeMgr.Path()))
+			return exitRuntimeJSON
+		}
 		if errors.Is(err, runtimepkg.ErrConcurrentInstance) {
 			_, _ = fmt.Fprintf(errW,
 				"dndmode: %v. Send SIGTERM or wait for its exit, then re-run.\n", err)
@@ -819,6 +878,13 @@ func run() int {
 	// window: if powerassert.Acquire (Step 13) fails, the deferred Cleanup
 	// fires Release on a file that was never written — os.Remove on
 	// ErrNotExist returns nil. runtimeMgr was constructed at Step 5c.
+	//
+	// "A file that was never written" is only ONE of the two things that path
+	// can find, though, and the other one is not ours to delete: a peer that
+	// started while this process sat in WaitForGrants can have published its own
+	// runtime.json at that exact path. So every return between here and the
+	// successful Write calls runtimeMgr.Disown() first — see Manager.Disown for
+	// why deleting the peer's file is worse than leaving a stale one.
 	rs.Push(runtimeMgr)
 
 	// --- Step 13 (Phase 3): Acquire IOPMAssertion ---
@@ -832,6 +898,11 @@ func run() int {
 	// awake); true → legacy PreventUserIdleSystemSleep (display may idle-off).
 	assertion, err := powerassert.Acquire("dndmode active", cfg.AllowDisplaySleep, log)
 	if err != nil {
+		// Same rule as every refusal in the publish section below: this process
+		// has not written runtime.json, so a file at that path was published by
+		// a peer that started while we waited for grants, and the deferred
+		// Cleanup must not delete it.
+		runtimeMgr.Disown()
 		_, _ = fmt.Fprintf(errW, "dndmode: acquire awake-lock failed: %v. Check IOKit availability and re-run.\n", err)
 		return exitPlatformErr
 	}
@@ -854,6 +925,129 @@ func run() int {
 		}
 	}
 
+	// Publishing runtime.json is what makes this process visible to a
+	// concurrent --set-password: its peer probe reads that file and nothing
+	// else. So the re-check for a live peer, the check that the config is still
+	// the one Step 5b resolved and the write that announces us have to be one
+	// indivisible section, taken under the same lock --set-password holds
+	// across its own probe-and-save. Hold it for exactly those three steps —
+	// two reads and a rename — and no longer: a capture that has to wait on
+	// this lock would be waiting on us for no reason.
+	//
+	// A lock that cannot be taken at all is FATAL here, and the tempting
+	// argument for starting anyway does not survive the arithmetic. That
+	// argument runs: the shield coming up is this program's entire purpose, so
+	// a rare coordination failure must not be traded for a common total one.
+	// But every way this open-or-flock can fail short of "someone else holds
+	// it" — unwritable directory, read-only or full filesystem, a config dir
+	// that vanished mid-startup — is a way the runtimeMgr.Write a few lines
+	// down is about to fail too, with exit 2. Starting without the lock
+	// therefore rescues almost no run that would otherwise have worked; what it
+	// does is remove the one thing that makes the handoff to --set-password
+	// atomic. A session that publishes without holding the lock can land
+	// between that command's last probe and its rename, and then the shield
+	// answers to the PREVIOUS secret while config.yml names the new one and the
+	// operator who set it has been told it took. Refusing here is recoverable
+	// and the sentence names the directory to fix; that outcome is not
+	// recoverable from the keyboard.
+	releaseLock, lockErr := acquirePublishLock(filepath.Dir(runtimeMgr.Path()))
+	switch {
+	case lockErr == nil:
+		// Released explicitly at the end of the section rather than by a defer:
+		// a defer here would run when run() returns, i.e. when the session
+		// ENDS, and a lock held for the whole shielded stretch would make every
+		// --set-password wait out the bounded retry before refusing — with the
+		// wrong sentence, since by then the honest answer is the live-peer one.
+		// Every path out of the section below releases it first.
+		defer releaseLock() // belt and braces: the explicit calls run first, and release is idempotent
+	case errors.Is(lockErr, errPublishLockBusy):
+		// Held for longer than the bounded wait. Two holders are possible and
+		// only one of them is a rename away from done: another starting session
+		// (wedged, if it is still holding after two seconds) or a
+		// --set-password, which holds the lock across its whole capture and so
+		// legitimately outlasts any wait worth making a user sit through.
+		// Refusing is right in both cases — the second one owns the keyboard
+		// through a tap that would sit in front of ours anyway — and the
+		// sentence below names both.
+		//
+		// Disown for the same positional reason as every other exit from this
+		// section: this process has not written runtime.json, so a file at that
+		// path is the lock holder's — and the holder that made us wait out the
+		// whole bounded retry is exactly the one that may already have renamed
+		// its snapshot into place and not yet released. Deleting it on the way
+		// out would leave that live session invisible to every probe.
+		runtimeMgr.Disown()
+		_, _ = fmt.Fprintln(errW,
+			"dndmode: another dndmode is publishing its state, or a --set-password is setting a new unlock code. Wait for it to finish, then re-run.")
+		return exitConcurrentInstance
+	default:
+		// Not busy — broken. Separate sentence from the busy branch because the
+		// user action is different: that one is "wait", this one names the
+		// directory whose lock file could not be opened or locked. exit 7
+		// (exitRuntimeJSON) matches what --set-password returns for the same
+		// failure, so the two halves of the coordination report it alike.
+		//
+		// Disown for the same reason as the busy branch above — with one more:
+		// this branch never held the lock at all, so it has no claim whatsoever
+		// on what is at that path, and a peer that DID hold it may have
+		// published while we were failing to open the lock file.
+		runtimeMgr.Disown()
+		_, _ = fmt.Fprintf(errW,
+			"dndmode: cannot claim the publish lock, so a concurrent dndmode or --set-password cannot be ruled out: %v.\n"+
+				"Check that %s is writable, then re-run.\n",
+			lockErr, filepath.Dir(runtimeMgr.Path()))
+		return exitRuntimeJSON
+	}
+
+	// The peer Step 5c ruled out may have appeared since. That check ran before
+	// an unbounded WaitForGrants, and two sessions started together BOTH pass
+	// it — neither has written runtime.json yet, so neither can see the other.
+	// The lock serializes them here, but serializing is only half of it: without
+	// this read the second one overwrites the first one's file and installs its
+	// own tap beside it, and whichever exits first deletes the shared file,
+	// leaving the survivor shielding the machine and invisible to every probe
+	// that looks there — --set-password's included, which would then capture a
+	// new code beside a session that keeps answering only to the old one.
+	//
+	// Only a LIVE peer refuses. A dead PID or an unreadable file is deliberately
+	// not fatal: Step 10.5 recovery already removed anything stale, so what can
+	// be left is a peer that published and died inside this window (its file is
+	// ours to replace, and its assertion is CleanupOrphans' problem) or a
+	// corrupt file, which Step 5c also only warns about — and on that one
+	// --set-password fails closed from its own side anyway.
+	if alive, peerPID, perr := runtimepkg.IsLiveInstance(runtimeMgr, liveChecker, log); perr != nil {
+		log.Warn("peer re-check inconclusive", slog.Any("err", perr))
+	} else if alive {
+		// Disown before the return: the file on disk is the PEER's, and the
+		// deferred rs.Cleanup would otherwise delete it and produce exactly the
+		// invisible-live-session this branch exists to prevent.
+		runtimeMgr.Disown()
+		releaseLock()
+		_, _ = fmt.Fprintf(errW,
+			"dndmode: another instance is already active (PID=%d). Send SIGTERM or wait for its exit, then re-run.\n",
+			peerPID)
+		return exitConcurrentInstance
+	}
+
+	// The file may have been rewritten while this process sat in WaitForGrants
+	// or recovery. unlockVerifier is already resolved and cannot be re-derived
+	// without applying the precedence table a second time, so the answer to a
+	// changed config is to refuse rather than to adapt: starting would raise a
+	// shield that answers to the PREVIOUS secret while config.yml names the new
+	// one, and the operator who just ran --set-password has been told it took.
+	// Re-running picks up the new file and costs a few seconds; the other
+	// outcome costs however long it takes to remember the old code.
+	if configFingerprint(cfgPath) != cfgFingerprint {
+		// Same reason as the peer branch above: this process has not written
+		// runtime.json, so anything at that path belongs to someone else.
+		runtimeMgr.Disown()
+		releaseLock()
+		_, _ = fmt.Fprintf(errW,
+			"dndmode: %s changed while dndmode was starting, so the unlock code loaded at startup may no longer be the one in the file. Nothing was locked — re-run.\n",
+			cfgPath)
+		return exitConfigErr
+	}
+
 	// Atomic temp+rename. Records pid + UTC start time + nil PriorFocus
 	// (v1 never restores prior Focus) + the *real* assertion id
 	// from Step 13 for crash recovery + prior_muted for audio restore.
@@ -865,9 +1059,18 @@ func run() int {
 		PriorMuted:   priorMuted,
 		FocusEnabled: &effectiveFocus,
 	}); err != nil {
+		// The rename did not land, so the path still holds whatever was there
+		// before — never this process's snapshot. Disown for the same reason as
+		// the two branches above.
+		runtimeMgr.Disown()
+		releaseLock()
 		_, _ = fmt.Fprintf(errW, "dndmode: write runtime.json failed: %v. Inspect %s and re-run.\n", err, runtimeMgr.Path())
 		return exitPlatformErr
 	}
+	// End of the section. From here on this process is discoverable through
+	// runtime.json, which is the handoff the lock existed to make atomic: a
+	// --set-password that arrives now reads a live PID and refuses on its own.
+	releaseLock()
 
 	// --- Step 13.7 (Phase 5): Focus (opt-in) + audio mute lifecycle ---
 	// Focus is opt-in (effectiveFocus). When enabled, Activate is best-effort
