@@ -127,8 +127,11 @@ var (
 // straight into the first pass's Return, and return an identical sequence
 // without ever waiting for a keystroke. The comparison the second pass exists
 // to perform would then be a tautology: it would confirm a typo as eagerly as
-// it confirms a correct entry, the plaintext is deleted by then, and the
-// length is not stored, so there is nothing left to recover from. Reading
+// it confirms a correct entry, and by the time anyone noticed, this process
+// would have wiped the plaintext and stored no length — nothing it kept could
+// say what was actually typed. (Nothing about the DIGEST is claimed here: a
+// single salted SHA-256 over a short key sequence is enumerable offline, and
+// the README says so. The point is only that dndmode retains no copy.) Reading
 // seq() between passes instead is wrong for the mirror-image reason — it
 // discards everything typed between the first Return and that read.
 //
@@ -274,11 +277,15 @@ func collectSteps(
 // It is the only exported way into capture, and that is a safety property
 // rather than a packaging choice: a single-pass capture cannot be confirmed,
 // and an unconfirmed sequence is a typo that gets salted, hashed, written to
-// the config and never recovered — the plaintext is deleted by then and the
-// length is deliberately not stored, so there is nothing left to reconstruct
-// it from. collectSteps, the single pass, stays unexported so no caller can
-// assemble that outcome by accident. Confirmation is by construction here,
-// not by discipline at the call site.
+// the config and never handed back — the plaintext is wiped by then, the
+// length is deliberately not stored, and no command recovers either. That is
+// a statement about RETENTION and not about cryptography: the stored pair is
+// a single salted SHA-256, so a short typo IS enumerable offline by anyone
+// holding the file. Which changes nothing for the person at the keyboard,
+// who now has a shield answering only to a sequence they never meant to type.
+// collectSteps, the single pass, stays unexported so no caller can assemble
+// that outcome by accident. Confirmation is by construction here, not by
+// discipline at the call site.
 //
 // # Why the tap is installed once and not per pass
 //
