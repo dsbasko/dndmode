@@ -399,10 +399,17 @@ unlock_code: Ctrl+Option+Cmd+X
 # config, and neither is meant to be typed or edited by hand.
 #
 # 'dndmode --set-password' captures a new sequence from REAL keystrokes (twice,
-# so a typo cannot be stored), then DELETES the unlock_code line above and
-# writes the pair in its place, with its own explanatory comment. After that the
-# plaintext secret is no longer anywhere in this file, and the sequence cannot
-# be recovered from the two stored values — not even its length.
+# so a typo cannot be stored), then DELETES the plaintext unlock_code line (and
+# a deprecated hotkey line, if there is one) and writes the pair where it was,
+# with its own explanatory comment. After that the
+# plaintext secret is no longer anywhere in this file: neither stored value
+# spells the sequence out and neither states its length.
+#
+# That hides the code from a glance, a 'cat' and a synced backup. It is NOT
+# offline-attack resistance: the digest is a single salted SHA-256, not a
+# memory-hard KDF, so anyone who holds this file can enumerate short key
+# sequences against it and get the code back. Pick a long one — and note that
+# the old plaintext bytes may still linger on disk or in a snapshot.
 #
 # The pair is ONE secret and is MUTUALLY EXCLUSIVE with unlock_code (and with
 # the deprecated hotkey below): a config carrying the pair AND a plaintext key

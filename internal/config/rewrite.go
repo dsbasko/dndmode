@@ -59,18 +59,35 @@ var secretKeyRe = regexp.MustCompile(`^(?:unlock_code|hotkey|unlock_salt|unlock_
 const hashBlockMarker = "# --- unlock_salt / unlock_hash (written by `dndmode --set-password`) ---------"
 
 // hashBlockComment documents the pair in the file itself, in the same voice as
-// defaultConfigTemplate: the config is the manual. It explains the one thing a
+// defaultConfigTemplate: the config is the manual. It explains the two things a
 // reader cannot deduce from the values — that they are two halves of one
-// secret and that the plaintext is gone for good.
+// secret, and how much the hashing actually buys.
+//
+// That second part is deliberately not flattering. "The sequence cannot be
+// recovered" is the sentence a reader wants and it is not true: the digest is
+// ONE salted SHA-256 pass, so anyone holding this file can enumerate short key
+// sequences against it offline at full speed. The README says exactly that in
+// its threat model, and this block is the copy most users will ever read — it
+// must not promise more than the README does, because the decision it feeds is
+// "can I commit this config to my dotfiles repo".
 //
 // No line may start with an unlock key name at column 0, or secretKeyRe would
 // match this block's own documentation on the next run.
+//
+// The FIRST line is the idempotency marker and is byte-frozen; the prose below
+// it can be reworded freely, because configs written by earlier versions are
+// recognised by that line alone.
 var hashBlockComment = []string{
 	hashBlockMarker,
 	"# The unlock secret as a random salt plus the SHA-256 digest of the key",
-	"# sequence that was typed at `--set-password` time. The sequence itself is",
-	"# NOT stored here and cannot be recovered from these two values — not even",
-	"# its length.",
+	"# sequence that was typed at `--set-password` time. Neither value spells",
+	"# the sequence out and neither states its length, which is what keeps it",
+	"# out of a glance, a `cat` and a synced backup.",
+	"#",
+	"# It is NOT offline-attack resistance. The digest is a single salted",
+	"# SHA-256, not a memory-hard KDF, so anyone who holds this file can",
+	"# enumerate short key sequences against it and get the code back. Length",
+	"# is the only defence that scales here — pick a long one.",
 	"#",
 	"# The pair is ONE secret: keep both keys or neither, and do not hand-edit",
 	"# them. To change the code, run `dndmode --set-password` again. To go back",

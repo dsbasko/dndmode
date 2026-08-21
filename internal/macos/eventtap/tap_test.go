@@ -511,6 +511,92 @@ func TestInstall_EmptyUnlockCode_Rejected(t *testing.T) {
 	}
 }
 
+// The capture-only exemption is a PARAMETER, and only installForCapture may
+// pass it. Inferring it from `v == nil && sink == nil` would make the exemption
+// reachable from the session entry points by argument coincidence:
+// `InstallAll(nil, nil, log)` — the call whose own docstring promises
+// ErrEmptyUnlockCode before any resource is touched — would instead install a
+// shield-grade kCGHIDEventTap with no poller behind it and nothing able to
+// lower it. That is the fail-deadly the sentinel exists to refuse, and it looks
+// exactly like a correct call from the outside, which is why it needs a pin
+// rather than a comment.
+//
+// The nil sink is the same lockout one step further along: the poller's send is
+// a non-blocking select, so a nil channel takes the `default` arm and the match
+// signal is DROPPED. The code verifies, the log says "matched", and the shield
+// stays up. Both entry points are covered because they are separate surfaces
+// and a future refactor could add the check to only one.
+//
+// The guard runs BEFORE CGEventTapCreate, so this test needs no Accessibility
+// grant — it must fail on the guard, never skip and never take the keyboard.
+//
+// NOT t.Parallel: it goes through the install path.
+func TestInstall_CaptureShapeNotReachableFromSessionEntryPoints(t *testing.T) {
+	good, err := hotkey.ParseSequence("s w o r d f")
+	if err != nil {
+		t.Fatalf("ParseSequence: %v", err)
+	}
+
+	for _, tc := range []struct {
+		name string
+		v    matcher.Verifier
+		sink chan struct{}
+	}{
+		{name: "capture shape (no verifier, no sink)", v: nil, sink: nil},
+		{name: "usable verifier but no sink", v: matcher.NewSequence(good), sink: nil},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			r, err := InstallAll(tc.v, tc.sink, nil)
+			if !errors.Is(err, ErrEmptyUnlockCode) {
+				t.Errorf("InstallAll(%s) error = %v, want ErrEmptyUnlockCode", tc.name, err)
+			}
+			if r != nil {
+				t.Errorf("InstallAll(%s) returned a non-nil Releaser alongside the error", tc.name)
+				_ = r.Release()
+			}
+
+			r, err = installTapOnly(tc.v, tc.sink, nil)
+			if !errors.Is(err, ErrEmptyUnlockCode) {
+				t.Errorf("installTapOnly(%s) error = %v, want ErrEmptyUnlockCode", tc.name, err)
+			}
+			if r != nil {
+				t.Errorf("installTapOnly(%s) returned a non-nil Releaser alongside the error", tc.name)
+				_ = r.Release()
+			}
+		})
+	}
+}
+
+// The other side of the same coin: installForCapture — the ONE caller that
+// passes captureOnly — must still be exempt, or `--set-password` could never
+// install its tap at all. Asserted the same way TestInstall_EmptyUnlockCode_
+// DigestPasses asserts its positive case: with the unclean-teardown latch SET,
+// so a verifier that clears the empty-code gate stops at the very next one.
+// ErrTeardownUnclean therefore proves the first gate let it through WITHOUT
+// ever reaching CGEventTapCreate — a positive assertion would need a real
+// Accessibility grant and would take the machine's keyboard mid-test-run.
+//
+// NOT t.Parallel: it mutates the process-global latch.
+func TestInstallForCapture_ExemptFromEmptyUnlockCodeGuard(t *testing.T) {
+	prev := teardownUnclean.Load()
+	t.Cleanup(func() { teardownUnclean.Store(prev) })
+	teardownUnclean.Store(true)
+
+	r, _, err := installForCapture(nil)
+	if errors.Is(err, ErrEmptyUnlockCode) {
+		t.Fatal("installForCapture was rejected as an empty unlock code — " +
+			"--set-password can no longer install its tap")
+	}
+	if !errors.Is(err, ErrTeardownUnclean) {
+		t.Errorf("installForCapture error = %v, want ErrTeardownUnclean "+
+			"(it must reach the second gate, i.e. pass the first)", err)
+	}
+	if r != nil {
+		t.Error("installForCapture returned a non-nil Releaser alongside the error")
+		_ = r.Release()
+	}
+}
+
 // TestInstall_EmptyUnlockCode_DigestPasses is the other half of the guard:
 // having pinned what it REJECTS, pin that it does not reject the hashed
 // secret. A *matcher.Digest carries no step slice, so a guard rewritten
