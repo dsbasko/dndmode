@@ -725,8 +725,13 @@ secret, so it is never stored and never printed. A code shorter than 4 steps is
 still **rejected**, with a message that names the thresholds and not your count.
 
 **Going back to plain text.** Delete both `unlock_salt` and `unlock_hash` and add
-an `unlock_code` line. Nothing is one-way except the old secret itself, which is
-not recoverable from the pair. Half a pair is an error, not a fallback.
+an `unlock_code` line. The format is not one-way: a plaintext `unlock_code` is
+accepted again at any time. What you do not get back is the old secret - dndmode
+keeps no copy of it and offers no command that recovers it. That is a statement
+about *retention*, not about cryptography: the digest is a single salted
+SHA-256, and as the threat model below spells out, a short sequence can be
+enumerated offline by anyone holding the file. Half a pair is an error, not a
+fallback.
 
 **Symlinked configs.** If `~/.config/dndmode/config.yml` is a symlink - the usual
 dotfiles setup - the **target** is rewritten and the link itself is left alone. A
