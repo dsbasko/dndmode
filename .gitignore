@@ -4,6 +4,7 @@ Thumbs.db
 
 # Build artefacts
 /dndmode
+/dist/
 coverage.out
 
 # Generated mocks (mockgen via `make generate`; removed by `make clean`)
