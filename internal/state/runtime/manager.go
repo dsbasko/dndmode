@@ -222,6 +222,35 @@ func (m *Manager) Release() error {
 	return nil
 }
 
+// Disown latches the release flag WITHOUT touching the file on disk, so a
+// subsequent Release — including the one the deferred cleanup stack fires on
+// its way out — is a no-op.
+//
+// It exists for one situation, and it is the mirror image of the re-arm at the
+// tail of Write. main.go pushes this Manager onto the cleanup stack BEFORE it
+// writes anything (so a failed IOPMAssertion acquire still unwinds), which is
+// safe only while "the file at m.path is ours or is nothing". Under the publish
+// lock that stops being true: a session can find a runtime.json published by a
+// LIVE peer that started while it was parked in WaitForGrants, and it refuses
+// on exactly that. Releasing then would delete the peer's file — leaving a
+// shielded session that no probe can see, which is the failure the peer check
+// was added to prevent, produced by the refusal itself.
+//
+// So the rule at the call sites is positional, not conditional: every path that
+// leaves the publish section WITHOUT a successful Write disowns first. After a
+// successful Write the file is this process's own and Release must delete it as
+// before. Nothing re-arms Disown — a Manager that has disowned its path is done
+// with it — except Write, which is the one call that makes the file ours again
+// and already resets the same flag.
+//
+// Under mu for the same reason Release takes it: the flag must not move while a
+// concurrent Write is between its rename and its own reset.
+func (m *Manager) Disown() {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.released.Store(true)
+}
+
 // Compile-time check: *Manager satisfies state.Releaser without
 // importing the state package (would create an import cycle —
 // cmd/dndmode/main.go is the only caller that holds *Manager as

@@ -683,6 +683,29 @@ does `Ctrl-C`. Four safeguards bound that:
 All four leave the config untouched: the old unlock code still works. Nothing is
 saved until both passes agree.
 
+**It refuses to run beside a live session, and it claims the keyboard before it
+prompts.** The same tap is head-inserted, so a capture started while a session
+holds the shield would sit *in front of* that session's tap and eat the unlock
+code its owner is typing. So `--set-password` reads
+`~/.config/dndmode/runtime.json` on arrival and exits `5` if a live pid is there
+- and exits `7` on anything that leaves the answer open, whether that is
+unreadable bytes or a snapshot with no usable pid, because "I cannot tell" has
+to mean "do not install the tap".
+
+That first read cannot stand on its own: the wait for Accessibility sits between
+it and the capture, and lasts as long as you take to click through System
+Settings. So once the grant is in - and *before* anything installs a tap - the
+command takes an exclusive lock on `~/.config/dndmode/runtime.lock` that
+starting sessions take too, re-reads `runtime.json` under it, and keeps holding
+it until the config has been rewritten (see
+[exit 5](#another-instance-is-already-active-exit-5)). A session that starts
+inside that window blocks on the lock and refuses before it raises anything, and
+a second `--set-password` refuses before it captures rather than the two of them
+racing their saves. One last read fires in the instant before the rewrite, for
+the one peer the lock cannot reach: a session started from a build that predates
+the lock and still running across the upgrade, which publishes `runtime.json`
+without contending for anything. Every refusal leaves the file untouched.
+
 One exception on a machine that has never run dndmode: the command loads the
 config before it prompts, and loading a missing config **creates** it, exactly as
 a normal run does. Cancel the capture there and you are left with a freshly
@@ -853,13 +876,13 @@ only thing it tells you.
 | Code | Meaning |
 | --- | --- |
 | `0` | Clean exit via the unlock code, a signal, or `--timer` expiry. |
-| `1` | Config error: bad YAML, an invalid or ambiguous unlock code, or an invalid flag value. Also the `--set-password` refusals that are about you or your file (cancelled, the two entries disagreed, a code too short, a flag conflict, stdin or stdout not a terminal). |
+| `1` | Config error: bad YAML, an invalid or ambiguous unlock code, or an invalid flag value. Also a session that found `config.yml` rewritten while it was starting up, and the `--set-password` refusals that are about you or your file (cancelled, the two entries disagreed, a code too short, a flag conflict, stdin or stdout not a terminal). |
 | `2` | Platform error: not arm64, macOS < 14, IOKit/Cocoa failure, or (in `none` mode) an unexpected `caffeinate` death. Also a `--set-password` whose event tap the machine refused - the same failure a session reports as `2`. |
 | `3` | Interrupted while waiting for Accessibility / Input Monitoring grants. |
 | `4` | Secure Event Input is held by another app, or the input tap was silently disabled and the watchdog gave up. |
-| `5` | Another live dndmode instance is already running - for a session, and for a `--set-password` that would otherwise capture over it. |
+| `5` | Another live dndmode instance is already running - for a session, and for a `--set-password` that would otherwise capture over it. A session asks twice: on arrival, and again under the publish lock in the instant before it announces itself, so two dndmodes started together cannot both come up. `--set-password` asks three times: on arrival, again under the lock just before its input tap goes in, and once more immediately before it rewrites the config. Also raised when another dndmode is inside its own publish section, or is capturing a new unlock code, and still holds `~/.config/dndmode/runtime.lock`. |
 | `6` | Required Shortcuts `dndmode-on` / `dndmode-off` not found (only when `focus: true`). |
-| `7` | Cannot delete a stale `~/.config/dndmode/runtime.json`. |
+| `7` | Cannot read or delete `~/.config/dndmode/runtime.json`, or cannot claim `~/.config/dndmode/runtime.lock`. Both halves fail closed on a lock they cannot claim: a session refuses to raise the shield and `--set-password` refuses to install its tap, because without it neither can rule out the other. For `--set-password` anything else that leaves a running session unable to be *ruled out* lands here too - unreadable bytes, or a snapshot whose `pid` is missing, zero or negative. |
 | `8` | Internal panic, recovered after cleanup. |
 
 ## Threat model
@@ -956,13 +979,56 @@ pkill -TERM dndmode   # ask it to exit cleanly
 
 Or wait for it to finish, then re-run.
 
-### Cannot delete a stale runtime file (exit 7)
+`--set-password` runs this check **three times** - on arrival, again under the
+lock once Accessibility is granted, and once more in the instant before it
+rewrites the config - because they are minutes apart and the permission wait in
+the middle has no ceiling. The later ones are the ones that matter: a session
+that started while you were typing has already read the *old* unlock code out of
+the config and will keep matching against it, so publishing a new one would
+leave the file naming a secret that the running shield does not accept. When a
+check refuses, the config is left untouched and your old code still works.
+
+Reads alone would not be enough, because a session that is still waiting for an
+Accessibility grant has not written `runtime.json` yet and is invisible to any
+number of reads of it. So both paths take one exclusive lock on
+`~/.config/dndmode/runtime.lock` (an empty file, created once and never
+removed): `--set-password` holds it from *before* its input tap goes in until
+the new code is written, and a session holds it across "is another dndmode
+already live?", "is the config still the one I loaded?" and the write of
+`runtime.json`. That leaves exactly two orderings, and both are safe - either
+the session publishes first and `--set-password` refuses with exit `5`, or the
+rewrite lands first and the starting session notices the config changed under it
+and refuses with exit `1` before anything is locked. Re-run it and it picks up
+the new code.
+
+Neither side starts without that lock. If it cannot be claimed at all - an
+unwritable config directory, a filesystem that will not lock - both refuse with
+exit `7` instead of proceeding uncoordinated. A session that skipped it would
+gain almost nothing (the same directory has to take the `runtime.json` write
+seconds later) and would give up the only thing that makes the handoff atomic:
+it could publish in the instant between `--set-password`'s last read and its
+rewrite, and then the shield would answer to the old code while the file names
+the new one. The same lock is what makes two sessions started together
+impossible: the second one reads `runtime.json` under it, finds the first, and
+exits `5` instead of overwriting the file both would then be sharing.
+
+Because the lock spans the capture, a session started while you are typing a new
+password does not start: it waits on the lock, gives up after two seconds, and
+exits `5` telling you to wait and re-run. That is the intended outcome - its tap
+would sit *behind* the capture's anyway, so it would raise a shield that nothing
+could unlock until the capture ended.
+
+### Cannot read or delete the runtime file (exit 7)
 
 ```bash
 rm -f ~/.config/dndmode/runtime.json
 ```
 
-Causes are a read-only filesystem, an ACL denying delete, or a full disk.
+Causes are a read-only filesystem, an ACL denying delete, or a full disk. A
+`--set-password` that cannot *read* the file exits `7` for the same reason: it
+cannot tell whether a session is live, and the capture installs a system-wide
+input tap that would swallow that session's unlock code. Delete the file once
+`pgrep -x dndmode` comes back empty, then re-run.
 
 ### The unlock code is rejected at startup (exit 1)
 
@@ -1003,10 +1069,17 @@ cause.
 
 ```bash
 sudo rm /usr/local/bin/dndmode
+# optional: also drop the config, the crash snapshot and the publish lock
+rm -rf ~/.config/dndmode
 # optional: also clear the permission entries
 tccutil reset Accessibility com.dsbasko.dndmode
 tccutil reset ListenEvent com.dsbasko.dndmode
 ```
+
+`~/.config/dndmode` holds three files: `config.yml` (yours), `runtime.json`
+(written for the length of a session and deleted on exit) and `runtime.lock` (an
+empty file used only as a lock; it is never written to and never removed while
+dndmode is installed).
 
 ## Building from source
 

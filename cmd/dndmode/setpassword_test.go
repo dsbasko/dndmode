@@ -10,6 +10,7 @@ import (
 	"io"
 	"log/slog"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -18,6 +19,7 @@ import (
 	"github.com/dsbasko/dndmode/internal/config"
 	"github.com/dsbasko/dndmode/internal/config/hotkey"
 	"github.com/dsbasko/dndmode/internal/macos/eventtap"
+	runtimepkg "github.com/dsbasko/dndmode/internal/state/runtime"
 )
 
 // Test_setPasswordFlags_conflictingFlag pins the mutual-exclusion rule:
@@ -527,23 +529,74 @@ func Test_resultUpdated_CarriesNeitherLengthNorValue(t *testing.T) {
 // wake it. The refusal is therefore not a nicety: it is the difference between
 // "re-run later" and "the shield cannot be lifted for the next two minutes".
 //
-// Exit 5 and the warn-not-fatal read failure are lifted verbatim from run()
-// Step 5c: two peer checks that disagreed about what "already running" means
-// would be worse than one.
+// Exit 5 is lifted verbatim from run() Step 5c. The INCONCLUSIVE read is where
+// this branch deliberately parts company with it: Step 5c may warn and carry on
+// because Step 10.5 RecoverFromCrash re-reads the same file moments later and
+// turns a persistent failure into exit 7, while nothing downstream of the probe
+// here re-examines anything — the next thing that happens is a suppressing tap.
+// So "I cannot tell whether a session is live" has to exit 7 rather than
+// proceed, and this test is what stops it drifting back to a warning.
+//
+// "Inconclusive" covers more than unparseable bytes, which is why three of the
+// four cases below are well-formed JSON. A snapshot whose pid is absent, zero
+// or negative parses perfectly and still leaves liveness unestablished, because
+// IsLiveInstance refuses to hand such a value to kill(pid, 0) — and it reports
+// that refusal with the same triple it uses for "no runtime.json at all". The
+// file being on disk is the whole difference, and it has to be honoured here.
 func Test_runSetPasswordAt_RefusesBesideALiveInstance(t *testing.T) {
 	t.Parallel()
 
 	tests := []struct {
 		name     string
-		pid      int
+		body     string
+		wantPID  bool
 		wantCode int
 	}{
 		// This process is unquestionably alive, so kill(pid, 0) succeeds.
-		{name: "live peer", pid: os.Getpid(), wantCode: exitConcurrentInstance},
+		{
+			name:     "live peer",
+			body:     fmt.Sprintf(`{"pid":%d,"started_at":"2026-08-25T00:00:00Z"}`, os.Getpid()),
+			wantPID:  true,
+			wantCode: exitConcurrentInstance,
+		},
 		// PID 0 is the corrupted-snapshot case IsLiveInstance short-circuits
-		// without probing (kill(0, sig) means "my whole process group"). It must
-		// fall through to the ordinary tty refusal, not stop the command.
-		{name: "invalid pid falls through", pid: 0, wantCode: exitConfigErr},
+		// without probing (kill(0, sig) means "my whole process group"), and it
+		// reports the result as the same (false, 0, nil) triple it uses for "no
+		// file at all". On this branch those two are not interchangeable: a
+		// runtime.json IS on disk, something wrote it, and nothing has
+		// established that its owner is gone. That is the unparseable-JSON case
+		// wearing different clothes, so it takes the same exit 7 rather than
+		// falling through to the tty refusal and, in a real terminal, to a tap.
+		{
+			name:     "invalid pid refuses",
+			body:     `{"pid":0,"started_at":"2026-08-25T00:00:00Z"}`,
+			wantCode: exitRuntimeJSON,
+		},
+		// Negative PIDs are the more dangerous half of the same corruption —
+		// kill(-N, sig) signals every process the caller can reach — and they
+		// arrive through the identical IsLiveInstance short-circuit, so they
+		// have to take the identical refusal.
+		{
+			name:     "negative pid refuses",
+			body:     `{"pid":-1,"started_at":"2026-08-25T00:00:00Z"}`,
+			wantCode: exitRuntimeJSON,
+		},
+		// A JSON object that parses but carries no pid key at all: Go leaves
+		// the field at its zero value, which is indistinguishable from an
+		// explicit 0 and must not be treated any more leniently.
+		{
+			name:     "missing pid refuses",
+			body:     `{"started_at":"2026-08-25T00:00:00Z"}`,
+			wantCode: exitRuntimeJSON,
+		},
+		// Unparseable runtime.json: a live peer can neither be confirmed nor
+		// ruled out. Must abort BEFORE the tty check, i.e. with exit 7 rather
+		// than the exit 1 the fall-through case produces.
+		{
+			name:     "inconclusive read refuses",
+			body:     "{not json",
+			wantCode: exitRuntimeJSON,
+		},
 	}
 
 	for _, tt := range tests {
@@ -558,8 +611,7 @@ func Test_runSetPasswordAt_RefusesBesideALiveInstance(t *testing.T) {
 			// Sibling of the config, which is how the branch resolves it — the
 			// same file run() Step 5c reads through $HOME.
 			runtimePath := filepath.Join(dir, filepath.Base(runtimeRelPath))
-			body := fmt.Sprintf(`{"pid":%d,"started_at":"2026-08-25T00:00:00Z"}`, tt.pid)
-			if err := os.WriteFile(runtimePath, []byte(body), 0o600); err != nil {
+			if err := os.WriteFile(runtimePath, []byte(tt.body), 0o600); err != nil {
 				t.Fatalf("write runtime.json: %v", err)
 			}
 			// A regular file stands in for the terminal: the fall-through case
@@ -580,10 +632,13 @@ func Test_runSetPasswordAt_RefusesBesideALiveInstance(t *testing.T) {
 			if out.Len() != 0 {
 				t.Errorf("the ungated writer was used on a failure path: %q", out.String())
 			}
-			if tt.wantCode == exitConcurrentInstance {
-				if !strings.Contains(errOut.String(), strconv.Itoa(tt.pid)) {
-					t.Errorf("the refusal does not name the peer PID: %q", errOut.String())
-				}
+			if tt.wantPID && !strings.Contains(errOut.String(), strconv.Itoa(os.Getpid())) {
+				t.Errorf("the refusal does not name the peer PID: %q", errOut.String())
+			}
+			// Every refusal on this path has to say what to do next, and every
+			// one of them has to say it before anything installs a tap.
+			if !strings.Contains(errOut.String(), peerBeforeCapture) {
+				t.Errorf("the refusal does not carry the pre-capture guidance: %q", errOut.String())
 			}
 		})
 	}
@@ -633,4 +688,168 @@ func Test_runSetPasswordAt_ConfigDebugRaisesTheGateBeforeTheError(t *testing.T) 
 // branch's own diagnostics go to errW, which the tests assert on directly.
 func discardLogger() *slog.Logger {
 	return slog.New(slog.NewTextHandler(io.Discard, nil))
+}
+
+// Test_probeLivePeer pins the three verdicts the peer probe can reach, and in
+// particular that the inconclusive one is a REFUSAL.
+//
+// The probe is called twice — once before the capture and once immediately
+// before the rename — so its verdicts are the only thing standing between
+// --set-password and two failures that both end behind a shield: a tap
+// head-inserted in front of a live session's, and a config republished with a
+// secret that session will never accept. A read failure that returned exitOK
+// would defeat both at once.
+func Test_probeLivePeer(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name     string
+		body     string // "" means: write no runtime.json at all
+		write    bool
+		wantCode int
+	}{
+		{name: "no runtime file", write: false, wantCode: exitOK},
+		{
+			name:     "dead pid",
+			body:     fmt.Sprintf(`{"pid":%d,"started_at":"2026-08-25T00:00:00Z"}`, reapedPID(t)),
+			write:    true,
+			wantCode: exitOK,
+		},
+		{
+			name:     "live pid",
+			body:     fmt.Sprintf(`{"pid":%d,"started_at":"2026-08-25T00:00:00Z"}`, os.Getpid()),
+			write:    true,
+			wantCode: exitConcurrentInstance,
+		},
+		{
+			name:     "unreadable file is a refusal, not a warning",
+			body:     "}{",
+			write:    true,
+			wantCode: exitRuntimeJSON,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			path := filepath.Join(t.TempDir(), filepath.Base(runtimeRelPath))
+			if tt.write {
+				if err := os.WriteFile(path, []byte(tt.body), 0o600); err != nil {
+					t.Fatalf("write runtime.json: %v", err)
+				}
+			}
+
+			detail, code := probeLivePeer(runtimepkg.NewManager(path, discardLogger()), discardLogger())
+
+			if code != tt.wantCode {
+				t.Fatalf("code = %d, want %d (detail %q)", code, tt.wantCode, detail)
+			}
+			if tt.wantCode == exitOK && detail != "" {
+				t.Errorf("a clear verdict carried a detail: %q", detail)
+			}
+			if tt.wantCode != exitOK && detail == "" {
+				t.Error("a refusal carried no detail; the user would get a bare exit code")
+			}
+		})
+	}
+}
+
+// Test_peerAfterCapture_PromisesTheConfigIsIntact pins the one thing the
+// post-capture refusal MUST say.
+//
+// By the time it fires the user has typed the new code twice and has every
+// reason to assume it took effect. If the message does not state that the file
+// was left alone, they will walk away believing the new code is live, start a
+// session, and find the shield answering only to the old one. The message also
+// must not name a length or a value: it is printed after a capture, which is
+// exactly the scrollback this feature exists to keep clean.
+func Test_peerAfterCapture_PromisesTheConfigIsIntact(t *testing.T) {
+	t.Parallel()
+
+	if !strings.Contains(peerAfterCapture, "NOT changed") {
+		t.Errorf("the post-capture refusal does not say the config survived: %q", peerAfterCapture)
+	}
+	if !strings.Contains(peerAfterCapture, "old unlock code still works") {
+		t.Errorf("the post-capture refusal does not say which code is live: %q", peerAfterCapture)
+	}
+	for _, digit := range "0123456789" {
+		if strings.ContainsRune(peerAfterCapture, digit) {
+			t.Errorf("the post-capture refusal carries a digit, which could only describe the secret: %q", peerAfterCapture)
+		}
+	}
+}
+
+// reapedPID returns the PID of a process that has already exited and been
+// waited for, so kill(pid, 0) answers ESRCH.
+//
+// A hardcoded number will not do: PID 1 is launchd and 99999 is inside the
+// macOS PID range, so both can be alive on somebody's machine and would turn
+// this into a flake that only fires on the maintainer's laptop.
+func reapedPID(t *testing.T) int {
+	t.Helper()
+
+	cmd := exec.Command("/usr/bin/true")
+	if err := cmd.Run(); err != nil {
+		t.Fatalf("spawn a throwaway process: %v", err)
+	}
+	return cmd.Process.Pid
+}
+
+// Test_runSetPasswordAt_ReservesBeforeInstallingATap is a gold test on the
+// SOURCE TEXT of setpassword.go, and it is textual for the same reason the
+// nosplit gold tests in internal/macos/eventtap are: the property is an
+// ORDERING inside a function that no test can execute. Everything past the tty
+// check needs a granted Accessibility permission and a real keyboard, so the
+// lock-then-capture sequence is unreachable under `go test` — but getting it
+// backwards is silent, and the failure it produces lands on a locked-out user.
+//
+// The invariant: the publish lock is taken BEFORE eventtap.CaptureConfirmed
+// installs the capture tap, and released no earlier than the save.
+//
+// Why it has to hold. The capture tap is head-inserted at kCGHIDEventTap and
+// returns NULL for every event, so a capture that starts beside a live session
+// sits in FRONT of that session's tap and swallows the unlock code its owner is
+// typing — the shield stays up and the machine looks dead until a capture
+// ceiling fires. The arrival probe cannot rule that out on its own:
+// WaitForGrants sits between the two and is unbounded by construction, so a
+// session is free to publish and install its tap inside that window. Only a
+// reservation held from ahead of the tap through the rename makes the session
+// refuse to start instead, and keeps two --set-password runs from capturing at
+// once and racing their saves.
+func Test_runSetPasswordAt_ReservesBeforeInstallingATap(t *testing.T) {
+	t.Parallel()
+
+	src, err := os.ReadFile("setpassword.go")
+	if err != nil {
+		t.Fatalf("read setpassword.go: %v", err)
+	}
+	text := string(src)
+
+	acquire := strings.Index(text, "acquirePublishLock(")
+	if acquire < 0 {
+		t.Fatal("setpassword.go no longer calls acquirePublishLock; the capture is unreserved")
+	}
+	if extra := strings.Index(text[acquire+1:], "acquirePublishLock("); extra >= 0 {
+		t.Error("setpassword.go takes the publish lock more than once; flock is per-open, " +
+			"so a second acquire on a lock this process already holds would refuse as busy")
+	}
+
+	capture := strings.Index(text, "eventtap.CaptureConfirmed(")
+	if capture < 0 {
+		t.Fatal("setpassword.go no longer calls eventtap.CaptureConfirmed; update this test")
+	}
+	if acquire > capture {
+		t.Error("the publish lock is taken AFTER the capture tap goes in: a session that starts " +
+			"during WaitForGrants would have its unlock code swallowed by that tap")
+	}
+
+	save := strings.Index(text, "SaveUnlockHash(")
+	if save < 0 {
+		t.Fatal("setpassword.go no longer calls SaveUnlockHash; update this test")
+	}
+	if release := strings.Index(text, "releaseLock()"); release < 0 || release > save {
+		t.Error("the publish lock is not released by a defer registered ahead of the save; " +
+			"the reservation has to outlive the rename it protects")
+	}
 }

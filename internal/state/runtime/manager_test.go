@@ -385,6 +385,60 @@ func TestManager_Path_ReturnsConstructorPath(t *testing.T) {
 // and it must run against a path that does not exist yet (the
 // release-before-write idempotency case) exactly as recovery does when the
 // crashed file has already been cleaned.
+// TestManager_Disown_LeavesTheFileAlone pins the property main.go's publish
+// section depends on: a session that refuses AFTER the Manager is on the
+// cleanup stack but BEFORE it has written anything must not delete the
+// runtime.json a live peer published in the meantime. The file here stands in
+// for the peer's — this Manager never wrote it.
+func TestManager_Disown_LeavesTheFileAlone(t *testing.T) {
+	t.Parallel()
+	td := newTestDeps(t)
+
+	// Somebody else's file at our path.
+	if err := os.WriteFile(td.path, []byte(`{"pid":4242}`), 0o600); err != nil {
+		t.Fatalf("seed peer runtime file: %v", err)
+	}
+
+	td.mgr.Disown()
+	if err := td.mgr.Release(); err != nil {
+		t.Fatalf("Release after Disown: %v", err)
+	}
+
+	b, err := os.ReadFile(td.path)
+	if err != nil {
+		t.Fatalf("peer runtime file was deleted by a disowned Manager: %v; "+
+			"a refusal inside the publish section would then leave the peer "+
+			"shielding the machine and invisible to every probe that reads "+
+			"this path, --set-password's included.", err)
+	}
+	if string(b) != `{"pid":4242}` {
+		t.Errorf("peer runtime file was rewritten: %q", b)
+	}
+}
+
+// TestManager_Disown_DoesNotSurviveAWrite pins the other half: Disown latches
+// the same flag Write re-arms, so a Manager that disowned a peer's file and
+// then legitimately wrote its OWN snapshot must delete that snapshot at
+// shutdown. Without the re-arm the latch would outlive the file it was set for
+// and leave a runtime.json holding a dead PID behind — the failure
+// TestManager_WriteAfterReleaseReArmsDeletion describes, reached by a second
+// route.
+func TestManager_Disown_DoesNotSurviveAWrite(t *testing.T) {
+	t.Parallel()
+	td := newTestDeps(t)
+
+	td.mgr.Disown()
+	if err := td.mgr.Write(canonicalSnapshot()); err != nil {
+		t.Fatalf("Write after Disown: %v", err)
+	}
+	if err := td.mgr.Release(); err != nil {
+		t.Fatalf("Release after Write: %v", err)
+	}
+	if _, err := os.Stat(td.path); !errors.Is(err, fs.ErrNotExist) {
+		t.Errorf("runtime file survived Release: stat err = %v; want fs.ErrNotExist", err)
+	}
+}
+
 func TestManager_WriteAfterReleaseReArmsDeletion(t *testing.T) {
 	t.Parallel()
 	td := newTestDeps(t)

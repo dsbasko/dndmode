@@ -562,17 +562,45 @@ func (l *Loader) Path() string { return l.path }
 // default with created=true. On YAML syntax error, returns a wrapped error
 // whose message contains the goccy-formatted line:col location — and NOT the
 // offending source line (see the FormatError call for why).
+//
+// It is LoadWithSource with the bytes dropped; a caller that has to prove later
+// that config.yml is still the file it parsed must use that one instead.
 func (l *Loader) Load() (Config, bool, error) {
+	cfg, _, created, err := l.LoadWithSource()
+	return cfg, created, err
+}
+
+// LoadWithSource is Load plus the EXACT bytes the returned Config was parsed
+// from — on the first run, the bytes just written rather than a read-back of
+// them.
+//
+// The two must come from one read, and that is the whole reason this method
+// exists. A session fingerprints config.yml at startup and compares the
+// fingerprint again under the publish lock before it publishes runtime.json, so
+// that a --set-password committing mid-startup is caught instead of silently
+// overridden (cmd/dndmode/publishlock.go). Taking that fingerprint from a
+// SECOND read of the same path would defeat it: SaveUnlockHash publishes by
+// atomic rename, so a rename landing between the two reads leaves the session
+// holding a verifier parsed from the OLD file and a fingerprint taken from the
+// NEW one. The later comparison then succeeds — nothing has changed since the
+// fingerprint — and the shield goes up answering to a secret config.yml no
+// longer names, which is the exact outcome the fingerprint was added to
+// prevent, reached through the fingerprint itself.
+//
+// The bytes are returned rather than a digest so the hash function stays in one
+// place, next to the re-check that has to agree with it.
+func (l *Loader) LoadWithSource() (Config, []byte, bool, error) {
 	raw, err := os.ReadFile(l.path)
 	switch {
 	case errors.Is(err, fs.ErrNotExist):
 		def := Config{UnlockCode: DefaultUnlockCode}
-		if werr := writeDefault(l.path, def); werr != nil {
-			return Config{}, false, fmt.Errorf("write default config: %w", werr)
+		body, werr := writeDefault(l.path, def)
+		if werr != nil {
+			return Config{}, nil, false, fmt.Errorf("write default config: %w", werr)
 		}
-		return def, true, nil
+		return def, body, true, nil
 	case err != nil:
-		return Config{}, false, fmt.Errorf("read config %s: %w", l.path, err)
+		return Config{}, nil, false, fmt.Errorf("read config %s: %w", l.path, err)
 	}
 
 	var cfg Config
@@ -592,9 +620,9 @@ func (l *Loader) Load() (Config, bool, error) {
 		// what actually locates the typo; the user has the file open anyway.
 		// color=false in v1 (P1.6 — TTY detection deferred to Phase 6).
 		pretty := yaml.FormatError(perr, false /*colored*/, false /*inclSource*/)
-		return Config{}, false, fmt.Errorf("parse config %s:\n%s", l.path, pretty)
+		return Config{}, nil, false, fmt.Errorf("parse config %s:\n%s", l.path, pretty)
 	}
-	return cfg, false, nil
+	return cfg, raw, false, nil
 }
 
 // defaultConfigTemplate is the fully-commented config.yml written on first
@@ -797,10 +825,15 @@ unlock_code: %s
 
 // writeDefault creates the parent directory (0o700) and writes the default
 // config via the atomic tmp+rename in writeAtomic.
-func writeDefault(path string, cfg Config) error {
+//
+// It returns the bytes it published so LoadWithSource can hand the caller the
+// first-run file WITHOUT reading it back: a read-back would be a second look at
+// a path a concurrent --set-password may already have replaced, which is the
+// very split LoadWithSource exists to close.
+func writeDefault(path string, cfg Config) ([]byte, error) {
 	dir := filepath.Dir(path)
 	if err := os.MkdirAll(dir, configDirPerm); err != nil {
-		return fmt.Errorf("mkdir parent %s: %w", dir, err)
+		return nil, fmt.Errorf("mkdir parent %s: %w", dir, err)
 	}
 	// We hand-format the YAML from a documented template rather than calling
 	// yaml.Marshal: Marshal would drop the comments (the whole point of the
@@ -811,7 +844,11 @@ func writeDefault(path string, cfg Config) error {
 	// deprecated `hotkey`, which MUST stay commented or ResolveUnlockCode would
 	// reject the generated file as an ambiguous secret. yaml.Strict() in Load
 	// re-parses our output round-trip, so any drift would surface there.
-	return writeAtomic(path, fmt.Appendf(nil, defaultConfigTemplate, cfg.UnlockCode))
+	body := fmt.Appendf(nil, defaultConfigTemplate, cfg.UnlockCode)
+	if err := writeAtomic(path, body); err != nil {
+		return nil, err
+	}
+	return body, nil
 }
 
 // writeAtomic publishes body at path via tmp+rename (protects against
