@@ -5,6 +5,7 @@ package cocoa
 import (
 	"fmt"
 	"testing"
+	"unicode/utf8"
 )
 
 // TestTerminalView_Tokenize_Classification exercises the pure ASCII tokenizer
@@ -213,4 +214,155 @@ func formatSegments(segs []termSegment) string {
 		out += fmt.Sprintf("{%s %d:%d}", names[s.cls], s.start, s.start+s.length)
 	}
 	return out + "]"
+}
+
+// TestTerminalView_Tokenize_Yopta_Keywords exercises the `yc` (YoptaScript)
+// corpus's own keyword table through the same tokenizer. Two things are pinned
+// that no ASCII case can reach: a Cyrillic word arrives at term_is_keyword as ONE
+// ident run (term_is_ident_start swallows every byte >= 0x80), and it is matched
+// byte-exactly, so a keyword that differs only by `ё` vs `е` does NOT light up —
+// which is why the corpus and kYcKeywords have to agree on the spelling.
+func TestTerminalView_Tokenize_Yopta_Keywords(t *testing.T) {
+	tests := []struct {
+		name string
+		line string
+		want []termTokClass
+	}{
+		{
+			name: "declaration keyword then ident",
+			line: "гыы длина",
+			want: []termTokClass{termClassKeyword, termClassPunct, termClassIdent},
+		},
+		{
+			name: "brace and terminator words are keywords",
+			line: "жЫ есть нах",
+			want: []termTokClass{
+				termClassKeyword, termClassPunct, // жЫ
+				termClassKeyword, termClassPunct, // есть
+				termClassKeyword, // нах
+			},
+		},
+		{
+			name: "wrong yo-spelling stays an ident",
+			line: "клёво",
+			want: []termTokClass{termClassIdent},
+		},
+		{
+			name: "keyword lookalike stays ident",
+			line: "естьчоТам",
+			want: []termTokClass{termClassIdent},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := tokenizeLineColsForTest(tt.line, "yc")
+			if len(got) != len(tt.want) {
+				t.Fatalf("tokenize(%q) produced %d segments, want %d: %v",
+					tt.line, len(got), len(tt.want), got)
+			}
+			for i := range got {
+				if got[i].cls != tt.want[i] {
+					t.Errorf("segment %d of %q = class %d, want %d",
+						i, tt.line, got[i].cls, tt.want[i])
+				}
+			}
+		})
+	}
+}
+
+// TestTerminalView_Tokenize_ColumnsTrackGlyphs is the UTF-8 pin that the ASCII
+// cases structurally cannot be: it asserts that col/cols count GLYPHS while
+// start/length count BYTES, and that the two tile the line independently.
+//
+// This is the invariant drawRect: rests on. It places each segment at
+// x = col*cellW and clips the typing head at a column count; if col were ever
+// filled from the byte offset, every Cyrillic line would render at double its
+// x-position and the typing clip would cut mid-codepoint (nil NSString, blanked
+// segment). The bug is invisible in every ASCII test, because there col == start
+// by construction.
+func TestTerminalView_Tokenize_ColumnsTrackGlyphs(t *testing.T) {
+	lines := []string{
+		"гыы длина сука 0 нах",
+		"    отвечаю помойка.писькомер нах",
+		`ясенХуй базар сука "чотко" нах`,
+		"// Пузырек: гоняем помойку по росту.",
+		"вилкойвглаз (a хуевей 10) жЫ харэ нах есть",
+	}
+
+	for _, line := range lines {
+		t.Run(line, func(t *testing.T) {
+			segs := tokenizeLineColsForTest(line, "yc")
+			if len(segs) == 0 {
+				t.Fatalf("tokenize(%q) produced no segments", line)
+			}
+			wantCols := len([]rune(line))
+			if wantCols == len(line) {
+				t.Fatalf("line %q is pure ASCII — it cannot pin the byte/glyph split", line)
+			}
+
+			bytePos, colPos := 0, 0
+			for i, s := range segs {
+				if s.start != bytePos {
+					t.Fatalf("segment %d starts at byte %d, want contiguous at %d", i, s.start, bytePos)
+				}
+				if s.col != colPos {
+					t.Fatalf("segment %d starts at column %d, want contiguous at %d", i, s.col, colPos)
+				}
+				if s.cols != len([]rune(line[s.start:s.start+s.length])) {
+					t.Fatalf("segment %d spans %d columns, want %d glyphs",
+						i, s.cols, len([]rune(line[s.start:s.start+s.length])))
+				}
+				bytePos += s.length
+				colPos += s.cols
+			}
+			if bytePos != len(line) {
+				t.Errorf("segments cover %d bytes, want the full %d", bytePos, len(line))
+			}
+			if colPos != wantCols {
+				t.Errorf("segments cover %d columns, want the full %d", colPos, wantCols)
+			}
+			if colPos == bytePos {
+				t.Errorf("columns (%d) equal bytes (%d) on a Cyrillic line — the two cursors are not being tracked separately",
+					colPos, bytePos)
+			}
+		})
+	}
+}
+
+// TestTerminalView_RevealBytes_NeverSplitsAGlyph walks the typing head across a
+// Cyrillic line one column at a time and asserts the revealed byte prefix is
+// always a whole number of glyphs.
+//
+// This is the failure the byte/column split exists to prevent: drawSegment: hands
+// the prefix to +[NSString initWithBytes:...NSUTF8StringEncoding], which returns
+// nil for a truncated codepoint, and a nil string silently draws nothing — so a
+// half-glyph cut does not look like a half glyph, it looks like the line blinking
+// out for one frame at every second character.
+func TestTerminalView_RevealBytes_NeverSplitsAGlyph(t *testing.T) {
+	lines := []string{
+		"гыы длина сука 0 нах",
+		"    отвечаю помойка.писькомер нах",
+		"вилкойвглаз (a хуевей 10) жЫ харэ нах есть",
+	}
+
+	for _, line := range lines {
+		t.Run(line, func(t *testing.T) {
+			runes := []rune(line)
+			for cols := 0; cols <= len(runes); cols++ {
+				got := revealBytesForTest(line, cols)
+				want := len(string(runes[:cols]))
+				if got != want {
+					t.Fatalf("reveal(%d cols) = %d bytes, want %d", cols, got, want)
+				}
+				if !utf8.ValidString(line[:got]) {
+					t.Fatalf("reveal(%d cols) cut mid-codepoint: %q", cols, line[:got])
+				}
+			}
+			// Asking for more columns than the line has must clamp, not overrun.
+			if got := revealBytesForTest(line, len(runes)+10); got != len(line) {
+				t.Errorf("reveal past end = %d bytes, want the full %d", got, len(line))
+			}
+		})
+	}
 }

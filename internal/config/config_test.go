@@ -362,20 +362,23 @@ func TestLoader_Load_PrettyErrorOnSyntaxError(t *testing.T) {
 	}
 }
 
-// TestValidateTerminalLanguage pins the --style terminal:<lang> gate: the four
+// TestValidateTerminalLanguage pins the --style terminal:<lang> gate: the five
 // supported languages and "" (default) are accepted; anything else (including
-// case variants and aliases) is rejected.
+// case variants and aliases) is rejected. "yopta" is in the reject list on
+// purpose: the language's own name is the obvious guess, and the flag takes the
+// short "yc" — a silent accept of both would let the two spellings drift.
 func TestValidateTerminalLanguage(t *testing.T) {
 	t.Parallel()
 	for _, s := range []string{
 		"", config.TerminalLangGo, config.TerminalLangPython,
 		config.TerminalLangTypeScript, config.TerminalLangRust,
+		config.TerminalLangYopta,
 	} {
 		if err := config.ValidateTerminalLanguage(s); err != nil {
 			t.Errorf("ValidateTerminalLanguage(%q) = %v, want nil", s, err)
 		}
 	}
-	for _, s := range []string{"ruby", "golang", "py", "ts", "Go", "PYTHON", "c++"} {
+	for _, s := range []string{"ruby", "golang", "py", "ts", "Go", "PYTHON", "c++", "yopta", "YC"} {
 		if err := config.ValidateTerminalLanguage(s); err == nil {
 			t.Errorf("ValidateTerminalLanguage(%q) = nil, want error", s)
 		}
@@ -391,6 +394,7 @@ func TestNormalizeTerminalLanguage(t *testing.T) {
 	}
 	for _, s := range []string{
 		config.TerminalLangPython, config.TerminalLangRust, config.TerminalLangTypeScript,
+		config.TerminalLangYopta,
 	} {
 		if got := config.NormalizeTerminalLanguage(s); got != s {
 			t.Errorf("NormalizeTerminalLanguage(%q) = %q, want unchanged", s, got)

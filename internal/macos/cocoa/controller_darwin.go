@@ -51,7 +51,7 @@ func (cgoScreenEnumerator) Signature() uint64   { return screensGeometrySignatur
 type cgoWindowFactory struct {
 	style     string
 	glassBlur float64 // CIGaussianBlur radius (points) for glass; ignored otherwise
-	language  string  // source language for terminal (go|python|typescript|rust); ignored otherwise
+	language  string  // source language for terminal (go|python|typescript|rust|yc); ignored otherwise
 }
 
 func (f cgoWindowFactory) Create(displayID uint32) (unsafe.Pointer, error) {
@@ -175,7 +175,7 @@ type Controller struct {
 // CIGaussianBlur radius (points) for the glass style (resolved by main.go from
 // config glass_blur / the --style glass:N flag); it is ignored for every other
 // style. language is the source language for the terminal style (go|python|
-// typescript|rust, resolved by main.go from the --style terminal:<lang> suffix);
+// typescript|rust|yc, resolved by main.go from the --style terminal:<lang> suffix);
 // ignored for every other style. All are threaded into the cgoWindowFactory so
 // every per-display window is created with them, WITHOUT widening the
 // windowFactory interface.

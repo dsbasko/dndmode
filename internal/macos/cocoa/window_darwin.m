@@ -143,7 +143,7 @@ static NSImage *captureBlurredDesktopImage(uint32_t displayID, NSScreen *target,
 // `style` selects the overlay content: "matrix" (QUICK-gh8) installs an animated
 // MatrixView over an opaque black base; "terminal" installs an animated
 // TerminalView (scrolling syntax-highlighted source) over the same opaque black
-// base — the `language` arg (go/python/typescript/rust; NULL => go) selects the
+// base — the `language` arg (go/python/typescript/rust/yc; NULL => go) selects the
 // corpus + highlighting; "dvd" installs a DVDView (a "DVD VIDEO" logo bouncing
 // edge-to-edge, recoloring on each bounce) over the same opaque black base;
 // "glass" (QUICK-glass) shows a STATIC,

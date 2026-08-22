@@ -345,7 +345,7 @@ func run() int {
 	// for a single run without editing ~/.config/dndmode/config.yml. Empty (the
 	// default) means "use whatever the config says". Validated at Step 5b.1 with
 	// the same ValidateOverlayStyle gate as the config value.
-	styleFlag := flag.String("style", "", "override overlay_style for this run (black|matrix|terminal[:go|python|typescript|rust]|dvd|glass[:radius]|none); empty = use config")
+	styleFlag := flag.String("style", "", "override overlay_style for this run (black|matrix|terminal[:go|python|typescript|rust|yc]|dvd|glass[:radius]|none); empty = use config")
 	// --mute / --focus override the config keys for a single run (same
 	// precedence as --style: non-empty WINS over YAML, empty = use config).
 	// Tri-state strings ("" | "true" | "false") rather than flag.Bool because a

@@ -135,6 +135,37 @@ static const char *const kRsKeywords[] = {
     "str", "String", "Vec", "Option", "Result", "Box", "dyn", "async",
     "await", "unsafe", "crate", "super",
 };
+// YoptaScript (terminal:yc) — the one NON-ASCII language: its keywords are
+// Cyrillic UTF-8 literals. Nothing in the tokenizer needs to know that: keyword
+// comparison is a byte-exact strncmp against the ident run, and an ident run
+// swallows every byte >= 0x80 (see term_is_ident_start), so a Cyrillic word is
+// one run and matches its literal byte for byte. Spelling matters though — the
+// dialect writes both `клёво` and `клево`, and only the exact bytes listed here
+// light up, so the corpus and this table must agree on the `ё`/`е` variant.
+// Syntax words come first, then the punctuation-equivalents (`жЫ` = {,
+// `есть` = }, `сука` = =, `нах` = ;), then the type names.
+//
+// The language's import/export words (`спиздить`, `предъява`, `братва`) are
+// deliberately ABSENT: the corpus may not contain a line that reads like a file
+// boundary (see the anonymity note in terminalcorpus_darwin.h), so they would be
+// dead entries pointing at text that is not allowed to exist.
+static const char *const kYcKeywords[] = {
+    "йопта", "куку", "гыы", "участковый", "ясенХуй", "вилкойвглаз",
+    "иливжопураз", "го", "потрещим", "крч", "отвечаю", "харэ", "двигай",
+    "естьчо", "лещ", "пахану", "хапнуть", "гоп", "тюряжка", "пнх",
+    "гыйбать", "тырыпыры", "клево", "батя", "ебнуть",
+    "ассо", "сидетьНахуй", "чезажижан", "шкура",
+    "чоунастут", "сашаГрей", "яга", "попонятия", "мой", "ебанное",
+    "подкрыша", "логопед", "хзйопт",
+    "трулио", "чотко", "нетрулио", "нечотко", "нуллио", "порожняк",
+    "неибу", "нихуя",
+    "жЫ", "есть", "сука", "внатуре", "нах", "нахуй",
+    "эквалио", "ровно", "типа", "конкретно", "блябуду",
+    "поцик", "поц", "пизже", "хуевей", "ичо", "иличо", "чобля",
+    "плюсуюНа", "слилсяНа",
+    "пацан", "хуйня", "плавник", "колонна", "двойные", "эээ", "семка",
+    "Помойка", "Кент", "Гопец", "СловоПацана",
+};
 
 // TermSyntax parameterizes the tokenizer per language: which keyword set to
 // promote idents against, whether '#' (Python) or '//' (Go/TS/Rust) starts a line
@@ -149,18 +180,71 @@ typedef struct {
 
 #define TERM_KWCOUNT(a) ((NSInteger)(sizeof(a) / sizeof((a)[0])))
 
-// One tokenized run of a source line: [start, start+length) painted in the color
-// of `cls`. Segments are produced once, when a line enters the visible buffer.
+// One tokenized run of a source line: bytes [start, start+length) of the line,
+// occupying display columns [col, col+cols) of the monospaced grid, painted in
+// the color of `cls`. Segments are produced once, when a line enters the visible
+// buffer.
+//
+// BYTES AND COLUMNS ARE NOT THE SAME NUMBER. They coincide for the four ASCII
+// languages, but `terminal:yc` (YoptaScript) is Cyrillic UTF-8, where one glyph
+// is two bytes. `start`/`length` address the C string (NSString construction,
+// strncmp); `col`/`cols` address the fixed monospaced grid (glyph x-position,
+// typing progress). Mixing them up would place every Cyrillic line at double its
+// x-offset AND clip the typing head mid-codepoint, which yields nil NSStrings and
+// blanked-out segments — so pick the pair by what the number is FOR, never by
+// which one happens to be at hand.
 typedef struct {
-    NSInteger start;  // byte offset into the line text (ASCII => char offset)
-    NSInteger length; // run length in bytes/chars
+    NSInteger start;  // byte offset into the line text
+    NSInteger length; // run length in bytes
+    NSInteger col;    // display column of the run's first glyph (0-based)
+    NSInteger cols;   // run width in glyphs (== length for ASCII)
     TermClass cls;    // color class -> kTermPalette
 } TermSeg;
 
-// --- Lightweight ASCII tokenizer: source line -> colored segments -----------
+// --- Lightweight UTF-8 tokenizer: source line -> colored segments -----------
 
+// term_is_utf8_cont reports whether b is a UTF-8 continuation byte (10xxxxxx) —
+// i.e. the middle of a glyph rather than the start of a new one. Counting the
+// bytes that are NOT continuations counts glyphs, which is the whole of the
+// byte -> column conversion below (the corpus has no combining marks, and
+// nothing outside the BMP, so one codepoint is one monospaced cell).
+static BOOL term_is_utf8_cont(unsigned char b) { return (b & 0xC0) == 0x80; }
+
+// term_cols_between counts display columns (glyphs) in text[from, to).
+static NSInteger term_cols_between(const char *text, NSInteger from, NSInteger to) {
+    NSInteger n = 0;
+    for (NSInteger k = from; k < to; k++) {
+        if (!term_is_utf8_cont((unsigned char)text[k])) { n++; }
+    }
+    return n;
+}
+
+// term_bytes_for_cols returns the byte length of the first `cols` glyphs of
+// text[start, start+maxLen) — the inverse of term_cols_between, used to clip the
+// typing line on a GLYPH boundary. Splitting a multi-byte glyph would hand
+// +[NSString initWithBytes:...NSUTF8StringEncoding] an invalid sequence, which
+// returns nil, which drops the whole segment for that frame: the line would
+// flicker instead of typing.
+static NSInteger term_bytes_for_cols(const char *text, NSInteger start,
+                                     NSInteger maxLen, NSInteger cols) {
+    NSInteger k = 0, seen = 0;
+    while (k < maxLen) {
+        if (!term_is_utf8_cont((unsigned char)text[start + k])) {
+            if (seen >= cols) { break; }
+            seen++;
+        }
+        k++;
+    }
+    return k;
+}
+
+// Any byte >= 0x80 counts as an identifier byte, so a Cyrillic word (terminal:yc)
+// tokenizes as ONE ident run and reaches term_is_keyword whole. Harmless for the
+// four ASCII corpora, which contain no such byte.
 static BOOL term_is_ident_start(char c) {
-    return (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || c == '_';
+    unsigned char b = (unsigned char)c;
+    if (b >= 0x80) { return YES; }
+    return (b >= 'A' && b <= 'Z') || (b >= 'a' && b <= 'z') || b == '_';
 }
 static BOOL term_is_digit(char c) { return c >= '0' && c <= '9'; }
 static BOOL term_is_ident_char(char c) {
@@ -183,17 +267,22 @@ static BOOL term_is_keyword(const char *text, NSInteger start, NSInteger len,
     return NO;
 }
 
-// term_tokenize splits an ASCII source line into colored segments. Called ONCE
-// per line as it enters the visible buffer (never per frame). Returns a malloc'd
-// TermSeg array (caller owns; free when the line scrolls off) and writes the
-// segment count to *outCount. len<=0 -> (NULL, 0). It allocates `len` segments up
-// front: every branch consumes >=1 char and emits <=1 segment, so count <= len.
+// term_tokenize splits a source line into colored segments. Called ONCE per line
+// as it enters the visible buffer (never per frame). Returns a malloc'd TermSeg
+// array (caller owns; free when the line scrolls off) and writes the segment
+// count to *outCount. len<=0 -> (NULL, 0). It allocates `len` segments up front:
+// every branch consumes >=1 byte and emits <=1 segment, so count <= len.
 //
-// Rules (over ASCII, per syn): a line comment ('#' or '//') -> the rest of the
-// line is comment; a `"` (and, if syn->singleQuoteString, a `'`) -> up to the
-// matching quote is string (backslash escapes skipped); a leading digit -> number;
-// an ident run is promoted to keyword if in syn->keywords, else ident; any other
-// run (operators, brackets, whitespace) -> punct.
+// Rules (per syn): a line comment ('#' or '//') -> the rest of the line is
+// comment; a `"` (and, if syn->singleQuoteString, a `'`) -> up to the matching
+// quote is string (backslash escapes skipped); a leading digit -> number; an
+// ident run is promoted to keyword if in syn->keywords, else ident; any other run
+// (operators, brackets, whitespace) -> punct.
+//
+// Every emit runs through TERM_EMIT, which is what keeps the column cursor and
+// the byte cursor from drifting apart: the two are advanced in the same place, by
+// the same run, so a segment's col is always the glyph count of everything before
+// it. Emitting a segment by hand would silently desynchronize the grid.
 static BOOL term_is_line_comment(const char *text, NSInteger i, NSInteger len,
                                  const TermSyntax *syn) {
     if (syn->hashComment) { return text[i] == '#'; }
@@ -209,11 +298,22 @@ static TermSeg *term_tokenize(const char *text, NSInteger len, NSInteger *outCou
     TermSeg *segs = (TermSeg *)calloc((size_t)len, sizeof(TermSeg));
     NSInteger count = 0;
     NSInteger i = 0;
+    NSInteger col = 0; // display column of text[i] — advanced only by TERM_EMIT
+
+// Emit text[i, end) as one segment of class `k`, then advance BOTH cursors.
+#define TERM_EMIT(end, k)                                                     \
+    do {                                                                      \
+        NSInteger term_w_ = term_cols_between(text, i, (end));                \
+        segs[count++] = (TermSeg){ i, (end) - i, col, term_w_, (k) };         \
+        col += term_w_;                                                       \
+        i = (end);                                                            \
+    } while (0)
+
     while (i < len) {
         char c = text[i];
 
         if (term_is_line_comment(text, i, len, syn)) {
-            segs[count++] = (TermSeg){ i, len - i, TermClassComment };
+            TERM_EMIT(len, TermClassComment);
             break; // comment runs to the end of the line
         }
         if (c == '"' || (syn->singleQuoteString && c == '\'')) {
@@ -224,15 +324,13 @@ static TermSeg *term_tokenize(const char *text, NSInteger len, NSInteger *outCou
                 j++;
             }
             if (j < len) { j++; } // include the closing quote
-            segs[count++] = (TermSeg){ i, j - i, TermClassString };
-            i = j;
+            TERM_EMIT(j, TermClassString);
             continue;
         }
         if (term_is_digit(c)) {
             NSInteger j = i + 1;
             while (j < len && (term_is_ident_char(text[j]) || text[j] == '.')) { j++; }
-            segs[count++] = (TermSeg){ i, j - i, TermClassNumber };
-            i = j;
+            TERM_EMIT(j, TermClassNumber);
             continue;
         }
         if (term_is_ident_start(c)) {
@@ -240,8 +338,7 @@ static TermSeg *term_tokenize(const char *text, NSInteger len, NSInteger *outCou
             while (j < len && term_is_ident_char(text[j])) { j++; }
             TermClass cls = term_is_keyword(text, i, j - i, syn) ? TermClassKeyword
                                                                  : TermClassIdent;
-            segs[count++] = (TermSeg){ i, j - i, cls };
-            i = j;
+            TERM_EMIT(j, cls);
             continue;
         }
         // Operators / brackets / whitespace: coalesce until the next token start.
@@ -253,9 +350,11 @@ static TermSeg *term_tokenize(const char *text, NSInteger len, NSInteger *outCou
             if (term_is_line_comment(text, j, len, syn)) { break; }
             j++;
         }
-        segs[count++] = (TermSeg){ i, j - i, TermClassPunct };
-        i = j;
+        TERM_EMIT(j, TermClassPunct);
     }
+
+#undef TERM_EMIT
+
     if (outCount) { *outCount = count; }
     return segs;
 }
@@ -269,6 +368,7 @@ typedef enum {
     TermLangPython,
     TermLangTypeScript,
     TermLangRust,
+    TermLangYopta,
 } TermLang;
 
 // TermLangSpec bundles everything language-specific: the corpus block table (from
@@ -287,13 +387,16 @@ static TermLang term_lang_from_string(const char *s) {
     if (strcmp(s, "python") == 0)     { return TermLangPython; }
     if (strcmp(s, "typescript") == 0) { return TermLangTypeScript; }
     if (strcmp(s, "rust") == 0)       { return TermLangRust; }
+    if (strcmp(s, "yc") == 0)         { return TermLangYopta; }
     return TermLangGo;
 }
 
 // term_lang_spec returns the corpus table + tokenizer syntax for a language.
 // Python: '#' comments, single- and double-quoted strings. TS: '//' comments,
 // both quote styles. Go/Rust: '//' comments, only double-quoted strings ('
-// is a rune/char/lifetime sigil, left as punctuation).
+// is a rune/char/lifetime sigil, left as punctuation). Yopta transpiles to JS and
+// keeps its operators and literals verbatim, so it takes the TypeScript syntax —
+// only the keyword table and the corpus are Cyrillic.
 static TermLangSpec term_lang_spec(TermLang lang) {
     switch (lang) {
         case TermLangPython:
@@ -305,6 +408,9 @@ static TermLangSpec term_lang_spec(TermLang lang) {
         case TermLangRust:
             return (TermLangSpec){ kRsBlocks, kRsBlocksCount,
                 { kRsKeywords, TERM_KWCOUNT(kRsKeywords), NO, NO } };
+        case TermLangYopta:
+            return (TermLangSpec){ kYcBlocks, kYcBlocksCount,
+                { kYcKeywords, TERM_KWCOUNT(kYcKeywords), NO, YES } };
         case TermLangGo:
         default:
             return (TermLangSpec){ kGoBlocks, kGoBlocksCount,
@@ -317,7 +423,8 @@ static TermLangSpec term_lang_spec(TermLang lang) {
 // the line scrolls off the top or the buffer is rebuilt / deallocated).
 typedef struct {
     const char *text;     // -> a static block line; storage never freed
-    NSInteger   length;   // strlen(text), cached on load
+    NSInteger   length;   // strlen(text) in BYTES, cached on load
+    NSInteger   cols;     // width in GLYPHS — what the typing head counts down
     TermSeg    *segs;     // malloc'd tokenized segments (owned) — NULL for blank lines
     NSInteger   segCount; // number of segments in segs
 } TermLine;
@@ -385,7 +492,9 @@ typedef enum {
 // Build the per-TermClass drawing attributes (font + palette color) once, so
 // drawRect: paints pre-colored segments without allocating NSColor/NSDictionary
 // per frame. Indexed by (NSUInteger)TermClass. Also caches the caret attributes
-// and the block-cursor glyph (built from a unichar so the .m source stays ASCII).
+// and the block-cursor glyph (built from a unichar rather than pasted in, so the
+// codepoint is stated outright instead of riding on the file's encoding — the
+// only non-ASCII in this file is kYcKeywords, where the bytes ARE the data).
 - (void)buildAttributes {
     NSMutableArray<NSDictionary *> *a =
         [NSMutableArray arrayWithCapacity:(NSUInteger)kTermClassCount];
@@ -489,6 +598,7 @@ typedef enum {
 - (void)loadLine:(TermLine *)line text:(const char *)text {
     line->text     = text;
     line->length   = (NSInteger)strlen(text);
+    line->cols     = term_cols_between(text, 0, line->length);
     line->segs     = term_tokenize(text, line->length, &line->segCount, &_spec.syntax);
 }
 
@@ -574,7 +684,10 @@ typedef enum {
     if (_lineCount > 0) {
         switch (_phase) {
             case TermPhaseTyping: {
-                NSInteger bottomLen = _lines[_lineCount - 1].length;
+                // GLYPHS, not bytes: on a Cyrillic (yc) line the byte length is
+                // ~2x the width, so typing to it would stall the caret for a
+                // second line's worth of frames past the end of the text.
+                NSInteger bottomLen = _lines[_lineCount - 1].cols;
                 _visibleChars += kTermTypeCharsPerFrame;
                 if (_visibleChars >= (CGFloat)bottomLen) {
                     _visibleChars = (CGFloat)bottomLen; // clamp — never over-type
@@ -601,21 +714,26 @@ typedef enum {
 // --- Drawing: opaque-black base + pre-colored segments + blinking caret ---
 
 // Draw one tokenized segment of a visible line at row `row`. For the bottom
-// (typing) line the caller passes maxChars = revealed char count so the segment
+// (typing) line the caller passes maxChars = revealed GLYPH count so the segment
 // is clipped to what has been "typed"; pass maxChars < 0 to draw it in full.
-// x = _xOffset + start*cellW relies on the monospaced advance == _cellW, so
+// x = _xOffset + col*cellW relies on the monospaced advance == _cellW, so
 // consecutive segments align into a fixed grid within the centered code column;
 // overlong lines run past the column's right edge and are clipped there by the
 // drawRect: clip region (no soft-wrap in v1).
+//
+// The reveal window is measured in COLUMNS and only then converted back to bytes
+// (term_bytes_for_cols) — clipping a Cyrillic line at a byte count would both
+// misplace the cut and hand NSString a half glyph.
 - (void)drawSegment:(TermSeg)seg
                text:(const char *)text
                 row:(NSInteger)row
            maxChars:(NSInteger)maxChars {
     NSInteger drawLen = seg.length;
     if (maxChars >= 0) {
-        if (seg.start >= maxChars) { return; }            // not yet revealed
-        if (seg.start + drawLen > maxChars) {
-            drawLen = maxChars - seg.start;               // partially revealed
+        if (seg.col >= maxChars) { return; }               // not yet revealed
+        if (seg.col + seg.cols > maxChars) {               // partially revealed
+            drawLen = term_bytes_for_cols(text, seg.start, seg.length,
+                                          maxChars - seg.col);
         }
     }
     if (drawLen <= 0) { return; }
@@ -625,7 +743,7 @@ typedef enum {
                                          encoding:NSUTF8StringEncoding];
     if (s == nil) { return; }
 
-    CGFloat x = _xOffset + (CGFloat)seg.start * _cellW;
+    CGFloat x = _xOffset + (CGFloat)seg.col * _cellW;
     CGFloat y = (CGFloat)row * _cellH;
     [s drawAtPoint:NSMakePoint(x, y)
         withAttributes:_attrs[(NSUInteger)seg.cls]];
@@ -718,22 +836,26 @@ typedef enum {
 // --- Test-only shim: expose the pure tokenizer to Go unit tests -------------
 //
 // term_tokenize is the ONE piece of pure, testable logic in this view (a source
-// string -> {start,len,class} segments, where off-by-one boundary bugs live).
-// cgo cannot call a static C function or an ObjC method directly from a _test.go
-// file (Go toolchain limitation), so this extern shim wraps it: it tokenizes
-// `line`, writes up to `maxSegs` segments into the caller-provided
-// outStart/outLen/outClass arrays, and returns the segment count (or -1 if
-// maxSegs was too small to hold them). Mirrors the cocoa_first_attached_display_id
-// test-shim pattern in window_darwin.m. Its Go wrapper is in terminalview_darwin.go.
-int terminal_tokenize_for_test(const char *line, int maxSegs,
-                               int *outStart, int *outLen, int *outClass) {
+// string -> {start,len,col,cols,class} segments, where off-by-one boundary bugs
+// live). cgo cannot call a static C function or an ObjC method directly from a
+// _test.go file (Go toolchain limitation), so this extern shim wraps it: it
+// tokenizes `line` with `lang`'s syntax (NULL/unknown => Go, same as the view),
+// writes up to `maxSegs` segments into the caller-provided out arrays (any of
+// which may be NULL), and returns the segment count (or -1 if maxSegs was too
+// small to hold them). Mirrors the cocoa_first_attached_display_id test-shim
+// pattern in window_darwin.m. Its Go wrappers are in terminalview_darwin.go.
+//
+// It exposes byte offsets AND columns because the two diverge exactly where the
+// UTF-8 bugs are — a Cyrillic (yc) line where col != start is the case the Go
+// test pins.
+int terminal_tokenize_for_test(const char *line, const char *lang, int maxSegs,
+                               int *outStart, int *outLen,
+                               int *outCol, int *outCols, int *outClass) {
     if (line == NULL) { return 0; }
     NSInteger len   = (NSInteger)strlen(line);
     NSInteger count = 0;
-    // The unit test pins Go tokenizer behavior (// comments, "..." strings, Go
-    // keywords), so the shim always uses the Go syntax.
-    TermSyntax goSyn = term_lang_spec(TermLangGo).syntax;
-    TermSeg  *segs  = term_tokenize(line, len, &count, &goSyn);
+    TermSyntax syn  = term_lang_spec(term_lang_from_string(lang)).syntax;
+    TermSeg  *segs  = term_tokenize(line, len, &count, &syn);
     if (count > (NSInteger)maxSegs) {
         free(segs);
         return -1;
@@ -741,8 +863,21 @@ int terminal_tokenize_for_test(const char *line, int maxSegs,
     for (NSInteger i = 0; i < count; i++) {
         if (outStart) { outStart[i] = (int)segs[i].start; }
         if (outLen)   { outLen[i]   = (int)segs[i].length; }
+        if (outCol)   { outCol[i]   = (int)segs[i].col; }
+        if (outCols)  { outCols[i]  = (int)segs[i].cols; }
         if (outClass) { outClass[i] = (int)segs[i].cls; }
     }
     free(segs);
     return (int)count;
+}
+
+// Test-only shim for term_bytes_for_cols — the glyph-boundary clip drawSegment:
+// applies to the typing line. It is the last place a half-codepoint can reach
+// NSString (which answers nil, blanking the segment for that frame), and unlike
+// the tokenizer it produces no visible artifact in the segment table, so it gets
+// its own pin. Returns the byte length of the first `cols` glyphs of `line`.
+int terminal_reveal_bytes_for_test(const char *line, int cols) {
+    if (line == NULL) { return 0; }
+    NSInteger len = (NSInteger)strlen(line);
+    return (int)term_bytes_for_cols(line, 0, len, (NSInteger)cols);
 }

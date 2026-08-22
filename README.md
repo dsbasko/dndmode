@@ -290,7 +290,7 @@ when omitted.
 
 | Flag | Values | Default | Effect |
 | --- | --- | --- | --- |
-| `--style` | `black` \| `matrix` \| `terminal`[`:go`\|`python`\|`typescript`\|`rust`] \| `dvd` \| `glass`[`:radius`] \| `none` | config | Overlay look for this run; wins over `overlay_style`. `terminal:<lang>` picks the source language (default `go`). |
+| `--style` | `black` \| `matrix` \| `terminal`[`:go`\|`python`\|`typescript`\|`rust`\|`yc`] \| `dvd` \| `glass`[`:radius`] \| `none` | config | Overlay look for this run; wins over `overlay_style`. `terminal:<lang>` picks the source language (default `go`). |
 | `--mute` | `true` \| `false` | config | Mute system audio for this run. |
 | `--focus` | `true` \| `false` | config | Toggle Do Not Disturb for this run. |
 | `--timer` | Go duration (`30m`, `1h30m`, `90s`) | off | Auto-unlock after the duration, then exit `0`. |
@@ -465,8 +465,12 @@ unlock_code: Ctrl+Option+Cmd+X
 
 # --- terminal_language -------------------------------------------------------
 # Source language rendered by overlay_style 'terminal': go (default), python,
-# typescript or rust. Each has its own compiled-in corpus + syntax highlighting.
-# Only used by 'terminal'; ignored otherwise.
+# typescript, rust or yc. Each has its own compiled-in corpus + syntax
+# highlighting. Only used by 'terminal'; ignored otherwise.
+#   yc : YoptaScript (yopta.space) - JavaScript as spoken by the gopniks of the
+#        Russian courtyard. Same scrolling terminal, entirely in Cyrillic, and
+#        entirely unprintable. Whoever wanders up to your unattended MacBook gets
+#        to read that instead of your work.
 # Per-run override: the --style terminal:<lang> flag (e.g. --style terminal:rust).
 # terminal_language: go
 
@@ -838,7 +842,7 @@ never reacts to input, so it leaks no signal that keystrokes are being intercept
 Pick the language two ways (same precedence as glass `glass_blur` vs
 `--style glass:<radius>`): set `terminal_language:` in `config.yml` for the
 default, and/or append `--style terminal:<lang>` to override it for a single run.
-Valid values are `go` (default), `python`, `typescript`, and `rust`; a bare
+Valid values are `go` (default), `python`, `typescript`, `rust`, and `yc`; a bare
 `--style terminal` with no config key renders Go. Each language has its own
 compiled-in corpus, large enough that the stream does not repeat for over two
 hours, and its own syntax highlighting.
@@ -848,7 +852,20 @@ dndmode --style terminal            # Go (default)
 dndmode --style terminal:python
 dndmode --style terminal:typescript
 dndmode --style terminal:rust
+dndmode --style terminal:yc         # YoptaScript
 ```
+
+`yc` is [YoptaScript](https://yopta.space/) - a real joke language that transpiles
+to JavaScript, written entirely in the slang of the Russian courtyard (`йопта` is
+`function`, `вилкойвглаз` is `if`, `отвечаю` is `return`, and the semicolon is
+`нах`). It scrolls like any other language, but anyone who wanders up to the
+machine reads that instead of your work. Be warned: the vocabulary is obscene by
+construction - that is the entire premise of the language - so it is a poor pick
+for an office, and a good one for a kitchen table.
+
+It is also the only non-ASCII corpus, which is why the renderer tracks byte offsets
+and display columns separately: one Cyrillic glyph is two bytes, so a segment's
+position on the monospaced grid is not its offset in the string.
 
 **`dvd`.** The old-DVD-player screensaver: the DVD-VIDEO logo drifts diagonally
 across the shield, bounces off every edge, and cycles to the next color in a neon
