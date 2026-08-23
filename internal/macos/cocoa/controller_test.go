@@ -433,17 +433,159 @@ func TestController_Reconcile_AbortOnCreateFail(t *testing.T) {
 	}
 }
 
+// TestController_Reconcile_ColdStart_NoDisplays pins the headless start: a
+// cold-start reconcile that finds zero screens is NOT an error any more. It
+// leaves the window map empty and returns nil so main.go keeps going and
+// installs the tap — refusing to lock a machine because its lid is shut would
+// be exactly backwards.
 func TestController_Reconcile_ColdStart_NoDisplays(t *testing.T) {
 	td := newTestDeps(t, 0)
 	defer func() { _ = td.controller.Release() }()
 
 	td.enumerator.set([]uint32{})
-	err := td.controller.reconcile(true)
-	if !errors.Is(err, ErrNoDisplays) {
-		t.Errorf("err = %v, want errors.Is ErrNoDisplays", err)
+	if err := td.controller.reconcile(true); err != nil {
+		t.Errorf("cold-start reconcile with 0 displays returned err: %v (want nil, headless start)", err)
 	}
 	if got := td.controller.WindowCount(); got != 0 {
 		t.Errorf("WindowCount = %d, want 0", got)
+	}
+	if !strings.Contains(td.logBuf.String(), "starting headless") {
+		t.Errorf("expected slog.Warn 'starting headless' in log; got:\n%s", td.logBuf.String())
+	}
+}
+
+// TestController_HeadlessStart_ShieldOnDisplayReturn is the test the whole
+// change exists for: dndmode starts with the lid closed (zero screens), a
+// display later appears, and the shield goes up.
+//
+// It also pins the piece that is easy to lose — the activation flip and cursor
+// hide used to live in CreateWindowsForAllScreens, where a headless start would
+// skip them forever. They now belong to whichever reconcile first puts windows
+// on screen, so they must fire here, on the LATER one, exactly once and in the
+// Foreground→Hide order the hide depends on.
+func TestController_HeadlessStart_ShieldOnDisplayReturn(t *testing.T) {
+	td := newTestDeps(t, 0)
+	defer func() { _ = td.controller.Release() }()
+
+	// Cold start with the lid closed.
+	td.enumerator.set([]uint32{})
+	if err := td.controller.CreateWindowsForAllScreens(); err != nil {
+		t.Fatalf("headless cold-start: %v", err)
+	}
+	if got := td.controller.WindowCount(); got != 0 {
+		t.Fatalf("WindowCount after headless start = %d, want 0", got)
+	}
+	if got := td.activation.ForegroundCount(); got != 0 {
+		t.Errorf("ForegroundCount while headless = %d, want 0 (nothing is covered yet)", got)
+	}
+	if got := td.cursor.HideCount(); got != 0 {
+		t.Errorf("HideCount while headless = %d, want 0 (nothing is covered yet)", got)
+	}
+
+	// Lid opens: one display returns.
+	td.enumerator.set([]uint32{42})
+	if err := td.controller.reconcile(false); err != nil {
+		t.Fatalf("reconcile after display returned: %v", err)
+	}
+	if got := td.controller.WindowCount(); got != 1 {
+		t.Errorf("WindowCount after display returned = %d, want 1", got)
+	}
+	if got := td.activation.ForegroundCount(); got != 1 {
+		t.Errorf("ForegroundCount = %d, want 1 (flip belongs to the 0→N reconcile)", got)
+	}
+	if got := td.cursor.HideCount(); got != 1 {
+		t.Errorf("HideCount = %d, want 1 (hide belongs to the 0→N reconcile)", got)
+	}
+	assertImmediatelyBefore(t, td.callLog.snapshot(), "foreground", "hide")
+
+	// A second display arrives later: still exactly one flip for the session.
+	td.enumerator.set([]uint32{42, 43})
+	if err := td.controller.reconcile(false); err != nil {
+		t.Fatalf("reconcile after second display: %v", err)
+	}
+	if got := td.activation.ForegroundCount(); got != 1 {
+		t.Errorf("ForegroundCount after another rebuild = %d, want 1 (once per session)", got)
+	}
+	if got := td.cursor.HideCount(); got != 1 {
+		t.Errorf("HideCount after another rebuild = %d, want 1 (once per session)", got)
+	}
+}
+
+// TestController_LeadingEdge_WhenNoWindows pins that an empty window map
+// reconciles IMMEDIATELY instead of waiting out the trailing debounce. While no
+// window is up the desktop is on display, so the debounce would be a window of
+// the very exposure the overlay prevents.
+//
+// It also pins the latch: a burst costs ONE immediate reconcile, not one per
+// event. That bound is what keeps a glass rebuild — up to 2s of
+// ScreenCaptureKit on the main thread — from running five times over.
+func TestController_LeadingEdge_WhenNoWindows(t *testing.T) {
+	// Long debounce so anything observed before the sleep can only be the
+	// leading edge, never the trailing timer.
+	td := newTestDeps(t, 10*time.Second)
+	defer func() { _ = td.controller.Release() }()
+
+	td.enumerator.set([]uint32{})
+	if err := td.controller.CreateWindowsForAllScreens(); err != nil {
+		t.Fatalf("headless cold-start: %v", err)
+	}
+
+	// Lid opens: a display is there, and a burst of reconfig events lands.
+	td.enumerator.set([]uint32{7})
+	enum0 := td.enumerator.enumerateCount()
+	for range 5 {
+		td.controller.onScreensChanged()
+	}
+
+	// The shield must already be up — no sleeping on the debounce.
+	if got := td.controller.WindowCount(); got != 1 {
+		t.Errorf("WindowCount right after the burst = %d, want 1 (leading edge did not fire)", got)
+	}
+	if delta := td.enumerator.enumerateCount() - enum0; delta != 1 {
+		t.Errorf("reconciles during burst = %d, want exactly 1 (latch did not collapse the burst)", delta)
+	}
+}
+
+// TestController_LeadingEdge_RetriesWhileScreenListLags covers the race the
+// dual-observer design warns about: the CGDisplay callback can fire before
+// [NSScreen screens] reports the new display (screens_darwin.m). A leading edge
+// that lands in that gap sees zero screens and builds nothing.
+//
+// The latch must not swallow the retry — otherwise the very burst the leading
+// edge exists for degrades back to the 250ms trailing wait. A pass that produced
+// no windows releases it; the first pass that DOES build re-arms it, so the
+// expensive path still runs once.
+func TestController_LeadingEdge_RetriesWhileScreenListLags(t *testing.T) {
+	td := newTestDeps(t, 10*time.Second)
+	defer func() { _ = td.controller.Release() }()
+
+	td.enumerator.set([]uint32{})
+	if err := td.controller.CreateWindowsForAllScreens(); err != nil {
+		t.Fatalf("headless cold-start: %v", err)
+	}
+
+	// Event #1 lands while the screen list still reports nothing.
+	td.controller.onScreensChanged()
+	if got := td.controller.WindowCount(); got != 0 {
+		t.Fatalf("WindowCount while the screen list lags = %d, want 0", got)
+	}
+
+	// Event #2: the display is now visible to the enumerator. This must build
+	// immediately rather than wait out the (10s) debounce.
+	td.enumerator.set([]uint32{9})
+	td.controller.onScreensChanged()
+	if got := td.controller.WindowCount(); got != 1 {
+		t.Errorf("WindowCount after the screen list caught up = %d, want 1 (latch swallowed the retry)", got)
+	}
+
+	// And now that windows exist, further events must NOT take the leading path
+	// — an empty map is the only thing that justifies skipping the debounce.
+	enum0 := td.enumerator.enumerateCount()
+	for range 3 {
+		td.controller.onScreensChanged()
+	}
+	if delta := td.enumerator.enumerateCount() - enum0; delta != 0 {
+		t.Errorf("reconciles after the shield was up = %d, want 0 (leading edge must be off once windows exist)", delta)
 	}
 }
 
@@ -597,11 +739,15 @@ func assertImmediatelyBefore(t *testing.T, events []string, pred, succ string) {
 }
 
 // TestController_CursorHide covers the coupled one-shot activation-flip +
-// cursor hide/show wiring (revised): on a successful cold-start the app
-// flips to Accessory+active (Foreground) BEFORE the cursor Hide, exactly once,
-// never on ErrNoDisplays, never per hot-plug rebuild; on Release the cursor is
-// restored (Show) BEFORE reverting to Prohibited (Background), exactly once iff a
-// hide/flip happened, idempotent across repeated Release.
+// cursor hide/show wiring (revised): the reconcile that first puts windows on
+// screen flips to Accessory+active (Foreground) BEFORE the cursor Hide, exactly
+// once, never on a headless start (nothing covered), never per hot-plug rebuild;
+// on Release the cursor is restored (Show) BEFORE reverting to Prohibited
+// (Background), exactly once iff a hide/flip happened, idempotent across
+// repeated Release.
+//
+// The headless→display case (flip fires on the LATER reconcile) has its own
+// test: TestController_HeadlessStart_ShieldOnDisplayReturn.
 func TestController_CursorHide(t *testing.T) {
 	tests := []struct {
 		name     string
@@ -635,25 +781,25 @@ func TestController_CursorHide(t *testing.T) {
 			},
 		},
 		{
-			// Case 2: ErrNoDisplays cold-start must NOT flip foreground NOR hide
-			// (nothing covered).
-			name: "cold-start no displays does not hide",
+			// Case 2: a headless cold-start succeeds but covers nothing, so it
+			// must NOT flip foreground NOR hide — those wait for the reconcile
+			// that actually puts a window on screen.
+			name: "headless cold-start does not hide",
 			setup: func(td *testDeps) {
 				td.enumerator.set([]uint32{})
-				err := td.controller.CreateWindowsForAllScreens()
-				if !errors.Is(err, ErrNoDisplays) {
-					t.Fatalf("err = %v, want errors.Is ErrNoDisplays", err)
+				if err := td.controller.CreateWindowsForAllScreens(); err != nil {
+					t.Fatalf("headless cold-start returned err: %v, want nil", err)
 				}
 			},
 			validate: func(t *testing.T, td *testDeps) {
 				if got := td.cursor.HideCount(); got != 0 {
-					t.Errorf("HideCount = %d, want 0 (no hide on ErrNoDisplays)", got)
+					t.Errorf("HideCount = %d, want 0 (nothing covered while headless)", got)
 				}
 				if got := td.cursor.ShowCount(); got != 0 {
 					t.Errorf("ShowCount = %d, want 0", got)
 				}
 				if got := td.activation.ForegroundCount(); got != 0 {
-					t.Errorf("ForegroundCount = %d, want 0 (no foreground on ErrNoDisplays)", got)
+					t.Errorf("ForegroundCount = %d, want 0 (nothing covered while headless)", got)
 				}
 			},
 		},

@@ -1120,14 +1120,20 @@ func run() int {
 	// --- Step 15 (Phase 3): Controller + per-screen overlay windows (P2) ---
 	controller := cocoa.NewController(overlayStyle, glassBlur, terminalLanguage, log)
 	if err := controller.CreateWindowsForAllScreens(); err != nil {
-		if errors.Is(err, cocoa.ErrNoDisplays) {
-			_, _ = fmt.Fprintln(errW,
-				"dndmode: no displays detected (lid closed without external monitor?). "+
-					"Open the lid or connect a display, then re-run.")
-		} else {
-			_, _ = fmt.Fprintf(errW, "dndmode: create overlay windows failed: %v. Reconnect displays and re-run.\n", err)
-		}
+		// A display was present but its window could not be built — a real
+		// fault. Zero displays is NOT this branch; it returns nil (headless).
+		_, _ = fmt.Fprintf(errW, "dndmode: create overlay windows failed: %v. Reconnect displays and re-run.\n", err)
 		return exitPlatformErr
+	}
+	// Headless start (lid closed without an external monitor, or every display
+	// asleep): nothing to draw on yet, so say so instead of pretending a shield
+	// is up. The lock itself is real — the tap below blocks the keyboard and
+	// trackpad, and the unlock code works blind — and the shield paints itself
+	// as soon as a display comes back.
+	if controller.WindowCount() == 0 {
+		_, _ = fmt.Fprintln(errW,
+			"dndmode: no display attached (lid closed without external monitor?). "+
+				"Input is locked anyway; the overlay appears when a display returns.")
 	}
 	rs.Push(controller) // released 2nd in LIFO (Name == "windows")
 

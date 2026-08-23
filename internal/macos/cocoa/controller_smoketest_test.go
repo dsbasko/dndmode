@@ -4,7 +4,6 @@ package cocoa_test
 
 import (
 	"context"
-	"errors"
 	"log/slog"
 	"os"
 	"testing"
@@ -40,14 +39,11 @@ func TestSmoke_Controller_FullPath(t *testing.T) {
 
 	c := cocoa.NewController("black", 0, "", log)
 	if err := c.CreateWindowsForAllScreens(); err != nil {
-		// On a no-display CI machine we'd skip above; if we reach here
-		// with err == ErrNoDisplays it's likely a race vs hot-plug — fail
-		// loudly so dev can investigate.
-		if errors.Is(err, cocoa.ErrNoDisplays) {
-			t.Fatalf("CreateWindowsForAllScreens returned ErrNoDisplays despite EnumerateScreensCount=%d", n)
-		}
 		t.Fatalf("CreateWindowsForAllScreens: %v", err)
 	}
+	// Zero displays no longer errors — it starts headless. We skipped that case
+	// above (n == 0), so an empty map here means a race vs hot-plug: fail loudly
+	// so dev can investigate rather than passing a test that shielded nothing.
 	if got := c.WindowCount(); got != n {
 		t.Errorf("WindowCount = %d, want %d", got, n)
 	}

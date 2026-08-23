@@ -139,13 +139,24 @@ type Controller struct {
 	lastGeomSig uint64
 	haveGeomSig bool
 
-	// cursorHidden guards the one-shot system-cursor hide. Set true after a
-	// successful cold-start reconcile (CreateWindowsForAllScreens) hides the
-	// cursor; reset false in Release after Show. Guarded by c.mu (D-design:
-	// reuse the existing mutex, no new lock). Ensures Hide fires exactly once
-	// per Active session (never per hot-plug rebuild) and Show fires only if a
-	// hide actually happened.
+	// cursorHidden guards the one-shot system-cursor hide. Set true by the
+	// reconcile that first puts windows on screen — which is the cold-start
+	// reconcile on a normal boot, but the LATER hot-plug reconcile when dndmode
+	// started headless (lid closed, zero displays). Reset false in Release after
+	// Show. Guarded by c.mu (D-design: reuse the existing mutex, no new lock).
+	// Ensures Hide fires exactly once per Active session (never per hot-plug
+	// rebuild) and Show fires only if a hide actually happened.
 	cursorHidden bool
+
+	// leadingFired latches the leading-edge reconcile so a BURST of screen
+	// events while the overlay is down costs at most one immediate rebuild per
+	// debounce window. Cleared when the trailing timer fires. Guarded by c.mu.
+	//
+	// Without the latch a lid-open burst would run one full rebuild per event,
+	// and for overlay_style glass every rebuild is a ScreenCaptureKit still that
+	// blocks the main thread for up to 2s — five events would wedge the run loop
+	// for ten seconds right when the shield is supposed to appear.
+	leadingFired bool
 
 	released    atomic.Bool
 	releaseOnce sync.Once
@@ -226,36 +237,28 @@ func newControllerWithDeps(
 // the LIFO cleanup stderr log (acceptance test asserts ordering).
 func (c *Controller) Name() string { return "windows" }
 
-// CreateWindowsForAllScreens performs the cold-start reconcile. Returns
-// ErrNoDisplays if [NSScreen screens] is empty — main.go maps that
-// to exit code 2 + user-facing stderr message.
+// CreateWindowsForAllScreens performs the cold-start reconcile.
+//
+// An EMPTY [NSScreen screens] is no longer an error. Starting with the lid
+// closed and no external monitor (or with every display asleep) leaves the
+// window map empty and returns nil — dndmode comes up "headless": the event tap
+// still blocks the keyboard and trackpad, the unlock code still works, and the
+// shield is painted by the hot-plug reconcile the moment a display appears.
+// Aborting here instead would refuse to lock a machine whose owner is walking
+// away from it, which is exactly backwards. Callers that want to tell the two
+// starts apart read WindowCount() == 0.
+//
+// A create FAILURE (a display is present but its NSWindow could not be built)
+// is still propagated — that is a real fault, not an absent display.
 //
 // MUST be called from the main goroutine BEFORE the "active" banner
 // (ordering).
 //
-// On a successful cold-start reconcile it also flips the app activation policy
-// to Accessory + active and hides the system mouse cursor exactly once. The
-// activation flip (revised) MUST precede the hide: CGDisplayHideCursor is a
-// no-op while the process is Prohibited (never the foreground app), so
-// Foreground() runs first to make the hide take effect. Both are cosmetic to the
-// shield (the WindowServer otherwise draws a stray arrow on the black overlay)
-// and both live HERE, not in reconcile(), because reconcile is shared with the
-// hot-plug rebuild path and would otherwise re-flip/re-hide on every replug. On
-// ErrNoDisplays nothing is covered, so neither Foreground nor Hide fires
-// and the error is propagated unchanged.
+// The activation flip + cursor hide do NOT live here; they belong to whichever
+// reconcile first puts windows on screen (see reconcile), because on a headless
+// start that reconcile happens later.
 func (c *Controller) CreateWindowsForAllScreens() error {
-	if err := c.reconcile(true); err != nil {
-		return err // ErrNoDisplays (and any create failure) propagate; no foreground, no hide.
-	}
-	c.mu.Lock()
-	// Foreground BEFORE Hide: the hide only works once the app is the active
-	// (foreground) app. Reuse the single cursorHidden guard (design_decision
-	// guard-reuse) — it now means "overlay active: we did Foreground + Hide".
-	c.activation.Foreground()
-	c.cursor.Hide()
-	c.cursorHidden = true
-	c.mu.Unlock()
-	return nil
+	return c.reconcile(true)
 }
 
 // WindowCount returns the current size of the windows map under lock.
@@ -274,13 +277,20 @@ func (c *Controller) WindowCount() int {
 // current screens, create one window per screen. No incremental diff;
 // forbade it.
 //
-// cold-start: 0 screens → return ErrNoDisplays.
-// runtime: 0 screens → log.Warn, return nil, leave map empty.
+// 0 screens (either path) → log.Warn, return nil, leave the map empty. The
+// shield is invisible while no display is attached, but the tap keeps the
+// keyboard and trackpad blocked and the next reconfig paints it.
+//
 // failure on createOverlayWindow: destroy all already-created in this
 //
 //	reconcile + return error. Caller decides what to do with it (cold-start
 //	propagates to main.go → exit; runtime hot-plug logs and waits for next
 //	event).
+//
+// The reconcile that takes the window map from EMPTY to non-empty also flips
+// the app activation policy to Accessory + active and hides the system mouse
+// cursor, exactly once per session (cursorHidden guard). On a normal boot that
+// is the cold-start reconcile; on a headless start it is a later hot-plug one.
 //
 // MUST be called on the main goroutine.
 func (c *Controller) reconcile(coldStart bool) error {
@@ -316,13 +326,17 @@ func (c *Controller) reconcile(coldStart bool) error {
 		delete(c.windows, id)
 	}
 
-	// Step 4: 0 screens → cold-start errors; runtime warns, leaves map empty.
+	// Step 4: 0 screens → warn, leave the map empty, return nil on BOTH paths.
+	// The two messages differ because the situations do: at cold start nothing
+	// was ever drawn (lid closed / no monitor), at runtime a live shield just
+	// went away.
 	if len(ids) == 0 {
 		if coldStart {
-			return ErrNoDisplays //
+			c.log.Warn("no displays attached; starting headless — the shield appears when a display returns")
+		} else {
+			c.log.Warn("all displays disconnected; overlay invisible until hot-plug returns")
 		}
-		c.log.Warn("all displays disconnected; overlay invisible until hot-plug returns")
-		return nil //
+		return nil
 	}
 
 	// Step 5: create one NSWindow per screen.
@@ -341,6 +355,23 @@ func (c *Controller) reconcile(coldStart bool) error {
 		}
 		c.windows[id] = w
 	}
+
+	// Step 6: first windows of the session → flip to foreground and hide the
+	// cursor, exactly once. Foreground BEFORE Hide: CGDisplayHideCursor is a
+	// no-op while the process is Prohibited (never the foreground app), so the
+	// flip has to land first for the hide to take effect. Both are cosmetic to
+	// the shield (the WindowServer otherwise draws a stray arrow on the black
+	// overlay).
+	//
+	// The cursorHidden guard (design_decision guard-reuse) means "overlay
+	// active: we did Foreground + Hide", so hot-plug rebuilds do not re-flip —
+	// including the N→0→N round trip of a lid close and reopen, which leaves the
+	// guard set through the empty phase. Already holding c.mu here.
+	if !c.cursorHidden {
+		c.activation.Foreground()
+		c.cursor.Hide()
+		c.cursorHidden = true
+	}
 	return nil
 }
 
@@ -351,23 +382,66 @@ func (c *Controller) reconcile(coldStart bool) error {
 // We debounce 250ms trailing-edge: any rapid burst of events
 // collapses into a single reconcile call after the burst settles.
 //
+// EXCEPT when the window map is empty. Then nothing is shielded and the desktop
+// is on display, so waiting out the trailing window is 250ms of the very
+// exposure the overlay exists to prevent — the classic case being the lid
+// reopening after a headless start. The first event of such a burst reconciles
+// IMMEDIATELY (leading edge); the leadingFired latch keeps the rest of the burst
+// from doing it again, and the trailing timer still runs so the settled
+// configuration gets the last word. That trailing pass is normally free: the
+// geometry Signature it reads matches what the leading pass recorded, so the
+// no-op guard skips it without touching the live windows.
+//
 // mitigation: Stop() the existing debouncer before creating a
 // new AfterFunc — even if the prior one already fired, Stop is a safe no-op,
 // and we avoid the time.Timer.Reset semantics gotcha (Reset on expired
 // timer with un-drained channel is undefined per stdlib docs).
 func (c *Controller) onScreensChanged() {
 	c.mu.Lock()
-	defer c.mu.Unlock()
+	leading := len(c.windows) == 0 && !c.leadingFired
+	if leading {
+		c.leadingFired = true
+	}
 	if c.debouncer != nil {
 		c.debouncer.Stop()
 	}
 	c.debouncer = time.AfterFunc(c.debounceWin, func() {
+		c.mu.Lock()
+		c.leadingFired = false
+		c.mu.Unlock()
 		c.dispatcher.Dispatch(func() {
 			if err := c.reconcile(false); err != nil {
 				c.log.Error("hot-plug reconcile failed", slog.Any("err", err))
 			}
 		})
 	})
+	// Unlock BEFORE dispatching: reconcile takes c.mu, and the test dispatcher
+	// (like DispatchMain's already-on-main fast path) runs the closure inline —
+	// dispatching under the lock would deadlock on the non-reentrant mutex.
+	c.mu.Unlock()
+
+	if leading {
+		c.dispatcher.Dispatch(func() {
+			if err := c.reconcile(false); err != nil {
+				c.log.Error("leading-edge reconcile failed", slog.Any("err", err))
+			}
+			// Still nothing on screen? Then the screen list had not caught up
+			// when we looked — the CGDisplay callback is documented to be able
+			// to beat [NSScreen screens] (screens_darwin.m), which is precisely
+			// the lid-open burst we are trying to be fast for. Release the latch
+			// so the next event gets another immediate try instead of falling
+			// back to the 250ms trailing wait.
+			//
+			// Still bounded: only a pass that CREATES windows is expensive, and
+			// the moment windows exist len(c.windows) != 0 blocks every further
+			// leading edge. A pass that finds zero screens does no Cocoa work.
+			c.mu.Lock()
+			if len(c.windows) == 0 {
+				c.leadingFired = false
+			}
+			c.mu.Unlock()
+		})
+	}
 }
 
 // Release implements state.Releaser. Two-layer idempotency:

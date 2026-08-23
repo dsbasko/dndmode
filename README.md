@@ -1152,12 +1152,14 @@ internal/supervisor/  single-point shutdown fan-in
   `matrix`, or `terminal` if you need the desktop fully hidden.
 - **Foreground only.** No daemon or launchd mode. The terminal that launched dndmode
   must stay open.
-- **Needs an active display.** dndmode shields the screens you can see; it does not
-  keep a MacBook running with the lid shut. With the lid closed and no external
-  monitor there is nothing to draw on, so startup aborts with exit `2` (`no displays
-  detected`). The awake-lock also does not defeat clamshell sleep - closing the lid
-  on battery still sleeps the Mac. Run it lid-open, or in clamshell with an external
-  display on AC power.
+- **Does not defeat clamshell sleep.** dndmode starts and locks input with the lid
+  closed - with no display attached it comes up headless, says so on stderr, and
+  paints the overlay the moment a display returns (lid opened, monitor plugged in).
+  All five visual styles behave identically here; the display check sits above the
+  style. What it cannot do is keep the Mac *awake* with the lid shut and no external
+  monitor: lid-close sleep is a separate path that neither the awake-lock nor
+  `caffeinate` overrides. For a Mac that keeps running untouched, use clamshell with
+  an external display on AC power, or leave the lid open.
 - **One instance at a time.** A second dndmode exits `5` with instructions.
 - **Signing.** Recent macOS refuses unsigned binaries. `make build` applies ad-hoc
   codesigning; `go install` relies on Go's linker-signed signature, which launches

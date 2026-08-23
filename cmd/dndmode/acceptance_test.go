@@ -276,8 +276,6 @@ func TestAcceptance_DefaultConfigCreatedOnMissing(t *testing.T) {
 		switch {
 		case strings.Contains(stdoutSnap, "dndmode: waiting"):
 			t.Skip("AX or IM not granted on this host; default-config test requires both granted upfront")
-		case strings.Contains(stderrSnap, "no displays detected"):
-			t.Skip("no displays attached; default-config test requires GUI session")
 		case strings.Contains(stderrSnap, "Secure Event Input"):
 			t.Skip("SecureEventInput active on host; close it and re-run")
 		case strings.Contains(stderrSnap, "required Shortcuts not found"):
@@ -424,8 +422,6 @@ func TestAcceptance_SIGINT_ExitZeroWithCleanupBanner(t *testing.T) {
 		switch {
 		case strings.Contains(stdoutSnap, "dndmode: waiting"):
 			t.Skip("AX or IM not granted on this host; SIGINT-cleanup test requires both granted upfront")
-		case strings.Contains(stderrSnap, "no displays detected"):
-			t.Skip("no displays attached; SIGINT-cleanup test requires GUI session")
 		case strings.Contains(stderrSnap, "Secure Event Input"):
 			t.Skip("SecureEventInput active on host; close it and re-run")
 		case strings.Contains(stderrSnap, "required Shortcuts not found"):
@@ -464,8 +460,6 @@ func TestAcceptance_DoubleSIGINT_NoOp(t *testing.T) {
 		switch {
 		case strings.Contains(stdoutSnap, "dndmode: waiting"):
 			t.Skip("AX or IM not granted on this host; double-SIGINT test requires both granted upfront")
-		case strings.Contains(stderrSnap, "no displays detected"):
-			t.Skip("no displays attached; double-SIGINT test requires GUI session")
 		case strings.Contains(stderrSnap, "Secure Event Input"):
 			t.Skip("SecureEventInput active on host; close it and re-run")
 		case strings.Contains(stderrSnap, "required Shortcuts not found"):
@@ -1147,8 +1141,6 @@ func TestAcceptance_DefaultConfig_MutesNotFocus(t *testing.T) {
 		switch {
 		case strings.Contains(stdoutSnap, "dndmode: waiting"):
 			t.Skip("AX or IM not granted on this host; default-mute test requires both granted upfront")
-		case strings.Contains(stderrSnap, "no displays detected"):
-			t.Skip("no displays attached; default-mute test requires GUI session")
 		case strings.Contains(stderrSnap, "Secure Event Input"):
 			t.Skip("SecureEventInput active on host; close it and re-run")
 		case strings.Contains(stderrSnap, "another instance is holding") || strings.Contains(stderrSnap, "another instance is already active"):
@@ -1217,8 +1209,6 @@ func TestAcceptance_MuteFlagFalse_OverridesConfig(t *testing.T) {
 		switch {
 		case strings.Contains(stdoutSnap, "dndmode: waiting"):
 			t.Skip("AX or IM not granted on this host; mute-override test requires both granted upfront")
-		case strings.Contains(stderrSnap, "no displays detected"):
-			t.Skip("no displays attached; mute-override test requires GUI session")
 		case strings.Contains(stderrSnap, "Secure Event Input"):
 			t.Skip("SecureEventInput active on host; close it and re-run")
 		case strings.Contains(stderrSnap, "another instance is holding") || strings.Contains(stderrSnap, "another instance is already active"):
@@ -1595,8 +1585,6 @@ func TestAcceptance_LIFE06_PushOrder(t *testing.T) {
 		stderrSnap := stderr.String()
 		stdoutSnap := stdout.String()
 		switch {
-		case strings.Contains(stderrSnap, "no displays detected"):
-			t.Skip("no displays attached on this host (HEADLESS or lid-closed); test requires GUI session")
 		case strings.Contains(stdoutSnap, "dndmode: waiting"):
 			t.Skip("AX or IM not granted on this host; test requires both granted upfront")
 		case strings.Contains(stderrSnap, "Secure Event Input"):
@@ -1691,8 +1679,6 @@ func TestAcceptance_Phase2_OverlayBootstrapsAndShutsDown(t *testing.T) {
 		stderrSnap := stderr.String()
 		stdoutSnap := stdout.String()
 		switch {
-		case strings.Contains(stderrSnap, "no displays detected"):
-			t.Skip("no displays attached; Phase 2 happy-path requires GUI session")
 		case strings.Contains(stdoutSnap, "dndmode: waiting"):
 			t.Skip("AX or IM not granted on this host; Phase 2 happy-path requires both granted upfront")
 		case strings.Contains(stderrSnap, "Secure Event Input"):
@@ -1754,8 +1740,6 @@ func TestAcceptance_Phase3_PreFlight_HappyPath(t *testing.T) {
 		switch {
 		case strings.Contains(stdoutSnap, "dndmode: waiting"):
 			t.Skip("AX or IM not granted on this host; Phase 3 happy-path requires both granted upfront")
-		case strings.Contains(stderrSnap, "no displays detected"):
-			t.Skip("no displays attached; Phase 3 happy-path requires GUI session")
 		case strings.Contains(stderrSnap, "Secure Event Input"):
 			t.Skip("SecureEventInput active on host; close it and re-run")
 		case strings.Contains(stderrSnap, "another instance is holding") || strings.Contains(stderrSnap, "another instance is already active"):
@@ -1880,8 +1864,6 @@ func TestAcceptance_CrashScenario(t *testing.T) {
 		switch {
 		case strings.Contains(stdoutSnap, "dndmode: waiting"):
 			t.Skip("AX or IM not granted on this host; CrashScenario requires both granted upfront")
-		case strings.Contains(stderrSnap, "no displays detected"):
-			t.Skip("no displays attached; CrashScenario requires GUI session")
 		case strings.Contains(stderrSnap, "Secure Event Input"):
 			t.Skip("SecureEventInput active on host; close it and re-run")
 		case strings.Contains(stderrSnap, "required Shortcuts not found"):
@@ -2121,8 +2103,6 @@ func TestAcceptance_LIFE10_PanicRecover(t *testing.T) {
 	// Host-condition skip cases — must come BEFORE assertions because any
 	// PreFlight gate short-circuits before Step 18.0 panic injection fires.
 	switch {
-	case strings.Contains(stderrStr, "no displays detected"):
-		t.Skip("no displays attached (HEADLESS); test requires GUI session")
 	case strings.Contains(stdoutStr, "dndmode: waiting"):
 		t.Skip("AX or IM not granted on this host; test requires both granted upfront")
 	case strings.Contains(stderrStr, "Secure Event Input"):
