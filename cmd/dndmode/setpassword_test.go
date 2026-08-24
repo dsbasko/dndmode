@@ -40,10 +40,19 @@ func Test_setPasswordFlags_conflictingFlag(t *testing.T) {
 		{name: "timer conflicts", flags: setPasswordFlags{timer: "30m"}, want: "--timer"},
 		{name: "mute conflicts", flags: setPasswordFlags{mute: "false"}, want: "--mute"},
 		{name: "focus conflicts", flags: setPasswordFlags{focus: "true"}, want: "--focus"},
+		// --watch is refused for a sharper reason than the rest: both it and
+		// the capture want the keyboard through a suppressing tap, so the two
+		// would be arming sessions into each other's input.
+		{name: "watch conflicts", flags: setPasswordFlags{watch: true}, want: "--watch"},
 		{
 			name:  "several conflict, style is named first",
 			flags: setPasswordFlags{style: "glass", timer: "5m", focus: "true"},
 			want:  "--style",
+		},
+		{
+			name:  "watch alongside another, the other is named first",
+			flags: setPasswordFlags{timer: "5m", watch: true},
+			want:  "--timer",
 		},
 	}
 

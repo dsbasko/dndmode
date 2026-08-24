@@ -43,6 +43,7 @@ type setPasswordFlags struct {
 	timer string
 	mute  string
 	focus string
+	watch bool
 }
 
 // conflictingFlag returns the name of the first flag that cannot be combined
@@ -54,6 +55,13 @@ type setPasswordFlags struct {
 // them would be worse than refusing, because `dndmode --set-password --timer
 // 30m` reads like "capture, then run for 30 minutes" and would instead capture
 // and quit.
+//
+// --watch is refused for a sharper version of the same reason. It reads as
+// "set a new code, then stand by with it", and the two halves would fight
+// over the keyboard anyway: the capture holds a suppressing tap across both
+// of its passes, which is exactly what a waiting watch would be arming
+// sessions into. Doing one and then the other is two commands, and it is
+// clearer as two.
 func (f setPasswordFlags) conflictingFlag() string {
 	switch {
 	case f.style != "":
@@ -64,6 +72,8 @@ func (f setPasswordFlags) conflictingFlag() string {
 		return "--mute"
 	case f.focus != "":
 		return "--focus"
+	case f.watch:
+		return "--watch"
 	default:
 		return ""
 	}

@@ -32,17 +32,21 @@ import (
 	"runtime/debug"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
 	"github.com/dsbasko/dndmode/internal/config"
+	"github.com/dsbasko/dndmode/internal/config/hotkey"
 	"github.com/dsbasko/dndmode/internal/macos/audiomute"
 	"github.com/dsbasko/dndmode/internal/macos/caffeinate"
 	"github.com/dsbasko/dndmode/internal/macos/cocoa"
 	"github.com/dsbasko/dndmode/internal/macos/eventtap"
 	"github.com/dsbasko/dndmode/internal/macos/focus"
+	"github.com/dsbasko/dndmode/internal/macos/globalhotkey"
 	"github.com/dsbasko/dndmode/internal/macos/permissions"
 	"github.com/dsbasko/dndmode/internal/macos/powerassert"
+	"github.com/dsbasko/dndmode/internal/matcher"
 	"github.com/dsbasko/dndmode/internal/state"
 	runtimepkg "github.com/dsbasko/dndmode/internal/state/runtime"
 	"github.com/dsbasko/dndmode/internal/supervisor"
@@ -97,7 +101,7 @@ func (c *cancelStopper) RequestStop(_ string) { c.cancel() }
 // banner, diagnostic, and log line on or off at once. Default OFF: dndmode is
 // silent so a visible terminal (overlay_style none/glass) never leaks the
 // unlock code (security stance: reveal nothing — see config.Config.Debug and
-//).
+// ).
 type gatedWriter struct {
 	w  io.Writer
 	on *bool
@@ -150,6 +154,7 @@ func parseTimer(flagVal string) (time.Duration, error) {
 // ":<suffix>" whose meaning depends on the base:
 //   - "glass:24"        => ("glass", *24, "", nil)  -- CIGaussianBlur radius override
 //   - "terminal:python" => ("terminal", nil, "python", nil)  -- source language
+//
 // A bare style => (s, nil, "", nil). A suffix on any base other than glass or
 // terminal, a non-numeric / out-of-range glass radius, or an unknown terminal
 // language is an error. The base style itself is NOT validated here — the caller
@@ -220,37 +225,48 @@ func main() {
 // 1. Parse --debug flag (P1) + --style overlay-style override flag.
 // 2. slog logger to stderr (P1 /).
 // 2.5. --set-password → runSetPassword and return. Deliberately ahead of Step
-//     3: the command rewrites one config key and exits, so it must not build a
-//     RestoreState, install the session signal handlers, or print the cleanup
-//     banner. See setpassword.go.
-// 3. signal.NotifyContext(ctx, SIGINT, SIGTERM, SIGHUP) (replaces the
-//     plain-context cancel pattern used in Phase 2; SIGINT/SIGTERM/SIGHUP now
-//     flow into ctx.Done directly).
-//  4. RestoreState + defer Cleanup + stdout "cleaning up… done." banner (P1).
-//  5. Resolve home dir.
-// 6. Load config + resolve the unlock code.
-//  7. stdout config banner.
-// 8. permissions.CheckPlatform —; exit 2 on ErrNonArm64/ErrMacOSBelow14.
+//
+//		3: the command rewrites one config key and exits, so it must not build a
+//		RestoreState, install the session signal handlers, or print the cleanup
+//		banner. See setpassword.go.
+//	 3. signal.NotifyContext(ctx, SIGINT, SIGTERM, SIGHUP) (replaces the
+//	    plain-context cancel pattern used in Phase 2; SIGINT/SIGTERM/SIGHUP now
+//	    flow into ctx.Done directly).
+//	 4. RestoreState + defer Cleanup + stdout "cleaning up… done." banner (P1).
+//	 5. Resolve home dir.
+//	 6. Load config + resolve the unlock code.
+//	 7. stdout config banner.
+//	 8. permissions.CheckPlatform —; exit 2 on ErrNonArm64/ErrMacOSBelow14.
+//
 // 8.5. runtimepkg.IsLiveInstance (Phase 6, ordering) — cold-start
-//     single-instance gate; alive peer → stderr template + exit 5 (mirrors Step
-//     10.5 ErrConcurrentInstance dispatch). Runs AFTER platform check so
-//     cross-arch / pre-Sonoma users surface exit 2 first; runtimeMgr is reused
+//
+//	single-instance gate; alive peer → stderr template + exit 5 (mirrors Step
+//	10.5 ErrConcurrentInstance dispatch). Runs AFTER platform check so
+//	cross-arch / pre-Sonoma users surface exit 2 first; runtimeMgr is reused
+//
 // at Steps 10.5, 12, 13.3 (single Manager invariant per Phase 5).
 // 9. permissions.WaitForGrants — polling; ctx.Canceled → exit 3.
 // 9.5. focus.CheckShortcuts —..; ErrShortcutsMissing → exit 6.
 // 10. permissions.IsSecureEventInputActive —; true → exit 4.
 // 10.5. runtimepkg.RecoverFromCrash under withPublishLock (busy → exit 5,
-//     broken → exit 7) —..; live-PID → exit 5;
-//     ErrFileDeletePersistent → exit 7; other → exit 2. The lock is the same
+//
+//	broken → exit 7) —..; live-PID → exit 5;
+//	ErrFileDeletePersistent → exit 7; other → exit 2. The lock is the same
+//
 // one Step 13.3 takes and is dropped before this step returns: recovery
-//     deletes runtime.json, and an unserialized delete lands on a peer's
-//     freshly published snapshot.
+//
+//	deletes runtime.json, and an unserialized delete lands on a peer's
+//	freshly published snapshot.
+//
 // 11. powerassert.CleanupOrphans —; ErrConcurrentInstance → exit 5.
 //  12. rs.Push(runtimepkg.NewManager(...)) — Phase 5 replaces mock-runtime-file.
-// 13. powerassert.Acquire("dndmode active") —; rs.Push(assertion).
+//  13. powerassert.Acquire("dndmode active") —; rs.Push(assertion).
 //     13.3. acquirePublishLock (busy → exit 5, broken → exit 7) → peer re-check
+//
 // (live → exit 5) → config fingerprint re-check (changed → exit 1) →
-//     runtimepkg.Manager.Write({pid, started_at, prior_focus=nil, assertion_id})
+//
+//	runtimepkg.Manager.Write({pid, started_at, prior_focus=nil, assertion_id})
+//
 // atomic temp+rename per the design notes → release. Every refusal
 // inside that section calls Manager.Disown first: the file it would
 // otherwise delete belongs to a peer, not to this process.
@@ -259,15 +275,18 @@ func main() {
 // 14. cocoa.Init — (moved DOWN after permission checks).
 // 15. cocoa.NewController CreateWindowsForAllScreens — P2; rs.Push(controller).
 //  16. supervisor.New(log, stopper) + supervisor.Start(ctx) — swapped BEFORE
+//
 // eventtap (Phase 4) because InstallAll needs sup.ExitTrigger() as
-//     its sink channel.
-// 17. eventtap.InstallAll(unlockVerifier, sup.ExitTrigger(), log) — Phase 4;
-//     composes tap + watchdog + wake observer into a single Releaser;
-//     rs.Push(tapRel). Replaces the Phase 3 mock-tap placeholder.
-//  18. stdout "dndmode: active. press Ctrl-C.".
-// 19. cocoa.RunApp(ctx) → sup.Wait() → return exitOK; defer Cleanup LIFO;
+//
+//		its sink channel.
+//	 17. eventtap.InstallAll(unlockVerifier, sup.ExitTrigger(), log) — Phase 4;
+//	    composes tap + watchdog + wake observer into a single Releaser;
+//	    rs.Push(tapRel). Replaces the Phase 3 mock-tap placeholder.
+//	 18. stdout "dndmode: active. press Ctrl-C.".
+//	 19. cocoa.RunApp(ctx) → sup.Wait() → return exitOK; defer Cleanup LIFO;
+//
 // top-level recover defer (registered FIRST inside run, Phase 4
-//) catches any Cocoa-panic AFTER Cleanup, exits with exitInternalErr=8.
+// ) catches any Cocoa-panic AFTER Cleanup, exits with exitInternalErr=8.
 //
 // cleanup execution order via push-stack LIFO unwind (Phase 4
 // finalises tap-releaser): eventtap → windows → "dndmode active" → focus
@@ -373,6 +392,19 @@ func run() int {
 	// audio, the IOPMAssertion or the single-instance lock. Every other session
 	// flag is refused alongside it (setPasswordFlags.conflictingFlag).
 	setPasswordFlag := flag.Bool("set-password", false, "capture a new unlock sequence and store it hashed in the config, then exit")
+	// --watch turns the one-shot session into a resident trigger: instead of
+	// locking immediately, dndmode registers the activate_hotkey combination
+	// with Carbon, waits, and raises a full session every time it is pressed —
+	// returning to waiting after each unlock. Still a foreground process; there
+	// is deliberately no daemon and no launchd job.
+	//
+	// While it waits the process holds nothing: no shield, no tap, no power
+	// assertion, no runtime.json, no Focus. It does not need Accessibility to
+	// wait, either — RegisterEventHotKey is matched by the OS, so dndmode never
+	// observes a keystroke that is not its own trigger. Accessibility IS still
+	// required for the sessions that follow, which is why the shell checks for
+	// it up front (Step 9) rather than at the first press.
+	watchFlag := flag.Bool("watch", false, "wait for the activate_hotkey combination and lock on each press, instead of locking immediately")
 	flag.Parse()
 	// Raise the output gate for the whole run when --debug is set. `debug: true`
 	// in config can also raise it after Load (Step 5); either source enables
@@ -405,6 +437,7 @@ func run() int {
 			timer: *timerFlag,
 			mute:  *muteFlag,
 			focus: *focusFlag,
+			watch: *watchFlag,
 		}, os.Stdout, errW, &debugOn, log)
 	}
 
@@ -557,6 +590,31 @@ func run() int {
 	if err != nil {
 		_, _ = fmt.Fprintf(errW, "dndmode: invalid --timer %q: %v.\n", *timerFlag, err)
 		return exitConfigErr
+	}
+
+	// --- Step 5b.3: Resolve + validate the activation combination (--watch) ---
+	// Resolved HERE, beside the timer and for the identical reason: a typo in
+	// activate_hotkey, a combination with no modifier, or one that collides
+	// with the unlock code must fail with exit 1 while the user is still at the
+	// terminal — not after an unbounded WaitForGrants has walked them through a
+	// System Settings dialog for a run that was never going to start.
+	//
+	// Only RESOLUTION happens this early. Registering with Carbon waits until
+	// the watch branch at the bottom of run(), because a registration is a
+	// system-wide claim on the combination and holding one through the
+	// permission steps would take it away from other applications for a run
+	// that may yet exit.
+	//
+	// Skipped entirely without --watch: activate_hotkey is meaningless to a
+	// one-shot session, and a config carrying a broken one must not stop a
+	// plain `dndmode` from locking.
+	var activateSpec hotkey.Spec
+	if *watchFlag {
+		activateSpec, err = config.ResolveActivateHotkey(&cfg, unlockVerifier)
+		if err != nil {
+			_, _ = fmt.Fprintf(errW, "dndmode: %v. Fix %s.\n", err, cfgPath)
+			return exitConfigErr
+		}
 	}
 
 	// --- Step 6: Print banner (stdout-only) ---
@@ -873,394 +931,706 @@ func run() int {
 		return exitPlatformErr
 	}
 
-	// --- Step 12 (Phase 5 replaces P3 mock-runtime-file with real Manager) ---
-	// Pushed BEFORE Manager.Write so Release is idempotent for the failure
-	// window: if powerassert.Acquire (Step 13) fails, the deferred Cleanup
-	// fires Release on a file that was never written — os.Remove on
-	// ErrNotExist returns nil. runtimeMgr was constructed at Step 5c.
+	// --- Session boundary (watch mode) ---------------------------------------
+	// Everything from Step 12 down is ONE session: the resources a shielded
+	// stretch acquires and releases. Above it sits the shell — flags, config,
+	// platform and permission checks, crash recovery — which happens once per
+	// process no matter how many sessions follow.
 	//
-	// "A file that was never written" is only ONE of the two things that path
-	// can find, though, and the other one is not ours to delete: a peer that
-	// started while this process sat in WaitForGrants can have published its own
-	// runtime.json at that exact path. So every return between here and the
-	// successful Write calls runtimeMgr.Disown() first — see Manager.Disown for
-	// why deleting the peer's file is worse than leaving a stale one.
-	rs.Push(runtimeMgr)
-
-	// --- Step 13 (Phase 3): Acquire IOPMAssertion ---
-	// Push immediately after successful create per P1 push-after-create
-	// discipline. The real Assertion replaces the Phase 2 assertion-slot
-	// mock placeholder in unwind — released 3rd, between controller
-	// и runtime-mock. After Phase 3 the third releaser logs as
-	// `releaser=dndmode active` (per Assertion.Name() == "dndmode active").
-	// The assertion TYPE is selected from cfg.AllowDisplaySleep (inverted
-	// polarity): default false → PreventUserIdleDisplaySleep (display kept
-	// awake); true → legacy PreventUserIdleSystemSleep (display may idle-off).
-	assertion, err := powerassert.Acquire("dndmode active", cfg.AllowDisplaySleep, log)
-	if err != nil {
-		// Same rule as every refusal in the publish section below: this process
-		// has not written runtime.json, so a file at that path was published by
-		// a peer that started while we waited for grants, and the deferred
-		// Cleanup must not delete it.
-		runtimeMgr.Disown()
-		_, _ = fmt.Fprintf(errW, "dndmode: acquire awake-lock failed: %v. Check IOKit availability and re-run.\n", err)
-		return exitPlatformErr
-	}
-	rs.Push(assertion) // released 3rd in LIFO (between controller и runtime-mock)
-
-	// --- Step 13.3 (Phase 5): Resolve prior mute state, then write runtime.json ---
-	// When effectiveMute, query the CURRENT system-audio mute state BEFORE
-	// building the Snapshot literal — the recorded prior_muted must reflect the
-	// state from before we touch audio (Step 13.7). On a GetMuted error: warn +
-	// skip the whole mute step (priorMuted stays nil). NEVER mute without a
-	// recorded prior state, otherwise exit could leave the user's audio muted
-	// forever. priorMuted == nil ⇒ audio is never touched at Step 13.7.
-	muteRunner := audiomute.NewExecRunner()
-	var priorMuted *bool
-	if effectiveMute {
-		if got, gerr := muteRunner.GetMuted(ctx); gerr != nil {
-			log.Warn("query system mute state failed; skipping audio mute", slog.Any("err", gerr))
-		} else {
-			priorMuted = &got
-		}
-	}
-
-	// Publishing runtime.json is what makes this process visible to a
-	// concurrent --set-password: its peer probe reads that file and nothing
-	// else. So the re-check for a live peer, the check that the config is still
-	// the one Step 5b resolved and the write that announces us have to be one
-	// indivisible section, taken under the same lock --set-password holds
-	// across its own probe-and-save. Hold it for exactly those three steps —
-	// two reads and a rename — and no longer: a capture that has to wait on
-	// this lock would be waiting on us for no reason.
+	// The split exists because --watch runs this repeatedly. ctx, cancel and rs
+	// are PARAMETERS that deliberately shadow the shell's identically-named
+	// variables, which is what lets the body below stay byte-for-byte what it
+	// was as straight-line code while its lifetime becomes per-session:
 	//
-	// A lock that cannot be taken at all is FATAL here, and the tempting
-	// argument for starting anyway does not survive the arithmetic. That
-	// argument runs: the shield coming up is this program's entire purpose, so
-	// a rare coordination failure must not be traded for a common total one.
-	// But every way this open-or-flock can fail short of "someone else holds
-	// it" — unwritable directory, read-only or full filesystem, a config dir
-	// that vanished mid-startup — is a way the runtimeMgr.Write a few lines
-	// down is about to fail too, with exit 2. Starting without the lock
-	// therefore rescues almost no run that would otherwise have worked; what it
-	// does is remove the one thing that makes the handoff to --set-password
-	// atomic. A session that publishes without holding the lock can land
-	// between that command's last probe and its rename, and then the shield
-	// answers to the PREVIOUS secret while config.yml names the new one and the
-	// operator who set it has been told it took. Refusing here is recoverable
-	// and the sentence names the directory to fix; that outcome is not
-	// recoverable from the keyboard.
-	releaseLock, lockErr := acquirePublishLock(filepath.Dir(runtimeMgr.Path()))
-	switch {
-	case lockErr == nil:
-		// Released explicitly at the end of the section rather than by a defer:
-		// a defer here would run when run() returns, i.e. when the session
-		// ENDS, and a lock held for the whole shielded stretch would make every
-		// --set-password wait out the bounded retry before refusing — with the
-		// wrong sentence, since by then the honest answer is the live-peer one.
-		// Every path out of the section below releases it first.
-		defer releaseLock() // belt and braces: the explicit calls run first, and release is idempotent
-	case errors.Is(lockErr, errPublishLockBusy):
-		// Held for longer than the bounded wait. Two holders are possible and
-		// only one of them is a rename away from done: another starting session
-		// (wedged, if it is still holding after two seconds) or a
-		// --set-password, which holds the lock across its whole capture and so
-		// legitimately outlasts any wait worth making a user sit through.
-		// Refusing is right in both cases — the second one owns the keyboard
-		// through a tap that would sit in front of ours anyway — and the
-		// sentence below names both.
+	//   - one-shot mode passes the root ctx and the shell's own rs, so the
+	//     behaviour is exactly what it always was;
+	//   - watch mode passes a per-session child ctx and a FRESH rs, because
+	//     RestoreState.Cleanup is sync.Once-guarded and a reused one would
+	//     silently decline to release the second session's resources.
+	//
+	// The same reasoning applies to the supervisor built inside: it is
+	// sync.Once-guarded too, so it is constructed per session rather than
+	// hoisted into the shell.
+	runSession := func(ctx context.Context, cancel context.CancelFunc, rs *state.RestoreState, ownsRunLoop bool) int {
+		// --- Step 12 (Phase 5 replaces P3 mock-runtime-file with real Manager) ---
+		// Pushed BEFORE Manager.Write so Release is idempotent for the failure
+		// window: if powerassert.Acquire (Step 13) fails, the deferred Cleanup
+		// fires Release on a file that was never written — os.Remove on
+		// ErrNotExist returns nil. runtimeMgr was constructed at Step 5c.
 		//
-		// Disown for the same positional reason as every other exit from this
-		// section: this process has not written runtime.json, so a file at that
-		// path is the lock holder's — and the holder that made us wait out the
-		// whole bounded retry is exactly the one that may already have renamed
-		// its snapshot into place and not yet released. Deleting it on the way
-		// out would leave that live session invisible to every probe.
-		runtimeMgr.Disown()
-		_, _ = fmt.Fprintln(errW,
-			"dndmode: another dndmode is publishing its state, or a --set-password is setting a new unlock code. Wait for it to finish, then re-run.")
-		return exitConcurrentInstance
-	default:
-		// Not busy — broken. Separate sentence from the busy branch because the
-		// user action is different: that one is "wait", this one names the
-		// directory whose lock file could not be opened or locked. exit 7
-		// (exitRuntimeJSON) matches what --set-password returns for the same
-		// failure, so the two halves of the coordination report it alike.
+		// "A file that was never written" is only ONE of the two things that path
+		// can find, though, and the other one is not ours to delete: a peer that
+		// started while this process sat in WaitForGrants can have published its own
+		// runtime.json at that exact path. So every return between here and the
+		// successful Write calls runtimeMgr.Disown() first — see Manager.Disown for
+		// why deleting the peer's file is worse than leaving a stale one.
+		rs.Push(runtimeMgr)
+
+		// --- Step 13 (Phase 3): Acquire IOPMAssertion ---
+		// Push immediately after successful create per P1 push-after-create
+		// discipline. The real Assertion replaces the Phase 2 assertion-slot
+		// mock placeholder in unwind — released 3rd, between controller
+		// и runtime-mock. After Phase 3 the third releaser logs as
+		// `releaser=dndmode active` (per Assertion.Name() == "dndmode active").
+		// The assertion TYPE is selected from cfg.AllowDisplaySleep (inverted
+		// polarity): default false → PreventUserIdleDisplaySleep (display kept
+		// awake); true → legacy PreventUserIdleSystemSleep (display may idle-off).
+		assertion, err := powerassert.Acquire("dndmode active", cfg.AllowDisplaySleep, log)
+		if err != nil {
+			// Same rule as every refusal in the publish section below: this process
+			// has not written runtime.json, so a file at that path was published by
+			// a peer that started while we waited for grants, and the deferred
+			// Cleanup must not delete it.
+			runtimeMgr.Disown()
+			_, _ = fmt.Fprintf(errW, "dndmode: acquire awake-lock failed: %v. Check IOKit availability and re-run.\n", err)
+			return exitPlatformErr
+		}
+		rs.Push(assertion) // released 3rd in LIFO (between controller и runtime-mock)
+
+		// --- Step 13.3 (Phase 5): Resolve prior mute state, then write runtime.json ---
+		// When effectiveMute, query the CURRENT system-audio mute state BEFORE
+		// building the Snapshot literal — the recorded prior_muted must reflect the
+		// state from before we touch audio (Step 13.7). On a GetMuted error: warn +
+		// skip the whole mute step (priorMuted stays nil). NEVER mute without a
+		// recorded prior state, otherwise exit could leave the user's audio muted
+		// forever. priorMuted == nil ⇒ audio is never touched at Step 13.7.
+		muteRunner := audiomute.NewExecRunner()
+		var priorMuted *bool
+		if effectiveMute {
+			if got, gerr := muteRunner.GetMuted(ctx); gerr != nil {
+				log.Warn("query system mute state failed; skipping audio mute", slog.Any("err", gerr))
+			} else {
+				priorMuted = &got
+			}
+		}
+
+		// Publishing runtime.json is what makes this process visible to a
+		// concurrent --set-password: its peer probe reads that file and nothing
+		// else. So the re-check for a live peer, the check that the config is still
+		// the one Step 5b resolved and the write that announces us have to be one
+		// indivisible section, taken under the same lock --set-password holds
+		// across its own probe-and-save. Hold it for exactly those three steps —
+		// two reads and a rename — and no longer: a capture that has to wait on
+		// this lock would be waiting on us for no reason.
 		//
-		// Disown for the same reason as the busy branch above — with one more:
-		// this branch never held the lock at all, so it has no claim whatsoever
-		// on what is at that path, and a peer that DID hold it may have
-		// published while we were failing to open the lock file.
-		runtimeMgr.Disown()
-		_, _ = fmt.Fprintf(errW,
-			"dndmode: cannot claim the publish lock, so a concurrent dndmode or --set-password cannot be ruled out: %v.\n"+
-				"Check that %s is writable, then re-run.\n",
-			lockErr, filepath.Dir(runtimeMgr.Path()))
-		return exitRuntimeJSON
+		// A lock that cannot be taken at all is FATAL here, and the tempting
+		// argument for starting anyway does not survive the arithmetic. That
+		// argument runs: the shield coming up is this program's entire purpose, so
+		// a rare coordination failure must not be traded for a common total one.
+		// But every way this open-or-flock can fail short of "someone else holds
+		// it" — unwritable directory, read-only or full filesystem, a config dir
+		// that vanished mid-startup — is a way the runtimeMgr.Write a few lines
+		// down is about to fail too, with exit 2. Starting without the lock
+		// therefore rescues almost no run that would otherwise have worked; what it
+		// does is remove the one thing that makes the handoff to --set-password
+		// atomic. A session that publishes without holding the lock can land
+		// between that command's last probe and its rename, and then the shield
+		// answers to the PREVIOUS secret while config.yml names the new one and the
+		// operator who set it has been told it took. Refusing here is recoverable
+		// and the sentence names the directory to fix; that outcome is not
+		// recoverable from the keyboard.
+		releaseLock, lockErr := acquirePublishLock(filepath.Dir(runtimeMgr.Path()))
+		switch {
+		case lockErr == nil:
+			// Released explicitly at the end of the section rather than by a defer:
+			// a defer here would run when run() returns, i.e. when the session
+			// ENDS, and a lock held for the whole shielded stretch would make every
+			// --set-password wait out the bounded retry before refusing — with the
+			// wrong sentence, since by then the honest answer is the live-peer one.
+			// Every path out of the section below releases it first.
+			defer releaseLock() // belt and braces: the explicit calls run first, and release is idempotent
+		case errors.Is(lockErr, errPublishLockBusy):
+			// Held for longer than the bounded wait. Two holders are possible and
+			// only one of them is a rename away from done: another starting session
+			// (wedged, if it is still holding after two seconds) or a
+			// --set-password, which holds the lock across its whole capture and so
+			// legitimately outlasts any wait worth making a user sit through.
+			// Refusing is right in both cases — the second one owns the keyboard
+			// through a tap that would sit in front of ours anyway — and the
+			// sentence below names both.
+			//
+			// Disown for the same positional reason as every other exit from this
+			// section: this process has not written runtime.json, so a file at that
+			// path is the lock holder's — and the holder that made us wait out the
+			// whole bounded retry is exactly the one that may already have renamed
+			// its snapshot into place and not yet released. Deleting it on the way
+			// out would leave that live session invisible to every probe.
+			runtimeMgr.Disown()
+			_, _ = fmt.Fprintln(errW,
+				"dndmode: another dndmode is publishing its state, or a --set-password is setting a new unlock code. Wait for it to finish, then re-run.")
+			return exitConcurrentInstance
+		default:
+			// Not busy — broken. Separate sentence from the busy branch because the
+			// user action is different: that one is "wait", this one names the
+			// directory whose lock file could not be opened or locked. exit 7
+			// (exitRuntimeJSON) matches what --set-password returns for the same
+			// failure, so the two halves of the coordination report it alike.
+			//
+			// Disown for the same reason as the busy branch above — with one more:
+			// this branch never held the lock at all, so it has no claim whatsoever
+			// on what is at that path, and a peer that DID hold it may have
+			// published while we were failing to open the lock file.
+			runtimeMgr.Disown()
+			_, _ = fmt.Fprintf(errW,
+				"dndmode: cannot claim the publish lock, so a concurrent dndmode or --set-password cannot be ruled out: %v.\n"+
+					"Check that %s is writable, then re-run.\n",
+				lockErr, filepath.Dir(runtimeMgr.Path()))
+			return exitRuntimeJSON
+		}
+
+		// The peer Step 5c ruled out may have appeared since. That check ran before
+		// an unbounded WaitForGrants, and two sessions started together BOTH pass
+		// it — neither has written runtime.json yet, so neither can see the other.
+		// The lock serializes them here, but serializing is only half of it: without
+		// this read the second one overwrites the first one's file and installs its
+		// own tap beside it, and whichever exits first deletes the shared file,
+		// leaving the survivor shielding the machine and invisible to every probe
+		// that looks there — --set-password's included, which would then capture a
+		// new code beside a session that keeps answering only to the old one.
+		//
+		// Only a LIVE peer refuses. A dead PID or an unreadable file is deliberately
+		// not fatal: Step 10.5 recovery already removed anything stale, so what can
+		// be left is a peer that published and died inside this window (its file is
+		// ours to replace, and its assertion is CleanupOrphans' problem) or a
+		// corrupt file, which Step 5c also only warns about — and on that one
+		// --set-password fails closed from its own side anyway.
+		if alive, peerPID, perr := runtimepkg.IsLiveInstance(runtimeMgr, liveChecker, log); perr != nil {
+			log.Warn("peer re-check inconclusive", slog.Any("err", perr))
+		} else if alive {
+			// Disown before the return: the file on disk is the PEER's, and the
+			// deferred rs.Cleanup would otherwise delete it and produce exactly the
+			// invisible-live-session this branch exists to prevent.
+			runtimeMgr.Disown()
+			releaseLock()
+			_, _ = fmt.Fprintf(errW,
+				"dndmode: another instance is already active (PID=%d). Send SIGTERM or wait for its exit, then re-run.\n",
+				peerPID)
+			return exitConcurrentInstance
+		}
+
+		// The file may have been rewritten while this process sat in WaitForGrants
+		// or recovery. unlockVerifier is already resolved and cannot be re-derived
+		// without applying the precedence table a second time, so the answer to a
+		// changed config is to refuse rather than to adapt: starting would raise a
+		// shield that answers to the PREVIOUS secret while config.yml names the new
+		// one, and the operator who just ran --set-password has been told it took.
+		// Re-running picks up the new file and costs a few seconds; the other
+		// outcome costs however long it takes to remember the old code.
+		if configFingerprint(cfgPath) != cfgFingerprint {
+			// Same reason as the peer branch above: this process has not written
+			// runtime.json, so anything at that path belongs to someone else.
+			runtimeMgr.Disown()
+			releaseLock()
+			_, _ = fmt.Fprintf(errW,
+				"dndmode: %s changed while dndmode was starting, so the unlock code loaded at startup may no longer be the one in the file. Nothing was locked — re-run.\n",
+				cfgPath)
+			return exitConfigErr
+		}
+
+		// Atomic temp+rename. Records pid + UTC start time + nil PriorFocus
+		// (v1 never restores prior Focus) + the *real* assertion id
+		// from Step 13 for crash recovery + prior_muted for audio restore.
+		if err := runtimeMgr.Write(runtimepkg.Snapshot{
+			PID:          os.Getpid(),
+			StartedAt:    time.Now().UTC(),
+			PriorFocus:   nil,
+			AssertionID:  assertion.ID(),
+			PriorMuted:   priorMuted,
+			FocusEnabled: &effectiveFocus,
+		}); err != nil {
+			// The rename did not land, so the path still holds whatever was there
+			// before — never this process's snapshot. Disown for the same reason as
+			// the two branches above.
+			runtimeMgr.Disown()
+			releaseLock()
+			_, _ = fmt.Fprintf(errW, "dndmode: write runtime.json failed: %v. Inspect %s and re-run.\n", err, runtimeMgr.Path())
+			return exitPlatformErr
+		}
+		// End of the section. From here on this process is discoverable through
+		// runtime.json, which is the handoff the lock existed to make atomic: a
+		// --set-password that arrives now reads a live PID and refuses on its own.
+		releaseLock()
+
+		// --- Step 13.7 (Phase 5): Focus (opt-in) + audio mute lifecycle ---
+		// Focus is opt-in (effectiveFocus). When enabled, Activate is best-effort
+		//: on failure log a warning, do NOT block startup. Push the
+		// Releaser regardless: deactivate must still run on Cleanup even if Activate
+		// failed (idempotent two-layer guard; Run("dndmode-off") on an already-off
+		// Focus is a no-op).
+		if effectiveFocus {
+			if err := focus.Activate(ctx, runner); err != nil {
+				log.Warn("focus activate failed", slog.Any("err", err))
+			}
+			rs.Push(focus.NewReleaser(runner, log))
+		}
+
+		// Audio mute (best-effort): only when a prior state was recorded above
+		// (priorMuted != nil). Push the Releaser REGARDLESS of SetMuted's outcome,
+		// mirroring the focus releaser above (which is pushed even when Activate
+		// fails): SetMuted can apply the mute and STILL return an error — ctx
+		// cancelled right after osascript changed the volume, or a non-zero exit
+		// after a partial effect. If we skipped the push on error, that leaked mute
+		// would survive forever (normal Cleanup deletes runtime.json, so crash
+		// recovery never sees it either). The Releaser is idempotent and its
+		// priorMuted gate makes SetMuted(false) a no-op when audio was genuinely
+		// left unmuted, so pushing after a real failure costs at most one harmless
+		// unmute on Cleanup. Pushed AFTER the focus push so the LIFO unwind releases
+		// audiomute BEFORE focus — both are independent best-effort silencing steps;
+		// what matters is both unwind before the assertion (slot #3) and
+		// runtime-file (slot #5).
+		if priorMuted != nil {
+			if err := muteRunner.SetMuted(ctx, true); err != nil {
+				log.Warn("system audio mute failed", slog.Any("err", err))
+			}
+			rs.Push(audiomute.NewReleaser(muteRunner, *priorMuted, log))
+		}
+
+		// --- Step 14 (Phase 3): cocoa.Init — moved DOWN after permission checks ---
+		// Rationale: TCC permission is binary-identity bound, not
+		// process-state bound; if permission checks fail we exit BEFORE NSApp
+		// setup — cleaner observability (ps / pmset). Also: assertion acquired
+		// above is the cheapest resource — fail fast on IOKit errors before any
+		// AppKit objects exist.
+		// Main-threaded for the same reason Step 15 below is. In watch mode the
+		// shell has already run this, so sync.Once makes it a no-op and the
+		// thread would not matter — but relying on "somebody else already did
+		// it" to satisfy an AppKit invariant is exactly how Step 15 came to
+		// crash. Cheap, idempotent, inline on the one-shot path.
+		var initErr error
+		dispatchMainSync(func() { initErr = cocoa.Init(log) })
+		if err := initErr; err != nil {
+			_, _ = fmt.Fprintf(errW, "dndmode: cocoa init failed: %v. Check Console.app for AppKit asserts and re-run.\n", err)
+			return exitPlatformErr
+		}
+
+		// --- Step 15 (Phase 3): Controller + per-screen overlay windows (P2) ---
+		// Routed through the main thread, ALWAYS. NSWindow may only be
+		// instantiated there, and AppKit does not return an error when it is
+		// not — it raises NSInternalInconsistencyException and takes the
+		// process down.
+		//
+		// As straight-line code this was implicitly satisfied: run() executes
+		// on the main goroutine, which internal/runtimepin locks to thread 0.
+		// Watch mode broke that silently, because the identical statement now
+		// runs on a session goroutine — the body did not change, the thread it
+		// runs on did.
+		//
+		// dispatchMainSync is a no-op detour for the one-shot path:
+		// cocoa.DispatchMain runs fn INLINE when the caller is already on the
+		// main thread, so that path keeps its exact previous behaviour,
+		// including running before [NSApp run] has started.
+		controller := cocoa.NewController(overlayStyle, glassBlur, terminalLanguage, log)
+		var createErr error
+		dispatchMainSync(func() { createErr = controller.CreateWindowsForAllScreens() })
+		if err := createErr; err != nil {
+			// A display was present but its window could not be built — a real
+			// fault. Zero displays is NOT this branch; it returns nil (headless).
+			_, _ = fmt.Fprintf(errW, "dndmode: create overlay windows failed: %v. Reconnect displays and re-run.\n", err)
+			return exitPlatformErr
+		}
+		// Headless start (lid closed without an external monitor, or every display
+		// asleep): nothing to draw on yet, so say so instead of pretending a shield
+		// is up. The lock itself is real — the tap below blocks the keyboard and
+		// trackpad, and the unlock code works blind — and the shield paints itself
+		// as soon as a display comes back.
+		if controller.WindowCount() == 0 {
+			_, _ = fmt.Fprintln(errW,
+				"dndmode: no display attached (lid closed without external monitor?). "+
+					"Input is locked anyway; the overlay appears when a display returns.")
+		}
+		rs.Push(controller) // released 2nd in LIFO (Name == "windows")
+
+		// --- Step 16 (Phase 4 supervisor; swapped before eventtap) ---
+		// supervisor is created BEFORE eventtap.InstallAll (the original Phase 3
+		// Step 16) because InstallAll requires `sup.ExitTrigger()` — the same
+		// sink channel that both the matched-key poller and the
+		// watchdog threshold-hit poller write to on an unlock-code/dead-tap
+		// event. Original Step 17 thus runs as the new Step 16, and eventtap
+		// follows as the new Step 17. Push order onto rs remains LIFO
+		// compatible: controller (windows) pushed at Step 15, eventtap (tap)
+		// pushed at Step 17 — tap is released FIRST in the LIFO unwind, then
+		// windows, then assertion ("dndmode active"), then focus, then runtime.
+		//
+		// stopper.cancel is the Step 3 rootCtx cancel — deliberately NOT the
+		// signal.NotifyContext stop func. Handing `stop` here would unregister
+		// the last SIGINT handler the instant shutdown begins, so a second
+		// Ctrl-C would kill the process mid-cleanup; see the Step 3 rationale.
+		// supervisor.Start drives a goroutine that listens to its own signal.Notify
+		// channel and to ctx.Done — both paths converge on cancel; see Step 3
+		// rationale comment for why this double subscription is safe.
+		stopper := &cancelStopper{cancel: cancel}
+		sup := supervisor.New(log, stopper)
+		sup.Start(ctx)
+
+		// --- Step 17 (Phase 4 eventtap composite; replaces P3 mock-tap) ---
+		// InstallAll wires three subsystems (CGEventTap, dispatch_source_t
+		// watchdog, NSWorkspace wake observer) into a single Releaser that
+		// releases in safe order: tap-disable + g_observed_tap=NULL
+		// (Step 1) → CFRunLoopRemoveSource → CFRelease(source+tap) →
+		// watchdog_stop → wake_remove. The atomic-null guard in
+		// watchdog_darwin.m / wake_darwin.m closes the window
+		// between Step 1 and Step 4-5 (handlers read g_observed_tap first and
+		// no-op on NULL) without violating order.
+		//
+		// `sup.ExitTrigger()` is the sink — matched unlock code OR watchdog
+		// threshold-hit both signal exit through it; supervisor then converges
+		// on stopper.RequestStop → ctx.cancel → cocoa.RunApp returns →
+		// sup.Wait → defer LIFO unwinds.
+		//
+		// unlockVerifier comes straight from Step 5b — `cfg` is not mutated
+		// between there and here, so re-resolving would return an equivalent
+		// verifier and its error branch could never fire. The single resolve is
+		// also the single place the precedence table is applied, which is the
+		// property config.ResolveUnlockCode's doc comment asks callers to
+		// preserve; re-resolving to "get the steps back" is specifically what the
+		// Verifier return type exists to prevent.
+		//
+		// The whole secret goes to InstallAll behind the interface: the poller
+		// matches every tail of the keystroke ring against it, so a 9-step
+		// passphrase, a 1-step legacy combination and a stored salted digest take
+		// the identical path. matcher.UserIntentionalMask pre-masking already
+		// happened on the construction side, inside config.ResolveUnlockCode.
+		tapRel, err := eventtap.InstallAll(unlockVerifier, sup.ExitTrigger(), log)
+		if err != nil {
+			if errors.Is(err, eventtap.ErrTapInstallFailed) {
+				_, _ = fmt.Fprintf(errW,
+					"dndmode: install CGEventTap failed: %v.\n"+
+						"Likely causes: Accessibility revoked between PreFlight and now (re-grant via System Settings → Privacy & Security → Accessibility), or another app holds SecureEventInput (close sudo / password fields).\n", err)
+				return exitPlatformErr
+			}
+			_, _ = fmt.Fprintf(errW, "dndmode: install eventtap subsystems failed: %v\n", err)
+			return exitPlatformErr
+		}
+		rs.Push(tapRel) // released FIRST in LIFO (Name == "eventtap")
+
+		// --- Step 18.0 (Phase 4 — acceptance test hook) ---
+		// Production-safe env-var-guarded panic injection. Used ONLY by
+		// TestAcceptance_LIFE10_PanicRecover subprocess test. Default OFF
+		// переменная не упоминается в README/docs; production пользователи не
+		// увидят. При DNDMODE_TEST_PANIC=1 паника выстреливает после всех Push'ей,
+		// что позволяет валидировать: (a) top-level recover в run() (
+		// mitigation) catch'ит панику; (b) rs.Cleanup() уже отработал к моменту
+		// os.Exit (через LIFO unwind defers); (c) exit code = exitInternalErr (8).
+		if os.Getenv("DNDMODE_TEST_PANIC") == "1" {
+			panic("test panic (DNDMODE_TEST_PANIC=1)")
+		}
+
+		// --- Step 17.9: Arm the per-run auto-disable timer (any overlay_style) ---
+		// When --timer was given (timerDur > 0), start the countdown NOW — the moment
+		// dndmode is fully active — not at launch, so the time the operator spent
+		// granting permissions never eats into the deadline. On expiry armTimer cancels
+		// ctx (via cancel, NOT the NotifyContext stop — see Step 3), driving the SAME clean
+		// shutdown as the unlock code or SIGINT (Step 19's cocoa.RunApp returns nil →
+		// sup.Wait → deferred LIFO Cleanup → exit 0). defer disarms it so an EARLY exit
+		// (unlock code/signal before expiry) leaves no stray AfterFunc goroutine armed.
+		stopTimer := armTimer(timerDur, cancel, log)
+		defer stopTimer()
+
+		// --- Step 18 (Phase 3): Active state banner (P2: AFTER controller create) ---
+		_, _ = fmt.Fprintln(outW, "dndmode: active. press Ctrl-C.")
+
+		// --- Step 19 (Phase 3): Block on [NSApp run] until ctx-cancel or unexpected exit ---
+		// ownsRunLoop is false in watch mode: the shell called cocoa.RunApp once
+		// and is still inside it, and RunApp is single-shot per process (a second
+		// concurrent call panics by contract). There the session simply waits on
+		// the supervisor instead — same trigger sources, same convergence on
+		// stopper.RequestStop, just without taking the run loop it does not own.
+		if ownsRunLoop {
+			if err := cocoa.RunApp(ctx); err != nil {
+				// P2: NSApp.run returned without ctx-cancellation (NSException,
+				// AppKit assertion, [NSApp terminate:] from delegate, etc.).
+				// Request a stop so the supervisor unwinds + Cleanup chain runs.
+				stopper.RequestStop("cocoa exit: " + err.Error())
+			}
+		}
+
+		// Wait for supervisor goroutine to drain.
+		sup.Wait()
+
+		// distinguish a watchdog-triggered abnormal shutdown from a
+		// normal matched-unlock-code exit. The supervisor exit-trigger channel is
+		// shared between the matched-key poller and the watchdog threshold
+		// poller — both send a bare struct{}, so the supervisor cannot tell
+		// the source from the signal alone. The watchdog flips its internal
+		// latch to true BEFORE forwarding through the shared sink (see
+		// watchdog_darwin.go), so by the time sup.Wait() returns the latch
+		// is durably visible via the eventtap.WatchdogTrippedSinceLastStart()
+		// read-only accessor. exitSecureInputConflict (4) is the reused slot
+		// per the design notes: an abnormal platform stop. Without this branch,
+		// watchdog-killed runs collapsed to exit 0 — operators saw a healthy
+		// process and the next LiveChecker found no orphan, masking
+		// the silent-disable failure.: replaced direct
+		// .Load() on an exported atomic.Bool with the accessor function so
+		// external packages cannot Store(true) and forge the exit-code
+		// contract.
+		if eventtap.WatchdogTrippedSinceLastStart() {
+			return exitSecureInputConflict
+		}
+
+		// Return exitOK; defer chain runs (Cleanup LIFO + stdout cleanup banner).
+		// LIFO release order (Phase 5 finalizes):
+		// mock-tap → windows → "dndmode active" → focus → runtime-file.
+		return exitOK
 	}
 
-	// The peer Step 5c ruled out may have appeared since. That check ran before
-	// an unbounded WaitForGrants, and two sessions started together BOTH pass
-	// it — neither has written runtime.json yet, so neither can see the other.
-	// The lock serializes them here, but serializing is only half of it: without
-	// this read the second one overwrites the first one's file and installs its
-	// own tap beside it, and whichever exits first deletes the shared file,
-	// leaving the survivor shielding the machine and invisible to every probe
-	// that looks there — --set-password's included, which would then capture a
-	// new code beside a session that keeps answering only to the old one.
+	// --- Step 12..19 dispatch -------------------------------------------------
+	// One-shot mode is unchanged: the session gets the root ctx, the shell's
+	// own rs (whose deferred Cleanup prints the banner) and ownership of the
+	// run loop, which is exactly the straight-line behaviour it always had.
+	if !*watchFlag {
+		return runSession(ctx, cancel, rs, true)
+	}
+
+	// --- Watch mode -----------------------------------------------------------
+	// The shell is done. From here the process owns the run loop and does
+	// nothing but wait: no shield, no tap, no assertion, no runtime.json, no
+	// Focus. Sessions come and go underneath.
 	//
-	// Only a LIVE peer refuses. A dead PID or an unreadable file is deliberately
-	// not fatal: Step 10.5 recovery already removed anything stale, so what can
-	// be left is a peer that published and died inside this window (its file is
-	// ours to replace, and its assertion is CleanupOrphans' problem) or a
-	// corrupt file, which Step 5c also only warns about — and on that one
-	// --set-password fails closed from its own side anyway.
-	if alive, peerPID, perr := runtimepkg.IsLiveInstance(runtimeMgr, liveChecker, log); perr != nil {
-		log.Warn("peer re-check inconclusive", slog.Any("err", perr))
-	} else if alive {
-		// Disown before the return: the file on disk is the PEER's, and the
-		// deferred rs.Cleanup would otherwise delete it and produce exactly the
-		// invisible-live-session this branch exists to prevent.
-		runtimeMgr.Disown()
-		releaseLock()
-		_, _ = fmt.Fprintf(errW,
-			"dndmode: another instance is already active (PID=%d). Send SIGTERM or wait for its exit, then re-run.\n",
-			peerPID)
-		return exitConcurrentInstance
-	}
-
-	// The file may have been rewritten while this process sat in WaitForGrants
-	// or recovery. unlockVerifier is already resolved and cannot be re-derived
-	// without applying the precedence table a second time, so the answer to a
-	// changed config is to refuse rather than to adapt: starting would raise a
-	// shield that answers to the PREVIOUS secret while config.yml names the new
-	// one, and the operator who just ran --set-password has been told it took.
-	// Re-running picks up the new file and costs a few seconds; the other
-	// outcome costs however long it takes to remember the old code.
-	if configFingerprint(cfgPath) != cfgFingerprint {
-		// Same reason as the peer branch above: this process has not written
-		// runtime.json, so anything at that path belongs to someone else.
-		runtimeMgr.Disown()
-		releaseLock()
-		_, _ = fmt.Fprintf(errW,
-			"dndmode: %s changed while dndmode was starting, so the unlock code loaded at startup may no longer be the one in the file. Nothing was locked — re-run.\n",
-			cfgPath)
-		return exitConfigErr
-	}
-
-	// Atomic temp+rename. Records pid + UTC start time + nil PriorFocus
-	// (v1 never restores prior Focus) + the *real* assertion id
-	// from Step 13 for crash recovery + prior_muted for audio restore.
-	if err := runtimeMgr.Write(runtimepkg.Snapshot{
-		PID:          os.Getpid(),
-		StartedAt:    time.Now().UTC(),
-		PriorFocus:   nil,
-		AssertionID:  assertion.ID(),
-		PriorMuted:   priorMuted,
-		FocusEnabled: &effectiveFocus,
-	}); err != nil {
-		// The rename did not land, so the path still holds whatever was there
-		// before — never this process's snapshot. Disown for the same reason as
-		// the two branches above.
-		runtimeMgr.Disown()
-		releaseLock()
-		_, _ = fmt.Fprintf(errW, "dndmode: write runtime.json failed: %v. Inspect %s and re-run.\n", err, runtimeMgr.Path())
-		return exitPlatformErr
-	}
-	// End of the section. From here on this process is discoverable through
-	// runtime.json, which is the handoff the lock existed to make atomic: a
-	// --set-password that arrives now reads a live PID and refuses on its own.
-	releaseLock()
-
-	// --- Step 13.7 (Phase 5): Focus (opt-in) + audio mute lifecycle ---
-	// Focus is opt-in (effectiveFocus). When enabled, Activate is best-effort
-	//: on failure log a warning, do NOT block startup. Push the
-	// Releaser regardless: deactivate must still run on Cleanup even if Activate
-	// failed (idempotent two-layer guard; Run("dndmode-off") on an already-off
-	// Focus is a no-op).
-	if effectiveFocus {
-		if err := focus.Activate(ctx, runner); err != nil {
-			log.Warn("focus activate failed", slog.Any("err", err))
-		}
-		rs.Push(focus.NewReleaser(runner, log))
-	}
-
-	// Audio mute (best-effort): only when a prior state was recorded above
-	// (priorMuted != nil). Push the Releaser REGARDLESS of SetMuted's outcome,
-	// mirroring the focus releaser above (which is pushed even when Activate
-	// fails): SetMuted can apply the mute and STILL return an error — ctx
-	// cancelled right after osascript changed the volume, or a non-zero exit
-	// after a partial effect. If we skipped the push on error, that leaked mute
-	// would survive forever (normal Cleanup deletes runtime.json, so crash
-	// recovery never sees it either). The Releaser is idempotent and its
-	// priorMuted gate makes SetMuted(false) a no-op when audio was genuinely
-	// left unmuted, so pushing after a real failure costs at most one harmless
-	// unmute on Cleanup. Pushed AFTER the focus push so the LIFO unwind releases
-	// audiomute BEFORE focus — both are independent best-effort silencing steps;
-	// what matters is both unwind before the assertion (slot #3) and
-	// runtime-file (slot #5).
-	if priorMuted != nil {
-		if err := muteRunner.SetMuted(ctx, true); err != nil {
-			log.Warn("system audio mute failed", slog.Any("err", err))
-		}
-		rs.Push(audiomute.NewReleaser(muteRunner, *priorMuted, log))
-	}
-
-	// --- Step 14 (Phase 3): cocoa.Init — moved DOWN after permission checks ---
-	// Rationale: TCC permission is binary-identity bound, not
-	// process-state bound; if permission checks fail we exit BEFORE NSApp
-	// setup — cleaner observability (ps / pmset). Also: assertion acquired
-	// above is the cheapest resource — fail fast on IOKit errors before any
-	// AppKit objects exist.
+	// cocoa.Init has to happen HERE rather than inside the session (where it
+	// still runs, harmlessly — it is sync.Once-guarded), because the run loop
+	// must exist before the first press can be delivered.
 	if err := cocoa.Init(log); err != nil {
 		_, _ = fmt.Fprintf(errW, "dndmode: cocoa init failed: %v. Check Console.app for AppKit asserts and re-run.\n", err)
 		return exitPlatformErr
 	}
 
-	// --- Step 15 (Phase 3): Controller + per-screen overlay windows (P2) ---
-	controller := cocoa.NewController(overlayStyle, glassBlur, terminalLanguage, log)
-	if err := controller.CreateWindowsForAllScreens(); err != nil {
-		// A display was present but its window could not be built — a real
-		// fault. Zero displays is NOT this branch; it returns nil (headless).
-		_, _ = fmt.Fprintf(errW, "dndmode: create overlay windows failed: %v. Reconnect displays and re-run.\n", err)
-		return exitPlatformErr
-	}
-	// Headless start (lid closed without an external monitor, or every display
-	// asleep): nothing to draw on yet, so say so instead of pretending a shield
-	// is up. The lock itself is real — the tap below blocks the keyboard and
-	// trackpad, and the unlock code works blind — and the shield paints itself
-	// as soon as a display comes back.
-	if controller.WindowCount() == 0 {
-		_, _ = fmt.Fprintln(errW,
-			"dndmode: no display attached (lid closed without external monitor?). "+
-				"Input is locked anyway; the overlay appears when a display returns.")
-	}
-	rs.Push(controller) // released 2nd in LIFO (Name == "windows")
+	// Carbon delivers hot-key presses only to a process that is at least
+	// Accessory. Under the Prohibited policy cocoa.Init establishes,
+	// RegisterEventHotKey still returns noErr and the combination is really
+	// claimed — it is the DELIVERY that never happens, which is the worst
+	// possible shape for this bug: everything looks configured and nothing
+	// fires. Raising the at-rest policy here is what makes watch mode work at
+	// all, and raising it as a floor (rather than once) is what keeps it
+	// working after the first session, since every overlay teardown returns to
+	// that value.
+	//
+	// Accessory costs nothing that mattered: no Dock icon, no Cmd+Tab entry, no
+	// menu bar. One-shot runs are untouched and stay Prohibited at rest.
+	cocoa.SetAtRestPolicyAccessory()
 
-	// --- Step 16 (Phase 4 supervisor; swapped before eventtap) ---
-	// supervisor is created BEFORE eventtap.InstallAll (the original Phase 3
-	// Step 16) because InstallAll requires `sup.ExitTrigger()` — the same
-	// sink channel that both the matched-key poller and the
-	// watchdog threshold-hit poller write to on an unlock-code/dead-tap
-	// event. Original Step 17 thus runs as the new Step 16, and eventtap
-	// follows as the new Step 17. Push order onto rs remains LIFO
-	// compatible: controller (windows) pushed at Step 15, eventtap (tap)
-	// pushed at Step 17 — tap is released FIRST in the LIFO unwind, then
-	// windows, then assertion ("dndmode active"), then focus, then runtime.
-	//
-	// stopper.cancel is the Step 3 rootCtx cancel — deliberately NOT the
-	// signal.NotifyContext stop func. Handing `stop` here would unregister
-	// the last SIGINT handler the instant shutdown begins, so a second
-	// Ctrl-C would kill the process mid-cleanup; see the Step 3 rationale.
-	// supervisor.Start drives a goroutine that listens to its own signal.Notify
-	// channel and to ctx.Done — both paths converge on cancel; see Step 3
-	// rationale comment for why this double subscription is safe.
-	stopper := &cancelStopper{cancel: cancel}
-	sup := supervisor.New(log, stopper)
-	sup.Start(ctx)
+	// Watch-mode lifecycle output bypasses the debug gate deliberately — see
+	// the banner below for why. Everything the SESSIONS print still goes
+	// through outW/errW and stays gated.
+	watchOutW, watchErrW := io.Writer(os.Stdout), io.Writer(os.Stderr)
 
-	// --- Step 17 (Phase 4 eventtap composite; replaces P3 mock-tap) ---
-	// InstallAll wires three subsystems (CGEventTap, dispatch_source_t
-	// watchdog, NSWorkspace wake observer) into a single Releaser that
-	// releases in safe order: tap-disable + g_observed_tap=NULL
-	// (Step 1) → CFRunLoopRemoveSource → CFRelease(source+tap) →
-	// watchdog_stop → wake_remove. The atomic-null guard in
-	// watchdog_darwin.m / wake_darwin.m closes the window
-	// between Step 1 and Step 4-5 (handlers read g_observed_tap first and
-	// no-op on NULL) without violating order.
-	//
-	// `sup.ExitTrigger()` is the sink — matched unlock code OR watchdog
-	// threshold-hit both signal exit through it; supervisor then converges
-	// on stopper.RequestStop → ctx.cancel → cocoa.RunApp returns →
-	// sup.Wait → defer LIFO unwinds.
-	//
-	// unlockVerifier comes straight from Step 5b — `cfg` is not mutated
-	// between there and here, so re-resolving would return an equivalent
-	// verifier and its error branch could never fire. The single resolve is
-	// also the single place the precedence table is applied, which is the
-	// property config.ResolveUnlockCode's doc comment asks callers to
-	// preserve; re-resolving to "get the steps back" is specifically what the
-	// Verifier return type exists to prevent.
-	//
-	// The whole secret goes to InstallAll behind the interface: the poller
-	// matches every tail of the keystroke ring against it, so a 9-step
-	// passphrase, a 1-step legacy combination and a stored salted digest take
-	// the identical path. matcher.UserIntentionalMask pre-masking already
-	// happened on the construction side, inside config.ResolveUnlockCode.
-	tapRel, err := eventtap.InstallAll(unlockVerifier, sup.ExitTrigger(), log)
+	// The label comes from the user's own config string rather than from
+	// anything reconstructed out of the parsed Spec, so what is printed is what
+	// they wrote.
+	comboLabel := config.DefaultActivateHotkey
+	if cfg.ActivateHotkey != nil {
+		comboLabel = *cfg.ActivateHotkey
+	}
+
+	// activateSpec was resolved and validated back at Step 5b.3; all that is
+	// left is to claim it.
+	presses, hotkeyReg, err := globalhotkey.Register(activateSpec, log)
 	if err != nil {
-		if errors.Is(err, eventtap.ErrTapInstallFailed) {
-			_, _ = fmt.Fprintf(errW,
-				"dndmode: install CGEventTap failed: %v.\n"+
-					"Likely causes: Accessibility revoked between PreFlight and now (re-grant via System Settings → Privacy & Security → Accessibility), or another app holds SecureEventInput (close sudo / password fields).\n", err)
-			return exitPlatformErr
+		if errors.Is(err, globalhotkey.ErrComboTaken) {
+			_, _ = fmt.Fprintf(watchErrW,
+				"dndmode: %s is already claimed by macOS or another app (Raycast, Alfred, Karabiner…). "+
+					"Pick a different activate_hotkey in %s.\n", comboLabel, cfgPath)
+			return exitConfigErr
 		}
-		_, _ = fmt.Fprintf(errW, "dndmode: install eventtap subsystems failed: %v\n", err)
+		_, _ = fmt.Fprintf(watchErrW, "dndmode: cannot register %s: %v\n", comboLabel, err)
 		return exitPlatformErr
 	}
-	rs.Push(tapRel) // released FIRST in LIFO (Name == "eventtap")
+	rs.Push(hotkeyReg) // shell-level LIFO — released once, at process exit
 
-	// --- Step 18.0 (Phase 4 — acceptance test hook) ---
-	// Production-safe env-var-guarded panic injection. Used ONLY by
-	// TestAcceptance_LIFE10_PanicRecover subprocess test. Default OFF
-	// переменная не упоминается в README/docs; production пользователи не
-	// увидят. При DNDMODE_TEST_PANIC=1 паника выстреливает после всех Push'ей,
-	// что позволяет валидировать: (a) top-level recover в run() (
-	// mitigation) catch'ит панику; (b) rs.Cleanup() уже отработал к моменту
-	// os.Exit (через LIFO unwind defers); (c) exit code = exitInternalErr (8).
-	if os.Getenv("DNDMODE_TEST_PANIC") == "1" {
-		panic("test panic (DNDMODE_TEST_PANIC=1)")
+	// Written UNGATED, unlike every other banner in this program. The gate
+	// exists so a terminal left visible under overlay_style none/glass cannot
+	// leak hints about the unlock secret; these lines carry the ACTIVATION
+	// combination, which is public by construction, and a watch mode that says
+	// nothing for hours is indistinguishable from one that died.
+	_, _ = fmt.Fprintf(watchOutW,
+		"dndmode: watching. press %s to lock, Ctrl-C to quit.\n", comboLabel)
+
+	// Sessions run on their own goroutine because the main one is about to be
+	// consumed by [NSApp run] for the rest of the process's life.
+	var sessions sync.WaitGroup
+	sessions.Go(func() {
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-presses:
+				// select picks uniformly among ready cases, so a press that
+				// arrives in the same instant as the cancellation can win.
+				// Starting a session on an already-cancelled ctx would raise a
+				// shield the very next statement tears down.
+				if ctx.Err() != nil {
+					return
+				}
+				runOneWatchSession(ctx, watchSessionDeps{
+					loader:         loader,
+					cfgPath:        cfgPath,
+					cfg:            &cfg,
+					unlockVerifier: &unlockVerifier,
+					cfgFingerprint: &cfgFingerprint,
+					log:            log,
+					outW:           watchOutW,
+					errW:           watchErrW,
+					session:        runSession,
+					comboLabel:     comboLabel,
+				})
+			}
+		}
+	})
+
+	// Blocks until Ctrl-C / SIGTERM cancels ctx. A session that is up at that
+	// moment is torn down by the same cancellation: its ctx is a CHILD of this
+	// one, so the shield never outlives the process.
+	runErr := cocoa.RunApp(ctx)
+
+	// Wait for a session in flight to finish unwinding BEFORE returning, and
+	// wait on every path out — including the error one.
+	//
+	// Without this the process exits while the session goroutine is still
+	// inside its LIFO Cleanup, and the difference is not academic. The shield,
+	// the tap and the IOPM assertion die with the process because the OS owns
+	// them; runtime.json, Focus and the audio mute do NOT. A SIGTERM landing
+	// mid-session would leave a stale runtime.json for the next launch to
+	// mistake for a live peer, Do Not Disturb still on, and the user's audio
+	// still muted — none of which the one-shot path can produce, because there
+	// the same teardown runs inline before run() returns.
+	//
+	// The wait is unbounded on purpose. Every step in that chain is a local
+	// release with no network and no user input, cancellation has already been
+	// delivered through the session's child ctx, and a timeout here would
+	// reintroduce exactly the half-cleaned exit it is meant to prevent.
+	sessions.Wait()
+
+	if runErr != nil {
+		_, _ = fmt.Fprintf(watchErrW, "dndmode: run loop exited unexpectedly: %v\n", runErr)
+		return exitPlatformErr
 	}
-
-	// --- Step 17.9: Arm the per-run auto-disable timer (any overlay_style) ---
-	// When --timer was given (timerDur > 0), start the countdown NOW — the moment
-	// dndmode is fully active — not at launch, so the time the operator spent
-	// granting permissions never eats into the deadline. On expiry armTimer cancels
-	// ctx (via cancel, NOT the NotifyContext stop — see Step 3), driving the SAME clean
-	// shutdown as the unlock code or SIGINT (Step 19's cocoa.RunApp returns nil →
-	// sup.Wait → deferred LIFO Cleanup → exit 0). defer disarms it so an EARLY exit
-	// (unlock code/signal before expiry) leaves no stray AfterFunc goroutine armed.
-	stopTimer := armTimer(timerDur, cancel, log)
-	defer stopTimer()
-
-	// --- Step 18 (Phase 3): Active state banner (P2: AFTER controller create) ---
-	_, _ = fmt.Fprintln(outW, "dndmode: active. press Ctrl-C.")
-
-	// --- Step 19 (Phase 3): Block on [NSApp run] until ctx-cancel or unexpected exit ---
-	if err := cocoa.RunApp(ctx); err != nil {
-		// P2: NSApp.run returned without ctx-cancellation (NSException,
-		// AppKit assertion, [NSApp terminate:] from delegate, etc.).
-		// Request a stop so the supervisor unwinds + Cleanup chain runs.
-		stopper.RequestStop("cocoa exit: " + err.Error())
-	}
-
-	// Wait for supervisor goroutine to drain.
-	sup.Wait()
-
-	// distinguish a watchdog-triggered abnormal shutdown from a
-	// normal matched-unlock-code exit. The supervisor exit-trigger channel is
-	// shared between the matched-key poller and the watchdog threshold
-	// poller — both send a bare struct{}, so the supervisor cannot tell
-	// the source from the signal alone. The watchdog flips its internal
-	// latch to true BEFORE forwarding through the shared sink (see
-	// watchdog_darwin.go), so by the time sup.Wait() returns the latch
-	// is durably visible via the eventtap.WatchdogTrippedSinceLastStart()
-	// read-only accessor. exitSecureInputConflict (4) is the reused slot
-	// per the design notes: an abnormal platform stop. Without this branch,
-	// watchdog-killed runs collapsed to exit 0 — operators saw a healthy
-	// process and the next LiveChecker found no orphan, masking
-	// the silent-disable failure.: replaced direct
-	// .Load() on an exported atomic.Bool with the accessor function so
-	// external packages cannot Store(true) and forge the exit-code
-	// contract.
-	if eventtap.WatchdogTrippedSinceLastStart() {
-		return exitSecureInputConflict
-	}
-
-	// Return exitOK; defer chain runs (Cleanup LIFO + stdout cleanup banner).
-	// LIFO release order (Phase 5 finalizes):
-	// mock-tap → windows → "dndmode active" → focus → runtime-file.
 	return exitOK
+}
+
+// dispatchMainSync runs fn on the OS main thread and waits for it to finish.
+//
+// cocoa.DispatchMain is fire-and-forget when called off the main thread, which
+// is not enough for anything whose RESULT is needed immediately — creating the
+// overlay windows, for instance, where the next statement inspects the error
+// and the window count. The channel turns it into a rendezvous.
+//
+// On the main thread DispatchMain runs fn inline, so `done` is already closed
+// by the time it returns and the receive does not block. That is what lets the
+// one-shot path use this without depending on a run loop that has not started
+// yet: off-thread delivery needs the main queue to be serviced, but the inline
+// path needs nothing at all.
+func dispatchMainSync(fn func()) {
+	done := make(chan struct{})
+	cocoa.DispatchMain(func() {
+		defer close(done)
+		fn()
+	})
+	<-done
+}
+
+// watchSessionDeps carries what one watch activation needs. It is a struct
+// rather than nine parameters because three of its fields are POINTERS into
+// the shell's state, and that is the part worth making obvious: the session
+// closure reads cfg, unlockVerifier and cfgFingerprint from the shell scope,
+// so refreshing them here is what makes a re-read take effect at all.
+type watchSessionDeps struct {
+	loader         *config.Loader
+	cfgPath        string
+	cfg            *config.Config
+	unlockVerifier *matcher.Verifier
+	cfgFingerprint *[32]byte
+	log            *slog.Logger
+	outW           io.Writer
+	errW           io.Writer
+	session        func(context.Context, context.CancelFunc, *state.RestoreState, bool) int
+	comboLabel     string
+	// beep is injectable so tests can exercise the failure path without
+	// making the machine chirp. Nil means cocoa.Beep — production never sets
+	// it, which keeps the real path one line away from the doc comment on
+	// fail() rather than behind a wiring indirection.
+	beep func()
+}
+
+// runOneWatchSession raises one shield and returns when it comes down.
+//
+// It never propagates a failure as a process exit: a session that cannot
+// start leaves watch mode waiting for the next press. That choice is what
+// makes the noise below mandatory rather than decorative — the user pressed
+// the combination and is about to walk away from a machine that did not lock.
+func runOneWatchSession(parent context.Context, d watchSessionDeps) {
+	// Re-read the config on EVERY activation. This is a correctness
+	// requirement, not a convenience: `dndmode --set-password` run from another
+	// terminal while watch mode waits would otherwise leave the in-memory
+	// verifier pointing at the code the user just replaced — and the shield
+	// would then answer only to a secret they have been told is gone. That is
+	// the same fail-deadly the Step 13.3 fingerprint check exists to prevent,
+	// arriving by a different route.
+	//
+	// It is also not "hot reload" in the sense config.Loader disclaims: there
+	// is no watcher and no subscription, and Load still happens exactly once
+	// per session. What changed is the number of sessions.
+	//
+	// Only the SECRET is refreshed. Look and behaviour (overlay style, mute,
+	// focus, timer) stay as resolved at startup, because those were merged with
+	// command-line flags whose precedence cannot be re-derived from the file
+	// alone — and getting them stale costs a wrong colour, not a lockout.
+	if cfg, raw, _, err := d.loader.LoadWithSource(); err != nil {
+		d.fail("config is no longer readable: %v", err)
+		return
+	} else if verifier, _, _, rerr := config.ResolveUnlockCode(&cfg); rerr != nil {
+		d.fail("config no longer resolves to a usable unlock code: %v", rerr)
+		return
+	} else {
+		d.cfg.UnlockCode = cfg.UnlockCode
+		d.cfg.Hotkey = cfg.Hotkey
+		d.cfg.UnlockSalt = cfg.UnlockSalt
+		d.cfg.UnlockHash = cfg.UnlockHash
+		*d.unlockVerifier = verifier
+		*d.cfgFingerprint = configFingerprintOf(raw)
+	}
+
+	// A child of the watch context and a FRESH RestoreState. Both are
+	// per-session by necessity: cancelling this ctx must end the shield without
+	// ending the process, and RestoreState.Cleanup is sync.Once-guarded, so
+	// reusing the shell's would quietly decline to release anything the second
+	// time round.
+	sessCtx, sessCancel := context.WithCancel(parent)
+	defer sessCancel()
+	sessRS := state.NewRestoreState(d.log)
+
+	code := d.session(sessCtx, sessCancel, sessRS, false /*ownsRunLoop*/)
+
+	// The session's own LIFO unwind — the shell's deferred Cleanup covers only
+	// the shell's stack, and would not run until process exit in any case.
+	if err := sessRS.Cleanup(); err != nil {
+		d.log.Error("session cleanup reported errors", slog.Any("err", err))
+	}
+
+	if code != exitOK {
+		d.fail("session ended with exit code %d", code)
+		return
+	}
+	if parent.Err() == nil {
+		_, _ = fmt.Fprintf(d.outW, "dndmode: watching. press %s to lock, Ctrl-C to quit.\n", d.comboLabel)
+	}
+}
+
+// fail reports an activation that did not produce a shield, loudly and on two
+// channels.
+//
+// The sound is the point. The printed line goes to a terminal that may be
+// behind other windows, and the failure mode being guarded against is a user
+// who pressed the combination, assumed the machine locked, and left. NSBeep is
+// safe to use here for the same reason the message may name the combination:
+// nothing about activation is secret. Nothing on the UNLOCK path may make a
+// sound, and does not.
+func (d watchSessionDeps) fail(format string, args ...any) {
+	_, _ = fmt.Fprintf(d.errW, "dndmode: NOT LOCKED — "+format+"\n", args...)
+	_, _ = fmt.Fprintf(d.errW, "dndmode: still watching. press %s to try again.\n", d.comboLabel)
+	if d.beep != nil {
+		d.beep()
+		return
+	}
+	cocoa.Beep()
 }
 
 // runCaffeinateOnly is the overlay_style=none execution path: dndmode degrades

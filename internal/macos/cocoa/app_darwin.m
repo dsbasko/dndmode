@@ -91,6 +91,12 @@ void cocoa_stop_app(int subtype) {
 //
 // Mutates NSApp → MUST run on the main thread (AppKit invariant). The Controller
 // invokes it only from the main goroutine, immediately before the cursor hide.
+// g_at_rest_policy is the activation policy the process returns to when no
+// overlay is up. Prohibited by default (the silent at-rest state cocoa_init
+// establishes); raised to Accessory by cocoa_set_at_rest_policy_accessory when
+// watch mode needs Carbon hot-key delivery. Read only from the main thread.
+static int g_at_rest_policy = (int)NSApplicationActivationPolicyProhibited;
+
 void cocoa_app_foreground(void) {
     [NSApp setActivationPolicy:NSApplicationActivationPolicyAccessory];
     [NSApp activateIgnoringOtherApps:YES];
@@ -103,5 +109,31 @@ void cocoa_app_foreground(void) {
 // invokes it only from the main goroutine (inside the Release dispatch closure),
 // immediately after the cursor is restored.
 void cocoa_app_background(void) {
-    [NSApp setActivationPolicy:NSApplicationActivationPolicyProhibited];
+    [NSApp setActivationPolicy:(NSApplicationActivationPolicy)g_at_rest_policy];
+}
+
+// cocoa_set_at_rest_policy_accessory raises the AT-REST policy from Prohibited
+// to Accessory, for the lifetime of the process.
+//
+// It exists for watch mode, and the reason is measured rather than assumed:
+// Carbon's RegisterEventHotKey REGISTERS successfully under Prohibited and
+// returns noErr, but the press is never DELIVERED to the handler. Accessory
+// delivers. Since a Prohibited process is never eligible to be the active
+// application, it never receives the hot-key event the way an Accessory one
+// does.
+//
+// Accessory keeps everything the silent at-rest state was chosen for: no Dock
+// icon, no Cmd+Tab entry, no menu bar of our own. What it gives up is only the
+// guarantee of never being activatable at all.
+//
+// This has to change the AT-REST value rather than just calling
+// setActivationPolicy: once, because cocoa_app_background runs on every
+// overlay teardown. Without the shared floor the first session would end by
+// dropping the process back to Prohibited, and watch mode would go deaf after
+// exactly one activation — a bug that only shows up on the SECOND press.
+//
+// Mutates NSApp → MUST run on the main thread (AppKit invariant).
+void cocoa_set_at_rest_policy_accessory(void) {
+    g_at_rest_policy = (int)NSApplicationActivationPolicyAccessory;
+    [NSApp setActivationPolicy:NSApplicationActivationPolicyAccessory];
 }

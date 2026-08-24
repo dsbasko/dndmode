@@ -20,6 +20,7 @@ watch it, you end it.
 ```bash
 dndmode            # lock now, run until the unlock code is typed
 dndmode --timer 1h # lock now, auto-unlock after an hour
+dndmode --watch    # don't lock yet - wait for a hotkey, like Ctrl+Cmd+Q does
 ```
 
 **Quick install** via the personal Homebrew tap (other methods and the permission
@@ -295,7 +296,53 @@ when omitted.
 | `--focus` | `true` \| `false` | config | Toggle Do Not Disturb for this run. |
 | `--timer` | Go duration (`30m`, `1h30m`, `90s`) | off | Auto-unlock after the duration, then exit `0`. |
 | `--debug` | (boolean) | off | Un-silence banners, diagnostics, and logs. |
-| `--set-password` | (boolean) | off | Not a session flag. Captures a new unlock code from real keystrokes and rewrites the config as a salted hash, then exits - see [Hashing the code](#hashing-the-code-with---set-password). Refuses to be combined with any of the four flags above. |
+| `--watch` | (boolean) | off | Don't lock yet. Wait for `activate_hotkey` and raise a session on every press - see [Watch mode](#watch-mode). |
+| `--set-password` | (boolean) | off | Not a session flag. Captures a new unlock code from real keystrokes and rewrites the config as a salted hash, then exits - see [Hashing the code](#hashing-the-code-with---set-password). Refuses to be combined with any of the five flags above. |
+
+### Watch mode
+
+`dndmode --watch` inverts the trigger. Instead of locking immediately it registers
+one combination - `activate_hotkey`, default `Ctrl+Option+Cmd+D` - and waits. Press
+it and the shield goes up exactly as if you had run `dndmode`; type your unlock code
+and it comes down and returns to waiting. It is the shape `Ctrl+Cmd+Q` has, applied
+to a lock that does not suspend your work.
+
+```bash
+dndmode --watch                     # wait, using activate_hotkey from the config
+dndmode --watch --style matrix      # every session this run uses the matrix overlay
+dndmode --watch --timer 30m         # every session auto-unlocks after 30 minutes
+```
+
+**While it waits, dndmode holds nothing** - no shield, no input tap, no power
+assertion, no `runtime.json`, no Focus. The Mac sleeps and behaves normally. It does
+not even need Accessibility to wait: the combination is matched by macOS itself
+(Carbon `RegisterEventHotKey`), so dndmode never observes a keystroke that is not
+its own trigger. **It is not a keylogger, and it cannot become one while idle.**
+Accessibility is still required for the sessions that follow, so `--watch` checks
+for it at startup rather than at the first press.
+
+Still a foreground process. No daemon, no launchd job, no menu-bar icon - the
+terminal that launched it must stay open, and `Ctrl-C` there ends it. (`Ctrl-C`
+cannot be pressed while a session is up, because the tap swallows it; that is the
+unlock code's job.)
+
+**The activation combination is not a secret.** It is printed at startup and
+documented here, and anyone nearby can use it to raise the shield on your unattended
+machine - the same exposure `Ctrl+Cmd+Q` already carries. What they cannot do is
+lower it: that still needs your unlock code. dndmode refuses to start if
+`activate_hotkey` is the same as the unlock code, since the published combination
+would then also lower the shield.
+
+**If an activation fails**, dndmode says so on the terminal *and* beeps, then keeps
+waiting. That noise is deliberate: the dangerous outcome is not a failed lock but a
+user who pressed the combination, assumed it worked, and walked away. Failures are
+rare because almost everything is checked at startup - the remaining causes are a
+config edited into an unusable state, another instance starting, or an app holding
+Secure Event Input (a password field).
+
+If macOS or another app (Raycast, Alfred, Karabiner) already owns the combination,
+`--watch` says so at startup instead of silently never firing. Changing
+`activate_hotkey` takes effect on the next `--watch` start.
 
 A few notes on behavior:
 
@@ -1150,8 +1197,12 @@ internal/supervisor/  single-point shutdown fan-in
   a session that finds audio already muted leaves it muted.
 - **`glass` bleeds through.** It shows a blurred desktop on purpose. Use `black`,
   `matrix`, or `terminal` if you need the desktop fully hidden.
-- **Foreground only.** No daemon or launchd mode. The terminal that launched dndmode
-  must stay open.
+- **Foreground only.** No daemon, no launchd job, no menu-bar icon. The terminal that
+  launched dndmode must stay open - including in [watch mode](#watch-mode), which
+  waits for a hotkey but is still an ordinary process you can see and `Ctrl-C`.
+- **Changing `activate_hotkey` needs a restart.** Watch mode re-reads the unlock
+  secret before every session, but the activation combination is claimed from macOS
+  once, at startup.
 - **Does not defeat clamshell sleep.** dndmode starts and locks input with the lid
   closed - with no display attached it comes up headless, says so on stderr, and
   paints the overlay the moment a display returns (lid opened, monitor plugged in).

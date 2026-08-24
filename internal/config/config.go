@@ -45,6 +45,18 @@ const (
 	// never opened the file still gets a warning under --debug.
 	DefaultUnlockCode = DefaultHotkey
 
+	// DefaultActivateHotkey is the combination `dndmode --watch` waits for
+	// when activate_hotkey is absent. It mirrors the shape of
+	// DefaultUnlockCode on purpose — same three modifiers, different letter
+	// (D for dndmode) — so the two are easy to tell apart in muscle memory
+	// while neither collides with a macOS system shortcut.
+	//
+	// Unlike the unlock code this value is NOT a secret. It is printed at
+	// startup, documented in the README, and a bystander who presses it can
+	// raise the shield on an unattended machine — exactly the exposure
+	// Ctrl+Cmd+Q already carries. What they cannot do is lower it.
+	DefaultActivateHotkey = "Ctrl+Option+Cmd+D"
+
 	// MinUnlockSteps is the shortest MULTI-step unlock code accepted. Codes of
 	// 2-3 steps are rejected outright: the sliding-window match makes every
 	// keypress a fresh attempt (de Bruijn-sequence attack), so a 3-step code
@@ -174,6 +186,33 @@ type Config struct {
 	// and length-checks both halves, and its errors name the KEY without ever
 	// echoing the value.
 	UnlockHash string `yaml:"unlock_hash"`
+	// ActivateHotkey is the combination `--watch` waits for while idle: a
+	// SINGLE step ("Ctrl+Option+Cmd+D"), never a sequence, because Carbon's
+	// RegisterEventHotKey matches "modifiers + one key" and nothing else.
+	//
+	// Three states, and the empty one is not the same as absent: an ABSENT
+	// key means DefaultActivateHotkey (so `brew upgrade` gives existing
+	// configs a working watch mode), while an explicitly EMPTY value means
+	// "watch mode is off" and makes --watch refuse to start. That asymmetry
+	// is what gives a user a way to disable the mode without deleting the
+	// documentation around it.
+	//
+	// "Empty" means the empty STRING — `activate_hotkey: ""`. A bare
+	// `activate_hotkey:` with nothing after it is YAML null, which unmarshals
+	// to a nil pointer and is therefore indistinguishable from an absent key,
+	// i.e. it selects the default. The template says so at the line it
+	// suggests; there is no way to tell the two apart at this layer, and
+	// inventing one would mean rejecting a config shape YAML considers
+	// perfectly ordinary.
+	//
+	// Ignored entirely without --watch. Like OverlayStyle the VALUE is not
+	// validated by yaml.Strict() (which only guards unknown KEYS) —
+	// ResolveActivateHotkey is the real gate.
+	//
+	// A *string for the same reason Mute is a *bool: a plain string cannot
+	// tell an absent key from an empty one, and here those two mean opposite
+	// things (default vs. disabled).
+	ActivateHotkey *string `yaml:"activate_hotkey"`
 	// OverlayStyle selects the overlay look. Absent/empty => "black" (v1
 	// default, via NormalizeOverlayStyle); the only valid non-empty values are
 	// "black", "matrix", "terminal", "dvd", "glass" and "none" ("none" = caffeinate-only
@@ -299,6 +338,92 @@ func ValidateUnlockCode(steps []hotkey.Spec) error {
 	default:
 		return nil
 	}
+}
+
+// Sentinel errors for the activation combination. Unlike every diagnostic
+// around the unlock secret, these MAY be wrapped with the offending value by
+// callers: activate_hotkey is public by construction (see
+// DefaultActivateHotkey), so echoing it costs nothing and saves the user a
+// trip to the config file.
+var (
+	// ErrActivateHotkeyDisabled reports an explicitly empty activate_hotkey:
+	// the user turned watch mode off. Distinct from a parse failure because
+	// it is a deliberate configuration, not a mistake — --watch refuses to
+	// start and says so plainly, while a plain `dndmode` run is unaffected.
+	ErrActivateHotkeyDisabled = errors.New("activate_hotkey is empty: watch mode is disabled")
+
+	// ErrActivateHotkeyCollision reports that the activation combination
+	// would ALSO satisfy the unlock secret. That is a hole rather than a
+	// quirk: the combination that raises the shield is published in the
+	// README, so a shield raised by it could be lowered by anyone who read
+	// the docs.
+	ErrActivateHotkeyCollision = errors.New("activate_hotkey is identical to the unlock code: the combination that raises the shield would also lower it")
+)
+
+// ResolveActivateHotkey turns the activate_hotkey key into the single step
+// `--watch` registers with Carbon, applying the absent/empty asymmetry
+// described on Config.ActivateHotkey: absent => DefaultActivateHotkey,
+// explicitly empty => ErrActivateHotkeyDisabled.
+//
+// unlock is the verifier ResolveUnlockCode already produced, and passing it
+// is what makes the collision check possible at all. The check runs through
+// Verifier.Match rather than by comparing steps, which matters twice over.
+// It works for BOTH storable forms without asking which one is in play —
+// the project rule is that nothing below ResolveUnlockCode branches on the
+// shape of the secret — and for the hashed form it detects the collision
+// without the hash ever being reversed: a one-step tail built from the
+// PUBLIC activation combination either hashes to the stored digest or does
+// not.
+//
+// In practice a hashed secret cannot collide, since --set-password enforces
+// MinUnlockSteps. The check is kept anyway because that is a property of a
+// sibling code path rather than of this one, and a fail-deadly guard that
+// costs one Match call should not depend on a distant invariant holding.
+func ResolveActivateHotkey(cfg *Config, unlock matcher.Verifier) (hotkey.Spec, error) {
+	raw := DefaultActivateHotkey
+	if cfg.ActivateHotkey != nil {
+		raw = *cfg.ActivateHotkey
+	}
+	if strings.TrimSpace(raw) == "" {
+		return hotkey.Spec{}, ErrActivateHotkeyDisabled
+	}
+
+	// Parse, not ParseStep, and the distinction is load-bearing: Parse is the
+	// single-combination grammar and it already REFUSES a modifier-less
+	// combination. That refusal is what keeps a bare `d` — which would raise
+	// the shield on every press of that key in every application — out of
+	// watch mode, so this function deliberately does not re-check it rather
+	// than carry an unreachable second opinion. The dependency is pinned by
+	// TestParse_RejectsModifierless_WatchModeDependsOnIt.
+	spec, err := hotkey.Parse(raw)
+	if err != nil {
+		return hotkey.Spec{}, fmt.Errorf("activate_hotkey %q is not a valid combination: %w", raw, err)
+	}
+	if activateCollidesWithUnlock(spec, unlock) {
+		return hotkey.Spec{}, ErrActivateHotkeyCollision
+	}
+	return spec, nil
+}
+
+// activateCollidesWithUnlock reports whether a single press of the
+// activation combination would satisfy the unlock verifier.
+//
+// The MinLen guard is an early-out, not the decision: a verifier that needs
+// more than one step cannot be satisfied by a one-event tail, so there is
+// nothing to ask it. Everything else is left to Match, which is the only
+// component entitled to know what the secret looks like.
+//
+// A nil verifier collides with nothing — the empty-verifier case is caught
+// upstream by ResolveUnlockCode and by the MaxLen()==0 guard in eventtap,
+// and duplicating that judgement here would only add a second opinion.
+func activateCollidesWithUnlock(spec hotkey.Spec, unlock matcher.Verifier) bool {
+	if unlock == nil || unlock.MinLen() != 1 {
+		return false
+	}
+	return unlock.Match([]matcher.KeyEvent{{
+		Modifiers: spec.Modifiers,
+		KeyCode:   spec.KeyCode,
+	}})
 }
 
 // IsWeakUnlockCode reports whether an accepted unlock code is shorter than the
@@ -749,6 +874,38 @@ unlock_code: %s
 # with one caveat: spaces separate STEPS in unlock_code, so any spaces around the
 # '+' must go ('Ctrl + X' is legal here, but reads as three steps below).
 # hotkey: Ctrl+Option+Cmd+X
+
+# --- activate_hotkey (watch mode only) ---------------------------------------
+# The combination 'dndmode --watch' waits for while idle. Press it and the
+# shield goes up exactly as if you had run 'dndmode'; type your unlock code and
+# it comes back down, returning to waiting. Ignored without --watch.
+#
+# This is NOT a secret, and it is the opposite of unlock_code in every way that
+# matters. It is printed at startup and documented in the README, so anyone
+# nearby can raise the shield on your unattended machine — the same exposure
+# Ctrl+Cmd+Q already has. What they cannot do is lower it: that still needs
+# your unlock code.
+#
+# Grammar: ONE chord, "(<mod>+)*<key>" — never a sequence. A sequence is
+# impossible here rather than merely unsupported: macOS matches this hotkey
+# itself (Carbon RegisterEventHotKey), which is precisely what lets dndmode
+# wait for hours without watching your keystrokes or holding Accessibility.
+# At least one modifier is REQUIRED — a bare key would raise the shield on
+# every press of it, in every application.
+#
+# Absent (this line commented out) means the default below. An explicitly
+# EMPTY STRING means watch mode is OFF and --watch refuses to start. The quotes
+# are required — a bare 'activate_hotkey:' with nothing after it is YAML null,
+# which reads as absent and therefore as the default:
+#   activate_hotkey: ""                # disables --watch
+#
+# It must differ from unlock_code, or the published combination that raises
+# the shield would also lower it; startup refuses that outright.
+#
+# If macOS or another app (Raycast, Alfred, Karabiner) already owns the
+# combination, --watch says so at startup instead of silently never firing.
+# Changing this value takes effect on the next --watch start.
+# activate_hotkey: Ctrl+Option+Cmd+D
 
 # --- overlay_style -----------------------------------------------------------
 # Look of the full-screen shield that covers every attached display.

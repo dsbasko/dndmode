@@ -13,6 +13,7 @@ extern int  cocoa_run_app(void);
 extern void cocoa_stop_app(int subtype);
 extern void cocoa_app_foreground(void);
 extern void cocoa_app_background(void);
+extern void cocoa_set_at_rest_policy_accessory(void);
 */
 import "C"
 
@@ -94,7 +95,7 @@ func Init(log *slog.Logger) error {
 // posts a synthetic NSEventTypeApplicationDefined event with subtype 0xDED
 // + calls [NSApp stop:] to wake the run loop. Both Cocoa calls are
 // documented thread-safe (Apple "Threading Programming Guide"; the design notes
-//).
+// ).
 //
 // Single-shot per process: a second concurrent call panics with
 // "cocoa.RunApp: already running". This is a programming error, not a
@@ -153,7 +154,30 @@ func RunApp(ctx context.Context) error {
 // on the main goroutine (AppKit invariant; see cocoa_app_foreground).
 func appForeground() { C.cocoa_app_foreground() }
 
-// appBackground reverts NSApp to Prohibited (silent at-rest) on overlay
-// teardown, balancing a prior appForeground. MUST be called on the main
-// goroutine (AppKit invariant; see cocoa_app_background).
+// appBackground returns NSApp to the at-rest policy on overlay teardown,
+// balancing a prior appForeground. That policy is Prohibited unless
+// SetAtRestPolicyAccessory raised it. MUST be called on the main goroutine
+// (AppKit invariant; see cocoa_app_background).
 func appBackground() { C.cocoa_app_background() }
+
+// SetAtRestPolicyAccessory raises the at-rest activation policy from
+// Prohibited to Accessory for the rest of the process's life.
+//
+// Watch mode needs it, and the requirement is measured rather than assumed:
+// Carbon's RegisterEventHotKey succeeds under Prohibited — it returns noErr
+// and the combination is genuinely claimed — but the press is never DELIVERED
+// to the handler. Under Accessory it is. A Prohibited process is never
+// eligible to become the active application, and the hot-key event follows
+// that eligibility.
+//
+// The cost is small and does not touch what the silent at-rest state was for:
+// Accessory is the LSUIElement shape, so there is still no Dock icon, no
+// Cmd+Tab entry and no menu bar of ours.
+//
+// It raises the shared at-rest value rather than setting the policy once,
+// because appBackground runs after every overlay teardown. Without that, the
+// first session would end by dropping back to Prohibited and watch mode would
+// go deaf from the SECOND press onward.
+//
+// MUST be called from the main goroutine, after Init.
+func SetAtRestPolicyAccessory() { C.cocoa_set_at_rest_policy_accessory() }
