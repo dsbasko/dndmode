@@ -378,6 +378,17 @@ it is the only secret that ends a locked session. To keep it out of the file
 entirely, run [`dndmode --set-password`](#hashing-the-code-with---set-password),
 which stores a salted hash instead.
 
+**Upgrades keep the file current.** A config written by an older release has always
+kept working - an absent key simply takes its default - but it only documented the
+keys that existed when it was created. On startup dndmode now appends the commented
+sections for any keys your file has never heard of, so the documentation catches up
+with the binary. It only ever *adds comments*: your values, your own notes and your
+formatting are left exactly as they are, nothing is uncommented (several defaults
+are the defaults of an *absent* key, so writing them out would change behavior), and
+the rewrite is verified to parse identically before it lands. There is no `.bak` -
+a copy would be a second file holding the same plaintext secret `--set-password`
+exists to remove.
+
 ```yaml
 # dndmode configuration
 # Location: ~/.config/dndmode/config.yml  (auto-created on first run)

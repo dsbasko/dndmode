@@ -479,6 +479,53 @@ func run() int {
 		debugOn = true
 	}
 
+	// --- Step 5.9: bring an older config.yml up to date (documentation only) ---
+	// A config written by an earlier release still WORKS — absent keys have
+	// always normalized to defaults — but it documents only the keys that
+	// existed when it was created, and this file is the only documentation most
+	// users ever read. config.MigrateFile appends the missing commented
+	// sections and touches nothing else; it proves the edit changed no setting
+	// before writing, so it cannot alter how this run behaves.
+	//
+	// Placed BEFORE Step 5a rather than after, and that ordering is the whole
+	// reason this is not simply appended anywhere convenient. The fingerprint
+	// below is re-checked under the publish lock at Step 13.3, and a config
+	// rewritten AFTER it was taken would look exactly like a --set-password
+	// landing mid-startup: the run would refuse with "config changed while
+	// dndmode was starting" and the user would see a migration they never asked
+	// for abort their lock. Re-reading here means the fingerprint describes what
+	// is actually on disk.
+	//
+	// Taken under the SAME publish lock --set-password holds, because both
+	// rewrite this file. A lock we cannot get means someone else is mid-write:
+	// skip silently and migrate on a later run. Nothing here is worth making a
+	// user wait for, let alone worth refusing to lock over — every failure below
+	// is advisory, logged at debug level, and leaves a working config in place.
+	if !created {
+		if release, lockErr := acquirePublishLock(filepath.Dir(cfgPath)); lockErr == nil {
+			added, migErr := config.MigrateFile(cfgPath)
+			release()
+			switch {
+			case migErr != nil:
+				log.Debug("config migration skipped", slog.Any("err", migErr))
+			case len(added) > 0:
+				log.Debug("config documentation updated", slog.Any("keys", added))
+				// Re-read so cfg and cfgRaw describe the file as it now exists.
+				// A failure here is not fatal either: the values already loaded
+				// are still valid, and MigrateFile proved the rewrite was
+				// semantically identical before it landed.
+				if newCfg, newRaw, _, rerr := loader.LoadWithSource(); rerr != nil {
+					log.Debug("re-read after migration failed; continuing with the loaded config",
+						slog.Any("err", rerr))
+				} else {
+					cfg, cfgRaw = newCfg, newRaw
+				}
+			}
+		} else {
+			log.Debug("config migration skipped: publish lock unavailable", slog.Any("err", lockErr))
+		}
+	}
+
 	// --- Step 5a: fingerprint the bytes Load just parsed ---
 	// Compared again under the publish lock at Step 13.3. Everything between
 	// those two points — the platform check, an unbounded WaitForGrants, crash
