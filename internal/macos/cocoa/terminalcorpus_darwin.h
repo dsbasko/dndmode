@@ -12,7 +12,7 @@
 // language corpus has played (sized to exceed 2 hours at the configured typing
 // speed).
 //
-// ENCODING: the first four corpora are ASCII. Yc (YoptaScript, terminal:yc) is
+// ENCODING: the first four corpora are ASCII. Ys (YoptaScript, terminal:ys) is
 // Cyrillic UTF-8 and is the reason term_tokenize carries a byte cursor AND a
 // column cursor -- one glyph is two bytes there, so the two numbers diverge for
 // every single line. Adding a NEW non-ASCII corpus needs nothing beyond writing
@@ -24,7 +24,7 @@
 // interception, hotkeys, or unlocking, and no line shows a module/package/import
 // declaration -- the stream reads like the middle of an ordinary project, never
 // signalling a new file or that keystrokes are being watched. That is also why
-// the Yc keyword table in terminalview_darwin.m omits YoptaScript's perfectly
+// the Ys keyword table in terminalview_darwin.m omits YoptaScript's perfectly
 // real import/export words: nothing may emit a line that reads like a file
 // boundary, so those words can never appear in this corpus.
 
@@ -21277,9 +21277,9 @@ static const char *const kRsBlock139[] = {
     "",
 };
 
-// ===== Yc (YoptaScript) =====
+// ===== Ys (YoptaScript) =====
 
-static const char *const kYcBlock000[] = {
+static const char *const kYsBlock000[] = {
     "",
     "// Пузырек: гоняем помойку, пока пацаны не встанут по росту.",
     "йопта пузырек(помойка) жЫ",
@@ -21301,7 +21301,7 @@ static const char *const kYcBlock000[] = {
     "",
 };
 
-static const char *const kYcBlock001[] = {
+static const char *const kYsBlock001[] = {
     "",
     "// Быстрая: берем опорного пацана и разводим остальных по сторонам.",
     "йопта быстрая(помойка) жЫ",
@@ -21324,7 +21324,7 @@ static const char *const kYcBlock001[] = {
     "",
 };
 
-static const char *const kYcBlock002[] = {
+static const char *const kYsBlock002[] = {
     "",
     "// Бинарный поиск: делим район пополам, пока не найдем терпилу.",
     "йопта найтиПоПорядку(помойка, кого) жЫ",
@@ -21347,7 +21347,7 @@ static const char *const kYcBlock002[] = {
     "",
 };
 
-static const char *const kYcBlock003[] = {
+static const char *const kYsBlock003[] = {
     "",
     "// Фибоначчи с записной книжкой: два раза одно и то же не считаем.",
     "ясенХуй книжка сука гыйбать Кент() нах",
@@ -21372,7 +21372,7 @@ static const char *const kYcBlock003[] = {
     "",
 };
 
-static const char *const kYcBlock004[] = {
+static const char *const kYsBlock004[] = {
     "",
     "// Наибольший общий делитель по-пацански, без рекурсии.",
     "йопта общийДелитель(а, бэ) жЫ",
@@ -21393,7 +21393,7 @@ static const char *const kYcBlock004[] = {
     "",
 };
 
-static const char *const kYcBlock005[] = {
+static const char *const kYsBlock005[] = {
     "",
     "// Решето: вычеркиваем всех, кто делится, остаются только четкие.",
     "йопта решето(предел) жЫ",
@@ -21415,7 +21415,7 @@ static const char *const kYcBlock005[] = {
     "",
 };
 
-static const char *const kYcBlock006[] = {
+static const char *const kYsBlock006[] = {
     "",
     "// Стопка: кто последним зашел, тот первым и вышел.",
     "клево Стопка жЫ",
@@ -21444,7 +21444,7 @@ static const char *const kYcBlock006[] = {
     "",
 };
 
-static const char *const kYcBlock007[] = {
+static const char *const kYsBlock007[] = {
     "",
     "// Очередь на кольце: голова и хвост бегают по кругу, ничего не сдвигаем.",
     "клево Очередь жЫ",
@@ -21476,7 +21476,7 @@ static const char *const kYcBlock007[] = {
     "",
 };
 
-static const char *const kYcBlock008[] = {
+static const char *const kYsBlock008[] = {
     "",
     "// Односторонний список: у каждого пацана есть только следующий.",
     "клево Цепочка жЫ",
@@ -21513,7 +21513,7 @@ static const char *const kYcBlock008[] = {
     "",
 };
 
-static const char *const kYcBlock009[] = {
+static const char *const kYsBlock009[] = {
     "",
     "// Палиндром: два пальца идут навстречу, буквы должны совпасть.",
     "йопта наоборотТожеСамое(базар) жЫ",
@@ -21532,7 +21532,7 @@ static const char *const kYcBlock009[] = {
     "",
 };
 
-static const char *const kYcBlock010[] = {
+static const char *const kYsBlock010[] = {
     "",
     "// Развернуть базар: собираем задом наперед, по букве.",
     "йопта задомНаперед(базар) жЫ",
@@ -21552,7 +21552,7 @@ static const char *const kYcBlock010[] = {
     "",
 };
 
-static const char *const kYcBlock011[] = {
+static const char *const kYsBlock011[] = {
     "",
     "// Считаем, кто сколько раз всплыл в базаре.",
     "йопта посчитатьСлова(базар) жЫ",
@@ -21576,7 +21576,7 @@ static const char *const kYcBlock011[] = {
     "",
 };
 
-static const char *const kYcBlock012[] = {
+static const char *const kYsBlock012[] = {
     "",
     "// Не дергаем функцию, пока терпила не успокоится.",
     "йопта придержать(дело, задержка) жЫ",
@@ -21592,7 +21592,7 @@ static const char *const kYcBlock012[] = {
     "",
 };
 
-static const char *const kYcBlock013[] = {
+static const char *const kYsBlock013[] = {
     "",
     "// Пропускаем всех лишних: работаем не чаще раза в окно.",
     "йопта неЧаще(дело, окно) жЫ",
@@ -21615,7 +21615,7 @@ static const char *const kYcBlock013[] = {
     "",
 };
 
-static const char *const kYcBlock014[] = {
+static const char *const kYsBlock014[] = {
     "",
     "// Копируем структуру целиком, чтобы чужие ссылки не мешались.",
     "йопта скопироватьВсе(чего) жЫ",
@@ -21634,7 +21634,7 @@ static const char *const kYcBlock014[] = {
     "",
 };
 
-static const char *const kYcBlock015[] = {
+static const char *const kYsBlock015[] = {
     "",
     "// Пацан сказал - пацан сделал, но не с первого раза.",
     "ассо йопта повторить(дело, попыток, пауза) жЫ",
@@ -21657,7 +21657,7 @@ static const char *const kYcBlock015[] = {
     "",
 };
 
-static const char *const kYcBlock016[] = {
+static const char *const kYsBlock016[] = {
     "",
     "// Кэш с ограниченной хатой: кого давно не видели, того на выход.",
     "клево Хата жЫ",
@@ -21693,7 +21693,7 @@ static const char *const kYcBlock016[] = {
     "",
 };
 
-static const char *const kYcBlock017[] = {
+static const char *const kYsBlock017[] = {
     "",
     "// Кто на что подписался, тому и свистим.",
     "клево Свисток жЫ",
@@ -21730,7 +21730,7 @@ static const char *const kYcBlock017[] = {
     "",
 };
 
-static const char *const kYcBlock018[] = {
+static const char *const kYsBlock018[] = {
     "",
     "// Разворачиваем таблицу на бок: строки становятся столбцами.",
     "йопта наБок(таблица) жЫ",
@@ -21750,7 +21750,7 @@ static const char *const kYcBlock018[] = {
     "",
 };
 
-static const char *const kYcBlock019[] = {
+static const char *const kYsBlock019[] = {
     "",
     "// Перемножаем таблицы в лоб, без выебонов.",
     "йопта перемножить(левая, правая) жЫ",
@@ -21774,7 +21774,7 @@ static const char *const kYcBlock019[] = {
     "",
 };
 
-static const char *const kYcBlock020[] = {
+static const char *const kYsBlock020[] = {
     "",
     "// Гоняем базар в число: одинаковый базар - одинаковый номер.",
     "йопта номерБазара(базар) жЫ",
@@ -21796,7 +21796,7 @@ static const char *const kYcBlock020[] = {
     "",
 };
 
-static const char *const kYcBlock021[] = {
+static const char *const kYsBlock021[] = {
     "",
     "// Считаем, за сколько правок один базар превращается в другой.",
     "йопта сколькоПравок(а, бэ) жЫ",
@@ -21822,7 +21822,7 @@ static const char *const kYcBlock021[] = {
     "",
 };
 
-static const char *const kYcBlock022[] = {
+static const char *const kYsBlock022[] = {
     "",
     "// Кэш, который сам протухает: пожил свое - выкидываем.",
     "клево Заначка жЫ",
@@ -21860,7 +21860,7 @@ static const char *const kYcBlock022[] = {
     "",
 };
 
-static const char *const kYcBlock023[] = {
+static const char *const kYsBlock023[] = {
     "",
     "// Раскидываем помойку по кучкам, кто по какому признаку.",
     "йопта поКучкам(помойка, признак) жЫ",
@@ -21886,7 +21886,7 @@ static const char *const kYcBlock023[] = {
     "",
 };
 
-static const char *const kYcBlock024[] = {
+static const char *const kYsBlock024[] = {
     "",
     "// Оставляем по одному от каждой морды.",
     "йопта тольконеПовторы(помойка) жЫ",
@@ -21911,7 +21911,7 @@ static const char *const kYcBlock024[] = {
     "",
 };
 
-static const char *const kYcBlock025[] = {
+static const char *const kYsBlock025[] = {
     "",
     "// Режем длинную помойку на куски одинакового размера.",
     "йопта поКускам(помойка, размер) жЫ",
@@ -21939,7 +21939,7 @@ static const char *const kYcBlock025[] = {
     "",
 };
 
-static const char *const kYcBlock026[] = {
+static const char *const kYsBlock026[] = {
     "",
     "// Сшиваем две помойки в пары, лишнее обрезаем.",
     "йопта попарно(левая, правая) жЫ",
@@ -21963,7 +21963,7 @@ static const char *const kYcBlock026[] = {
     "",
 };
 
-static const char *const kYcBlock027[] = {
+static const char *const kYsBlock027[] = {
     "",
     "// Ряд чисел от и до, с нужным шагом.",
     "йопта рядок(от, до, шаг) жЫ",
@@ -21988,7 +21988,7 @@ static const char *const kYcBlock027[] = {
     "",
 };
 
-static const char *const kYcBlock028[] = {
+static const char *const kYsBlock028[] = {
     "",
     "// Машина состояний: куда пацану можно, а куда не стоит.",
     "ясенХуй переходы сука жЫ",
@@ -22021,7 +22021,7 @@ static const char *const kYcBlock028[] = {
     "",
 };
 
-static const char *const kYcBlock029[] = {
+static const char *const kYsBlock029[] = {
     "",
     "// Проверяем почту: без собаки и точки не пропускаем.",
     "ясенХуй образецПочты сука /^[^@\\s]+@[^@\\s]+\\.[^@\\s]+$/ нах",
@@ -22041,7 +22041,7 @@ static const char *const kYcBlock029[] = {
     "",
 };
 
-static const char *const kYcBlock030[] = {
+static const char *const kYsBlock030[] = {
     "",
     "// Красиво показываем деньги: по три цифры, с хвостом.",
     "йопта поКарманам(чирик, знаков) жЫ",
@@ -22064,7 +22064,7 @@ static const char *const kYcBlock030[] = {
     "",
 };
 
-static const char *const kYcBlock031[] = {
+static const char *const kYsBlock031[] = {
     "",
     "// Сколько дней прошло и как это назвать по-человечески.",
     "йопта сколькоДней(отДаты, доДаты) жЫ",
@@ -22085,7 +22085,7 @@ static const char *const kYcBlock031[] = {
     "",
 };
 
-static const char *const kYcBlock032[] = {
+static const char *const kYsBlock032[] = {
     "",
     "// Тасуем помойку честно: каждому месту свой случайный сосед.",
     "йопта перетасовать(помойка) жЫ",
@@ -22106,7 +22106,7 @@ static const char *const kYcBlock032[] = {
     "",
 };
 
-static const char *const kYcBlock033[] = {
+static const char *const kYsBlock033[] = {
     "",
     "// Возводим в степень вдвое быстрее: делим показатель пополам.",
     "йопта встепень(основа, показатель) жЫ",
@@ -22128,7 +22128,7 @@ static const char *const kYcBlock033[] = {
     "",
 };
 
-static const char *const kYcBlock034[] = {
+static const char *const kYsBlock034[] = {
     "",
     "// Дерево поиска: мелкие налево, крупные направо.",
     "клево Дерево жЫ",
@@ -22166,7 +22166,7 @@ static const char *const kYcBlock034[] = {
     "",
 };
 
-static const char *const kYcBlock035[] = {
+static const char *const kYsBlock035[] = {
     "",
     "// Обходим дерево по порядку, без рекурсии - на стопке.",
     "йопта поПорядку(корень) жЫ",
@@ -22192,7 +22192,7 @@ static const char *const kYcBlock035[] = {
     "",
 };
 
-static const char *const kYcBlock036[] = {
+static const char *const kYsBlock036[] = {
     "",
     "// Обход вширь: сначала соседи, потом уже соседи соседей.",
     "йопта обходВширь(район, откуда) жЫ",
@@ -22214,7 +22214,7 @@ static const char *const kYcBlock036[] = {
     "",
 };
 
-static const char *const kYcBlock037[] = {
+static const char *const kYsBlock037[] = {
     "",
     "// Обход вглубь: идем до упора, потом отползаем назад.",
     "йопта обходВглубь(район, откуда) жЫ",
@@ -22236,7 +22236,7 @@ static const char *const kYcBlock037[] = {
     "",
 };
 
-static const char *const kYcBlock038[] = {
+static const char *const kYsBlock038[] = {
     "",
     "// Самая дешевая дорога по району, шаг за шагом.",
     "йопта дешеваяДорога(район, откуда) жЫ",
@@ -22268,7 +22268,7 @@ static const char *const kYcBlock038[] = {
     "",
 };
 
-static const char *const kYcBlock039[] = {
+static const char *const kYsBlock039[] = {
     "",
     "// Кто с кем в одной банде: находим главного и сливаем банды.",
     "клево Банды жЫ",
@@ -22308,7 +22308,7 @@ static const char *const kYcBlock039[] = {
     "",
 };
 
-static const char *const kYcBlock040[] = {
+static const char *const kYsBlock040[] = {
     "",
     "// Скользящее окно: тащим сумму за собой, а не считаем заново.",
     "йопта лучшееОкно(помойка, ширина) жЫ",
@@ -22327,7 +22327,7 @@ static const char *const kYcBlock040[] = {
     "",
 };
 
-static const char *const kYcBlock041[] = {
+static const char *const kYsBlock041[] = {
     "",
     "// Два пальца: ищем пару, которая дает нужную сумму.",
     "йопта параНаСумму(помойка, сколько) жЫ",
@@ -22350,7 +22350,7 @@ static const char *const kYcBlock041[] = {
     "",
 };
 
-static const char *const kYcBlock042[] = {
+static const char *const kYsBlock042[] = {
     "",
     "// Куча: наверху всегда самый мелкий, остальные подтягиваются.",
     "клево Кучка жЫ",
@@ -22409,7 +22409,7 @@ static const char *const kYcBlock042[] = {
     "",
 };
 
-static const char *const kYcBlock043[] = {
+static const char *const kYsBlock043[] = {
     "",
     "// Дерево букв: складываем базары так, чтобы общий хвост был один.",
     "клево Букварь жЫ",
@@ -22449,7 +22449,7 @@ static const char *const kYcBlock043[] = {
     "",
 };
 
-static const char *const kYcBlock044[] = {
+static const char *const kYsBlock044[] = {
     "",
     "// Разбираем функцию на аргументы по одному.",
     "йопта поОдному(дело) жЫ",
@@ -22477,7 +22477,7 @@ static const char *const kYcBlock044[] = {
     "",
 };
 
-static const char *const kYcBlock045[] = {
+static const char *const kYsBlock045[] = {
     "",
     "// Собираем конвейер: что вышло у одного, то заходит следующему.",
     "йопта конвейер(...дела) жЫ",
@@ -22495,7 +22495,7 @@ static const char *const kYcBlock045[] = {
     "",
 };
 
-static const char *const kYcBlock046[] = {
+static const char *const kYsBlock046[] = {
     "",
     "// Очередь дел с ограничением: больше троих одновременно не пускаем.",
     "клево Бригада жЫ",
@@ -22530,7 +22530,7 @@ static const char *const kYcBlock046[] = {
     "",
 };
 
-static const char *const kYcBlock047[] = {
+static const char *const kYsBlock047[] = {
     "",
     "// Простой развод по адресам: какой шаблон подошел, того и зовем.",
     "клево Развилка жЫ",
@@ -22560,7 +22560,7 @@ static const char *const kYcBlock047[] = {
     "",
 };
 
-static const char *const kYcBlock048[] = {
+static const char *const kYsBlock048[] = {
     "",
     "// Рисуем на доске круги, каждый своим цветом.",
     "йопта нарисоватьКруги(доска, сколько) жЫ",
@@ -22584,7 +22584,7 @@ static const char *const kYcBlock048[] = {
     "",
 };
 
-static const char *const kYcBlock049[] = {
+static const char *const kYsBlock049[] = {
     "",
     "// Рисуем список на ксиве, не трогая ее по одному пункту.",
     "йопта показатьСписок(куда, пункты) жЫ",
@@ -22609,7 +22609,7 @@ static const char *const kYcBlock049[] = {
     "",
 };
 
-static const char *const kYcBlock050[] = {
+static const char *const kYsBlock050[] = {
     "",
     "// Прячем добро на хате так, чтобы после перезагрузки нашлось.",
     "йопта схоронитьДобро(отмычка, добро) жЫ",
@@ -22635,7 +22635,7 @@ static const char *const kYcBlock050[] = {
     "",
 };
 
-static const char *const kYcBlock051[] = {
+static const char *const kYsBlock051[] = {
     "",
     "// Считаем, сколько раз по кнопке настучали.",
     "йопта завестиСчетчик(кнопка, табло) жЫ",
@@ -22659,7 +22659,7 @@ static const char *const kYcBlock051[] = {
     "",
 };
 
-static const char *const kYcBlock052[] = {
+static const char *const kYsBlock052[] = {
     "",
     "// Обратный отсчет: тикаем раз в секунду и вовремя завязываем.",
     "йопта отсчет(секунд, натик, вконце) жЫ",
@@ -22684,7 +22684,7 @@ static const char *const kYcBlock052[] = {
     "",
 };
 
-static const char *const kYcBlock053[] = {
+static const char *const kYsBlock053[] = {
     "",
     "// Проверяем анкету целиком и возвращаем, где накосячили.",
     "ясенХуй правила сука жЫ",
@@ -22713,7 +22713,7 @@ static const char *const kYcBlock053[] = {
     "",
 };
 
-static const char *const kYcBlock054[] = {
+static const char *const kYsBlock054[] = {
     "",
     "// Читаем настройки: свое поверх общего, дырки закрываем дефолтом.",
     "ясенХуй поумолчанию сука жЫ",
@@ -22737,7 +22737,7 @@ static const char *const kYcBlock054[] = {
     "",
 };
 
-static const char *const kYcBlock055[] = {
+static const char *const kYsBlock055[] = {
     "",
     "// Тащим страницами, пока сервер не скажет, что хватит.",
     "ассо йопта тащитьВсе(тащилка) жЫ",
@@ -22758,7 +22758,7 @@ static const char *const kYcBlock055[] = {
     "",
 };
 
-static const char *const kYcBlock056[] = {
+static const char *const kYsBlock056[] = {
     "",
     "// Ждем всех разом, но папандос одного не роняет остальных.",
     "ассо йопта всеРазом(дела) жЫ",
@@ -22776,7 +22776,7 @@ static const char *const kYcBlock056[] = {
     "",
 };
 
-static const char *const kYcBlock057[] = {
+static const char *const kYsBlock057[] = {
     "",
     "// Меряем, сколько дело провозилось, и жалуемся на медленных.",
     "йопта засечь(погоняло, дело) жЫ",
@@ -22798,7 +22798,7 @@ static const char *const kYcBlock057[] = {
     "",
 };
 
-static const char *const kYcBlock058[] = {
+static const char *const kYsBlock058[] = {
     "",
     "// Разбираем адрес на части, без выебонов и без библиотек.",
     "йопта разобратьАдрес(адрес) жЫ",
@@ -22824,7 +22824,7 @@ static const char *const kYcBlock058[] = {
     "",
 };
 
-static const char *const kYcBlock059[] = {
+static const char *const kYsBlock059[] = {
     "",
     "// Считаем скользящее среднее, чтобы график не дергался.",
     "йопта пригладить(ряд, окно) жЫ",
@@ -22853,7 +22853,7 @@ static const char *const kYcBlock059[] = {
     "",
 };
 
-static const char *const kYcBlock060[] = {
+static const char *const kYsBlock060[] = {
     "",
     "// Пакуем повторы: где подряд одно и то же, пишем сколько раз.",
     "йопта запаковать(базар) жЫ",
@@ -22875,7 +22875,7 @@ static const char *const kYcBlock060[] = {
     "",
 };
 
-static const char *const kYcBlock061[] = {
+static const char *const kYsBlock061[] = {
     "",
     "// Ровняем колонки, чтобы таблом в консоли не разъезжалось.",
     "йопта поКолонкам(строки) жЫ",
@@ -22896,7 +22896,7 @@ static const char *const kYcBlock061[] = {
     "",
 };
 
-static const char *const kYcBlock062[] = {
+static const char *const kYsBlock062[] = {
     "",
     "// Мерим прогресс полосой, чтобы было видно, что живой.",
     "йопта полоса(сделано, всего, ширина) жЫ",
@@ -22912,7 +22912,7 @@ static const char *const kYcBlock062[] = {
     "",
 };
 
-static const char *const kYcBlock063[] = {
+static const char *const kYsBlock063[] = {
     "",
     "// Держим свежий срез: что не влезло по времени, то на выброс.",
     "клево Окошко жЫ",
@@ -22944,7 +22944,7 @@ static const char *const kYcBlock063[] = {
     "",
 };
 
-static const char *const kYcBlock064[] = {
+static const char *const kYsBlock064[] = {
     "",
     "// Сортируем пацанов по нескольким признакам сразу.",
     "йопта поПризнакам(...признаки) жЫ",
@@ -22966,7 +22966,7 @@ static const char *const kYcBlock064[] = {
     "",
 };
 
-static const char *const kYcBlock065[] = {
+static const char *const kYsBlock065[] = {
     "",
     "// Ждем, пока условие сойдется, но не вечно.",
     "ассо йопта дождаться(условие, предел, шаг) жЫ",
@@ -22988,7 +22988,7 @@ static const char *const kYcBlock065[] = {
     "",
 };
 
-static const char *const kYcBlock066[] = {
+static const char *const kYsBlock066[] = {
     "",
     "// Разбираем строку таблицы, помня про кавычки и запятые внутри.",
     "йопта разобратьСтроку(строка) жЫ",
@@ -23019,7 +23019,7 @@ static const char *const kYcBlock066[] = {
     "",
 };
 
-static const char *const kYcBlock067[] = {
+static const char *const kYsBlock067[] = {
     "",
     "// Сводим пары в таблицу: кто, сколько и в среднем.",
     "йопта свести(записи) жЫ",
@@ -23044,7 +23044,7 @@ static const char *const kYcBlock067[] = {
     "",
 };
 
-static const char *const kYcBlock068[] = {
+static const char *const kYsBlock068[] = {
     "",
     "// Каждому по номеру: раздаем короткие метки без повторов.",
     "клево Раздача жЫ",
@@ -23076,7 +23076,7 @@ static const char *const kYcBlock068[] = {
     "",
 };
 
-static const char *const kYcBlock069[] = {
+static const char *const kYsBlock069[] = {
     "",
     "// Считаем расстояние между точками и ищем ближайшую.",
     "йопта далекоЛи(перваяТочка, втораяТочка) жЫ",
@@ -23100,7 +23100,7 @@ static const char *const kYcBlock069[] = {
     "",
 };
 
-static const char *const kYcBlock070[] = {
+static const char *const kYsBlock070[] = {
     "",
     "// Гоняем очередь дел по кругу, каждому по чуть-чуть.",
     "клево ПоОчереди жЫ",
@@ -23131,7 +23131,7 @@ static const char *const kYcBlock070[] = {
     "",
 };
 
-static const char *const kYcBlock071[] = {
+static const char *const kYsBlock071[] = {
     "",
     "// Считаем, чего в тексте больше: букв, цифр или мусора.",
     "йопта разобратьПоБуквам(базар) жЫ",
@@ -23152,7 +23152,7 @@ static const char *const kYcBlock071[] = {
     "",
 };
 
-static const char *const kYcBlock072[] = {
+static const char *const kYsBlock072[] = {
     "",
     "// Переливаем добро порциями, чтобы не захлебнуться.",
     "ассо йопта перелить(откуда, куда, порция) жЫ",
@@ -23171,7 +23171,7 @@ static const char *const kYcBlock072[] = {
     "",
 };
 
-static const char *const kYcBlock073[] = {
+static const char *const kYsBlock073[] = {
     "",
     "// Разводим сообщения по важности, тихие в мусорку.",
     "ясенХуй уровни сука жЫ тихо: 10, обычно: 20, шухер: 30, папандос: 40 есть нах",
@@ -23201,7 +23201,7 @@ static const char *const kYcBlock073[] = {
     "",
 };
 
-static const char *const kYcBlock074[] = {
+static const char *const kYsBlock074[] = {
     "",
     "// Обходим дерево папок и складываем все листья в одну помойку.",
     "йопта собратьЛистья(узел, дорога) жЫ",
@@ -23223,7 +23223,7 @@ static const char *const kYcBlock074[] = {
     "",
 };
 
-static const char *const kYcBlock075[] = {
+static const char *const kYsBlock075[] = {
     "",
     "// Разбираем версию и решаем, кто свежее.",
     "йопта разобратьВерсию(базар) жЫ",
@@ -23248,7 +23248,7 @@ static const char *const kYcBlock075[] = {
     "",
 };
 
-static const char *const kYcBlock076[] = {
+static const char *const kYsBlock076[] = {
     "",
     "// Собираем гистограмму: раскидываем числа по полкам.",
     "йопта поПолкам(числа, полок) жЫ",
@@ -23267,7 +23267,7 @@ static const char *const kYcBlock076[] = {
     "",
 };
 
-static const char *const kYcBlock077[] = {
+static const char *const kYsBlock077[] = {
     "",
     "// Проверяем скобки: что открыли, то и закрываем, и в том же порядке.",
     "ясенХуй пары сука жЫ \")\": \"(\", \"]\": \"[\", \"есть\": \"жЫ\" есть нах",
@@ -23289,7 +23289,7 @@ static const char *const kYcBlock077[] = {
     "",
 };
 
-static const char *const kYcBlock078[] = {
+static const char *const kYsBlock078[] = {
     "",
     "// Римские цифры: гасим число самыми крупными кусками.",
     "ясенХуй ступени сука [",
@@ -23312,7 +23312,7 @@ static const char *const kYcBlock078[] = {
     "",
 };
 
-static const char *const kYcBlock079[] = {
+static const char *const kYsBlock079[] = {
     "",
     "// Переводим число в любую систему, от двоичной до тридцатьшестеричной.",
     "ясенХуй цифры сука \"0123456789abcdefghijklmnopqrstuvwxyz\" нах",
@@ -23340,7 +23340,7 @@ static const char *const kYcBlock079[] = {
     "",
 };
 
-static const char *const kYcBlock080[] = {
+static const char *const kYsBlock080[] = {
     "",
     "// Причесываем базар: лишние пробелы вон, края подрезаем.",
     "йопта причесатьБазар(базар) жЫ",
@@ -23363,7 +23363,7 @@ static const char *const kYcBlock080[] = {
     "",
 };
 
-static const char *const kYcBlock081[] = {
+static const char *const kYsBlock081[] = {
     "",
     "// Сравниваем два добра вглубь: где разошлись, там и косяк.",
     "йопта одноИтоже(левое, правое) жЫ",
@@ -23392,7 +23392,7 @@ static const char *const kYcBlock081[] = {
     "",
 };
 
-static const char *const kYcBlock082[] = {
+static const char *const kYsBlock082[] = {
     "",
     "// Раскатываем вложенное добро в плоский список путей.",
     "йопта расплющить(добро, приставка) жЫ",
@@ -23415,7 +23415,7 @@ static const char *const kYcBlock082[] = {
     "",
 };
 
-static const char *const kYcBlock083[] = {
+static const char *const kYsBlock083[] = {
     "",
     "// Показываем, что поменялось между двумя снимками.",
     "йопта чтоПоменялось(было, стало) жЫ",
@@ -23439,7 +23439,7 @@ static const char *const kYcBlock083[] = {
     "",
 };
 
-static const char *const kYcBlock084[] = {
+static const char *const kYsBlock084[] = {
     "",
     "// Очередь по важности: у кого вес меньше, тот и вперед.",
     "клево ПоВажности жЫ",
@@ -23465,7 +23465,7 @@ static const char *const kYcBlock084[] = {
     "",
 };
 
-static const char *const kYcBlock085[] = {
+static const char *const kYsBlock085[] = {
     "",
     "// Кольцевой блокнот: пишем по кругу, старое затираем.",
     "клево Блокнот жЫ",
@@ -23496,7 +23496,7 @@ static const char *const kYcBlock085[] = {
     "",
 };
 
-static const char *const kYcBlock086[] = {
+static const char *const kYsBlock086[] = {
     "",
     "// Корзина: складываем, считаем, лишнее выкидываем.",
     "клево Кошелка жЫ",
@@ -23533,7 +23533,7 @@ static const char *const kYcBlock086[] = {
     "",
 };
 
-static const char *const kYcBlock087[] = {
+static const char *const kYsBlock087[] = {
     "",
     "// Считаем заказ: скидка, доставка и хвост округляем.",
     "йопта посчитатьЗаказ(строки, правила) жЫ",
@@ -23558,7 +23558,7 @@ static const char *const kYcBlock087[] = {
     "",
 };
 
-static const char *const kYcBlock088[] = {
+static const char *const kYsBlock088[] = {
     "",
     "// Разбиваем на страницы и считаем, куда можно ходить.",
     "йопта поСтраницам(всего, наСтранице, где) жЫ",
@@ -23584,7 +23584,7 @@ static const char *const kYcBlock088[] = {
     "",
 };
 
-static const char *const kYcBlock089[] = {
+static const char *const kYsBlock089[] = {
     "",
     "// Вставками: берем чирик и вдвигаем его на свое место.",
     "йопта вставками(помойка) жЫ",
@@ -23603,7 +23603,7 @@ static const char *const kYcBlock089[] = {
     "",
 };
 
-static const char *const kYcBlock090[] = {
+static const char *const kYsBlock090[] = {
     "",
     "// Слиянием: делим пополам, потом сшиваем два готовых ряда.",
     "йопта слиянием(помойка) жЫ",
@@ -23634,7 +23634,7 @@ static const char *const kYcBlock090[] = {
     "",
 };
 
-static const char *const kYcBlock091[] = {
+static const char *const kYsBlock091[] = {
     "",
     "// Считаем, насколько ряд перепутан: сколько пар стоят задом наперед.",
     "йопта сколькоПерепутано(помойка) жЫ",
@@ -23666,7 +23666,7 @@ static const char *const kYcBlock091[] = {
     "",
 };
 
-static const char *const kYcBlock092[] = {
+static const char *const kYsBlock092[] = {
     "",
     "// Самая длинная растущая цепочка: тянем хвосты и ищем место бинарно.",
     "йопта длиннаяЦепочка(помойка) жЫ",
@@ -23689,7 +23689,7 @@ static const char *const kYcBlock092[] = {
     "",
 };
 
-static const char *const kYcBlock093[] = {
+static const char *const kYsBlock093[] = {
     "",
     "// Рюкзак: что унести, чтобы вышло дороже, а по весу влезло.",
     "йопта чтоУнести(добро, сколькоВлезет) жЫ",
@@ -23707,7 +23707,7 @@ static const char *const kYcBlock093[] = {
     "",
 };
 
-static const char *const kYcBlock094[] = {
+static const char *const kYsBlock094[] = {
     "",
     "// Размен: сколькими способами набрать сумму этими монетами.",
     "йопта сколькоРазменов(сумма, монеты) жЫ",
@@ -23736,7 +23736,7 @@ static const char *const kYcBlock094[] = {
     "",
 };
 
-static const char *const kYcBlock095[] = {
+static const char *const kYsBlock095[] = {
     "",
     "// Башни: перекладываем стопку по одному, большой на мелкого нельзя.",
     "йопта башни(сколько, откуда, куда, через, ходы) жЫ",
@@ -23753,7 +23753,7 @@ static const char *const kYcBlock095[] = {
     "",
 };
 
-static const char *const kYcBlock096[] = {
+static const char *const kYsBlock096[] = {
     "",
     "// Все перестановки: по очереди выдергиваем каждого вперед.",
     "йопта всеПорядки(помойка) жЫ",
@@ -23773,7 +23773,7 @@ static const char *const kYcBlock096[] = {
     "",
 };
 
-static const char *const kYcBlock097[] = {
+static const char *const kYsBlock097[] = {
     "",
     "// Все наборы нужного размера, без повторов и без перестановок.",
     "йопта всеНаборы(помойка, размер) жЫ",
@@ -23795,7 +23795,7 @@ static const char *const kYcBlock097[] = {
     "",
 };
 
-static const char *const kYcBlock098[] = {
+static const char *const kYsBlock098[] = {
     "",
     "// Проверяем строку: девять клеток, все цифры разные.",
     "йопта строкаЧистая(строка) жЫ",
@@ -23822,7 +23822,7 @@ static const char *const kYcBlock098[] = {
     "",
 };
 
-static const char *const kYcBlock099[] = {
+static const char *const kYsBlock099[] = {
     "",
     "// Шаг жизни: у кого три соседа - живет, у кого мало - загибается.",
     "йопта шагЖизни(поле) жЫ",
@@ -23859,7 +23859,7 @@ static const char *const kYcBlock099[] = {
     "",
 };
 
-static const char *const kYcBlock100[] = {
+static const char *const kYsBlock100[] = {
     "",
     "// Ищем выход из лабиринта, помечая, где уже топтались.",
     "йопта естьВыход(поле, откуда, куда) жЫ",
@@ -23885,7 +23885,7 @@ static const char *const kYcBlock100[] = {
     "",
 };
 
-static const char *const kYcBlock101[] = {
+static const char *const kYsBlock101[] = {
     "",
     "// Не дергаем ксиву лишний раз: что нашли, то и держим под рукой.",
     "клево ЗапомненныеЛохи жЫ",
@@ -23909,7 +23909,7 @@ static const char *const kYcBlock101[] = {
     "",
 };
 
-static const char *const kYcBlock102[] = {
+static const char *const kYsBlock102[] = {
     "",
     "// Ставим подсказку рядом, но так, чтобы она не уехала за край.",
     "йопта кудаПодсказку(якорь, подсказка, отступ) жЫ",
@@ -23931,7 +23931,7 @@ static const char *const kYcBlock102[] = {
     "",
 };
 
-static const char *const kYcBlock103[] = {
+static const char *const kYsBlock103[] = {
     "",
     "// Тащим карточку мышью: запоминаем, откуда взяли, и считаем сдвиг.",
     "клево Таскалка жЫ",
@@ -23962,7 +23962,7 @@ static const char *const kYcBlock103[] = {
     "",
 };
 
-static const char *const kYcBlock104[] = {
+static const char *const kYsBlock104[] = {
     "",
     "// Грузим мазни только тогда, когда до них домотали.",
     "йопта грузитьПоМере(мазни) жЫ",
@@ -23982,7 +23982,7 @@ static const char *const kYcBlock104[] = {
     "",
 };
 
-static const char *const kYcBlock105[] = {
+static const char *const kYsBlock105[] = {
     "",
     "// Собираем анкету в добро, не забывая про галки и списки.",
     "йопта собратьАнкету(еблище) жЫ",
@@ -24005,7 +24005,7 @@ static const char *const kYcBlock105[] = {
     "",
 };
 
-static const char *const kYcBlock106[] = {
+static const char *const kYsBlock106[] = {
     "",
     "// Читаем и пишем семки, не спотыкаясь о чужие.",
     "йопта прочитатьСемку(погоняло) жЫ",
@@ -24028,7 +24028,7 @@ static const char *const kYcBlock106[] = {
     "",
 };
 
-static const char *const kYcBlock107[] = {
+static const char *const kYsBlock107[] = {
     "",
     "// Переключаем тему и запоминаем выбор терпилы.",
     "ясенХуй отмычкаТемы сука \"тема\" нах",
@@ -24054,7 +24054,7 @@ static const char *const kYcBlock107[] = {
     "",
 };
 
-static const char *const kYcBlock108[] = {
+static const char *const kYsBlock108[] = {
     "",
     "// Подсвечиваем тот пункт меню, до которого домотали.",
     "йопта следитьЗаПрокруткой(разделы, пункты) жЫ",
@@ -24076,7 +24076,7 @@ static const char *const kYcBlock108[] = {
     "",
 };
 
-static const char *const kYcBlock109[] = {
+static const char *const kYsBlock109[] = {
     "",
     "// Кидаем базар в буфер и честно говорим, вышло или нет.",
     "ассо йопта вБуфер(базар) жЫ",
@@ -24101,7 +24101,7 @@ static const char *const kYcBlock109[] = {
     "",
 };
 
-static const char *const kYcBlock110[] = {
+static const char *const kYsBlock110[] = {
     "",
     "// Пишем число прописью, до тысячи, дальше уже перебор.",
     "ясенХуй единицы сука [",
@@ -24128,7 +24128,7 @@ static const char *const kYcBlock110[] = {
     "",
 };
 
-static const char *const kYcBlock111[] = {
+static const char *const kYsBlock111[] = {
     "",
     "// Гоняем длинную работу кусками, отдавая ебалу подышать.",
     "ассо йопта покускам(добро, размер, дело) жЫ",
@@ -24150,7 +24150,7 @@ static const char *const kYcBlock111[] = {
     "",
 };
 
-static const char *const kYcBlock112[] = {
+static const char *const kYsBlock112[] = {
     "",
     "// Держим счет попыток по каждому терпиле и вовремя тормозим.",
     "клево Тормоз жЫ",
@@ -24181,7 +24181,7 @@ static const char *const kYcBlock112[] = {
     "",
 };
 
-static const char *const kYcBlock113[] = {
+static const char *const kYsBlock113[] = {
     "",
     "// Разбираем длительность из базара: 1h30m, 90s и прочее.",
     "ясенХуй множители сука жЫ s: 1000, m: 60000, h: 3600000, d: 86400000 есть нах",
@@ -24208,7 +24208,7 @@ static const char *const kYcBlock113[] = {
     "",
 };
 
-static const char *const kYcBlock114[] = {
+static const char *const kYsBlock114[] = {
     "",
     "// Считаем, кто чаще всех мелькает, и сколько всего разных.",
     "йопта ктоЧаще(помойка) жЫ",
@@ -24233,7 +24233,7 @@ static const char *const kYcBlock114[] = {
     "",
 };
 
-static const char *const kYcBlock115[] = {
+static const char *const kYsBlock115[] = {
     "",
     "// Ровняем градусы: чтобы всегда лежало между нулем и кругом.",
     "йопта поКругу(градусов) жЫ",
@@ -24253,7 +24253,7 @@ static const char *const kYcBlock115[] = {
     "",
 };
 
-static const char *const kYcBlock116[] = {
+static const char *const kYsBlock116[] = {
     "",
     "// Гоняем цвет из шестнадцатеричного в три числа и обратно.",
     "йопта разобратьЦвет(базар) жЫ",
@@ -24281,7 +24281,7 @@ static const char *const kYcBlock116[] = {
     "",
 };
 
-static const char *const kYcBlock117[] = {
+static const char *const kYsBlock117[] = {
     "",
     "// Считаем, сколько добра влезло, и предупреждаем, когда край.",
     "клево Мерка жЫ",
@@ -24312,7 +24312,7 @@ static const char *const kYcBlock117[] = {
     "",
 };
 
-static const char *const kYcBlock118[] = {
+static const char *const kYsBlock118[] = {
     "",
     "// Раскидываем работу по кучкам поровну, по весу, а не по счету.",
     "йопта разложитьПоРовну(дела, кучек) жЫ",
@@ -24338,7 +24338,7 @@ static const char *const kYcBlock118[] = {
     "",
 };
 
-static const char *const kYcBlock119[] = {
+static const char *const kYsBlock119[] = {
     "",
     "// Следим за размером ебала и зовем, когда он реально поменялся.",
     "йопта следитьЗаРазмером(дело) жЫ",
@@ -24365,7 +24365,7 @@ static const char *const kYcBlock119[] = {
     "",
 };
 
-static const char *const kYcBlock120[] = {
+static const char *const kYsBlock120[] = {
     "",
     "// Пишем в две колонки: слева погоняло, справа валио.",
     "йопта таблом(добро) жЫ",
@@ -24388,7 +24388,7 @@ static const char *const kYcBlock120[] = {
     "",
 };
 
-static const char *const kYcBlock121[] = {
+static const char *const kYsBlock121[] = {
     "",
     "// Догоняем хвост: что не успели отправить, копим и шлем пачкой.",
     "клево Копилка жЫ",
@@ -24422,7 +24422,7 @@ static const char *const kYcBlock121[] = {
     "",
 };
 
-static const char *const kYcBlock122[] = {
+static const char *const kYsBlock122[] = {
     "",
     "// Раскладываем дела по дням недели и считаем, где завал.",
     "ясенХуй дни сука [\"пн\", \"вт\", \"ср\", \"чт\", \"пт\", \"сб\", \"вс\"] нах",
@@ -25006,132 +25006,132 @@ static const TermBlock kRsBlocks[] = {
 static const NSInteger kRsBlocksCount =
     (NSInteger)(sizeof(kRsBlocks) / sizeof(kRsBlocks[0]));
 
-static const TermBlock kYcBlocks[] = {
-    TERM_BLOCK(kYcBlock000),
-    TERM_BLOCK(kYcBlock001),
-    TERM_BLOCK(kYcBlock002),
-    TERM_BLOCK(kYcBlock003),
-    TERM_BLOCK(kYcBlock004),
-    TERM_BLOCK(kYcBlock005),
-    TERM_BLOCK(kYcBlock006),
-    TERM_BLOCK(kYcBlock007),
-    TERM_BLOCK(kYcBlock008),
-    TERM_BLOCK(kYcBlock009),
-    TERM_BLOCK(kYcBlock010),
-    TERM_BLOCK(kYcBlock011),
-    TERM_BLOCK(kYcBlock012),
-    TERM_BLOCK(kYcBlock013),
-    TERM_BLOCK(kYcBlock014),
-    TERM_BLOCK(kYcBlock015),
-    TERM_BLOCK(kYcBlock016),
-    TERM_BLOCK(kYcBlock017),
-    TERM_BLOCK(kYcBlock018),
-    TERM_BLOCK(kYcBlock019),
-    TERM_BLOCK(kYcBlock020),
-    TERM_BLOCK(kYcBlock021),
-    TERM_BLOCK(kYcBlock022),
-    TERM_BLOCK(kYcBlock023),
-    TERM_BLOCK(kYcBlock024),
-    TERM_BLOCK(kYcBlock025),
-    TERM_BLOCK(kYcBlock026),
-    TERM_BLOCK(kYcBlock027),
-    TERM_BLOCK(kYcBlock028),
-    TERM_BLOCK(kYcBlock029),
-    TERM_BLOCK(kYcBlock030),
-    TERM_BLOCK(kYcBlock031),
-    TERM_BLOCK(kYcBlock032),
-    TERM_BLOCK(kYcBlock033),
-    TERM_BLOCK(kYcBlock034),
-    TERM_BLOCK(kYcBlock035),
-    TERM_BLOCK(kYcBlock036),
-    TERM_BLOCK(kYcBlock037),
-    TERM_BLOCK(kYcBlock038),
-    TERM_BLOCK(kYcBlock039),
-    TERM_BLOCK(kYcBlock040),
-    TERM_BLOCK(kYcBlock041),
-    TERM_BLOCK(kYcBlock042),
-    TERM_BLOCK(kYcBlock043),
-    TERM_BLOCK(kYcBlock044),
-    TERM_BLOCK(kYcBlock045),
-    TERM_BLOCK(kYcBlock046),
-    TERM_BLOCK(kYcBlock047),
-    TERM_BLOCK(kYcBlock048),
-    TERM_BLOCK(kYcBlock049),
-    TERM_BLOCK(kYcBlock050),
-    TERM_BLOCK(kYcBlock051),
-    TERM_BLOCK(kYcBlock052),
-    TERM_BLOCK(kYcBlock053),
-    TERM_BLOCK(kYcBlock054),
-    TERM_BLOCK(kYcBlock055),
-    TERM_BLOCK(kYcBlock056),
-    TERM_BLOCK(kYcBlock057),
-    TERM_BLOCK(kYcBlock058),
-    TERM_BLOCK(kYcBlock059),
-    TERM_BLOCK(kYcBlock060),
-    TERM_BLOCK(kYcBlock061),
-    TERM_BLOCK(kYcBlock062),
-    TERM_BLOCK(kYcBlock063),
-    TERM_BLOCK(kYcBlock064),
-    TERM_BLOCK(kYcBlock065),
-    TERM_BLOCK(kYcBlock066),
-    TERM_BLOCK(kYcBlock067),
-    TERM_BLOCK(kYcBlock068),
-    TERM_BLOCK(kYcBlock069),
-    TERM_BLOCK(kYcBlock070),
-    TERM_BLOCK(kYcBlock071),
-    TERM_BLOCK(kYcBlock072),
-    TERM_BLOCK(kYcBlock073),
-    TERM_BLOCK(kYcBlock074),
-    TERM_BLOCK(kYcBlock075),
-    TERM_BLOCK(kYcBlock076),
-    TERM_BLOCK(kYcBlock077),
-    TERM_BLOCK(kYcBlock078),
-    TERM_BLOCK(kYcBlock079),
-    TERM_BLOCK(kYcBlock080),
-    TERM_BLOCK(kYcBlock081),
-    TERM_BLOCK(kYcBlock082),
-    TERM_BLOCK(kYcBlock083),
-    TERM_BLOCK(kYcBlock084),
-    TERM_BLOCK(kYcBlock085),
-    TERM_BLOCK(kYcBlock086),
-    TERM_BLOCK(kYcBlock087),
-    TERM_BLOCK(kYcBlock088),
-    TERM_BLOCK(kYcBlock089),
-    TERM_BLOCK(kYcBlock090),
-    TERM_BLOCK(kYcBlock091),
-    TERM_BLOCK(kYcBlock092),
-    TERM_BLOCK(kYcBlock093),
-    TERM_BLOCK(kYcBlock094),
-    TERM_BLOCK(kYcBlock095),
-    TERM_BLOCK(kYcBlock096),
-    TERM_BLOCK(kYcBlock097),
-    TERM_BLOCK(kYcBlock098),
-    TERM_BLOCK(kYcBlock099),
-    TERM_BLOCK(kYcBlock100),
-    TERM_BLOCK(kYcBlock101),
-    TERM_BLOCK(kYcBlock102),
-    TERM_BLOCK(kYcBlock103),
-    TERM_BLOCK(kYcBlock104),
-    TERM_BLOCK(kYcBlock105),
-    TERM_BLOCK(kYcBlock106),
-    TERM_BLOCK(kYcBlock107),
-    TERM_BLOCK(kYcBlock108),
-    TERM_BLOCK(kYcBlock109),
-    TERM_BLOCK(kYcBlock110),
-    TERM_BLOCK(kYcBlock111),
-    TERM_BLOCK(kYcBlock112),
-    TERM_BLOCK(kYcBlock113),
-    TERM_BLOCK(kYcBlock114),
-    TERM_BLOCK(kYcBlock115),
-    TERM_BLOCK(kYcBlock116),
-    TERM_BLOCK(kYcBlock117),
-    TERM_BLOCK(kYcBlock118),
-    TERM_BLOCK(kYcBlock119),
-    TERM_BLOCK(kYcBlock120),
-    TERM_BLOCK(kYcBlock121),
-    TERM_BLOCK(kYcBlock122),
+static const TermBlock kYsBlocks[] = {
+    TERM_BLOCK(kYsBlock000),
+    TERM_BLOCK(kYsBlock001),
+    TERM_BLOCK(kYsBlock002),
+    TERM_BLOCK(kYsBlock003),
+    TERM_BLOCK(kYsBlock004),
+    TERM_BLOCK(kYsBlock005),
+    TERM_BLOCK(kYsBlock006),
+    TERM_BLOCK(kYsBlock007),
+    TERM_BLOCK(kYsBlock008),
+    TERM_BLOCK(kYsBlock009),
+    TERM_BLOCK(kYsBlock010),
+    TERM_BLOCK(kYsBlock011),
+    TERM_BLOCK(kYsBlock012),
+    TERM_BLOCK(kYsBlock013),
+    TERM_BLOCK(kYsBlock014),
+    TERM_BLOCK(kYsBlock015),
+    TERM_BLOCK(kYsBlock016),
+    TERM_BLOCK(kYsBlock017),
+    TERM_BLOCK(kYsBlock018),
+    TERM_BLOCK(kYsBlock019),
+    TERM_BLOCK(kYsBlock020),
+    TERM_BLOCK(kYsBlock021),
+    TERM_BLOCK(kYsBlock022),
+    TERM_BLOCK(kYsBlock023),
+    TERM_BLOCK(kYsBlock024),
+    TERM_BLOCK(kYsBlock025),
+    TERM_BLOCK(kYsBlock026),
+    TERM_BLOCK(kYsBlock027),
+    TERM_BLOCK(kYsBlock028),
+    TERM_BLOCK(kYsBlock029),
+    TERM_BLOCK(kYsBlock030),
+    TERM_BLOCK(kYsBlock031),
+    TERM_BLOCK(kYsBlock032),
+    TERM_BLOCK(kYsBlock033),
+    TERM_BLOCK(kYsBlock034),
+    TERM_BLOCK(kYsBlock035),
+    TERM_BLOCK(kYsBlock036),
+    TERM_BLOCK(kYsBlock037),
+    TERM_BLOCK(kYsBlock038),
+    TERM_BLOCK(kYsBlock039),
+    TERM_BLOCK(kYsBlock040),
+    TERM_BLOCK(kYsBlock041),
+    TERM_BLOCK(kYsBlock042),
+    TERM_BLOCK(kYsBlock043),
+    TERM_BLOCK(kYsBlock044),
+    TERM_BLOCK(kYsBlock045),
+    TERM_BLOCK(kYsBlock046),
+    TERM_BLOCK(kYsBlock047),
+    TERM_BLOCK(kYsBlock048),
+    TERM_BLOCK(kYsBlock049),
+    TERM_BLOCK(kYsBlock050),
+    TERM_BLOCK(kYsBlock051),
+    TERM_BLOCK(kYsBlock052),
+    TERM_BLOCK(kYsBlock053),
+    TERM_BLOCK(kYsBlock054),
+    TERM_BLOCK(kYsBlock055),
+    TERM_BLOCK(kYsBlock056),
+    TERM_BLOCK(kYsBlock057),
+    TERM_BLOCK(kYsBlock058),
+    TERM_BLOCK(kYsBlock059),
+    TERM_BLOCK(kYsBlock060),
+    TERM_BLOCK(kYsBlock061),
+    TERM_BLOCK(kYsBlock062),
+    TERM_BLOCK(kYsBlock063),
+    TERM_BLOCK(kYsBlock064),
+    TERM_BLOCK(kYsBlock065),
+    TERM_BLOCK(kYsBlock066),
+    TERM_BLOCK(kYsBlock067),
+    TERM_BLOCK(kYsBlock068),
+    TERM_BLOCK(kYsBlock069),
+    TERM_BLOCK(kYsBlock070),
+    TERM_BLOCK(kYsBlock071),
+    TERM_BLOCK(kYsBlock072),
+    TERM_BLOCK(kYsBlock073),
+    TERM_BLOCK(kYsBlock074),
+    TERM_BLOCK(kYsBlock075),
+    TERM_BLOCK(kYsBlock076),
+    TERM_BLOCK(kYsBlock077),
+    TERM_BLOCK(kYsBlock078),
+    TERM_BLOCK(kYsBlock079),
+    TERM_BLOCK(kYsBlock080),
+    TERM_BLOCK(kYsBlock081),
+    TERM_BLOCK(kYsBlock082),
+    TERM_BLOCK(kYsBlock083),
+    TERM_BLOCK(kYsBlock084),
+    TERM_BLOCK(kYsBlock085),
+    TERM_BLOCK(kYsBlock086),
+    TERM_BLOCK(kYsBlock087),
+    TERM_BLOCK(kYsBlock088),
+    TERM_BLOCK(kYsBlock089),
+    TERM_BLOCK(kYsBlock090),
+    TERM_BLOCK(kYsBlock091),
+    TERM_BLOCK(kYsBlock092),
+    TERM_BLOCK(kYsBlock093),
+    TERM_BLOCK(kYsBlock094),
+    TERM_BLOCK(kYsBlock095),
+    TERM_BLOCK(kYsBlock096),
+    TERM_BLOCK(kYsBlock097),
+    TERM_BLOCK(kYsBlock098),
+    TERM_BLOCK(kYsBlock099),
+    TERM_BLOCK(kYsBlock100),
+    TERM_BLOCK(kYsBlock101),
+    TERM_BLOCK(kYsBlock102),
+    TERM_BLOCK(kYsBlock103),
+    TERM_BLOCK(kYsBlock104),
+    TERM_BLOCK(kYsBlock105),
+    TERM_BLOCK(kYsBlock106),
+    TERM_BLOCK(kYsBlock107),
+    TERM_BLOCK(kYsBlock108),
+    TERM_BLOCK(kYsBlock109),
+    TERM_BLOCK(kYsBlock110),
+    TERM_BLOCK(kYsBlock111),
+    TERM_BLOCK(kYsBlock112),
+    TERM_BLOCK(kYsBlock113),
+    TERM_BLOCK(kYsBlock114),
+    TERM_BLOCK(kYsBlock115),
+    TERM_BLOCK(kYsBlock116),
+    TERM_BLOCK(kYsBlock117),
+    TERM_BLOCK(kYsBlock118),
+    TERM_BLOCK(kYsBlock119),
+    TERM_BLOCK(kYsBlock120),
+    TERM_BLOCK(kYsBlock121),
+    TERM_BLOCK(kYsBlock122),
 };
-static const NSInteger kYcBlocksCount =
-    (NSInteger)(sizeof(kYcBlocks) / sizeof(kYcBlocks[0]));
+static const NSInteger kYsBlocksCount =
+    (NSInteger)(sizeof(kYsBlocks) / sizeof(kYsBlocks[0]));
 
 #endif // DNDMODE_TERMINALCORPUS_DARWIN_H

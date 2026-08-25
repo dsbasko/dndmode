@@ -126,14 +126,34 @@ const (
 	// `terminal` (no suffix) defaults to Go.
 	//
 	// TerminalLangYopta is YoptaScript (yopta.space) — a joke Russian dialect of
-	// JavaScript, and the only corpus that is not ASCII. Its short spelling `yc`
+	// JavaScript, and the only corpus that is not ASCII. Its short spelling `ys`
 	// is deliberate: the language's own file extension is `.yopta`, but the flag
 	// suffix has to be typed at 3am with the machine about to be shielded.
 	TerminalLangGo         = "go"
 	TerminalLangPython     = "python"
 	TerminalLangTypeScript = "typescript"
 	TerminalLangRust       = "rust"
-	TerminalLangYopta      = "yc"
+	TerminalLangYopta      = "ys"
+
+	// legacyTerminalLangYopta is the spelling YoptaScript shipped under before it
+	// became `ys` — it read as an abbreviation of the language's own name rather
+	// than of YoptaScript, which is what the rename fixes.
+	//
+	// It stays ACCEPTED, and that is a safety decision rather than politeness.
+	// terminal_language is validated at startup, so rejecting the old spelling
+	// would make `dndmode` refuse to start on a config that worked yesterday —
+	// exit code and no shield — over the name of a cosmetic corpus. Accepting it
+	// costs one branch in NormalizeTerminalLanguage; refusing it costs the user
+	// their lock. It is deliberately NOT advertised: defaultConfigTemplate,
+	// --style's usage line and the validation error all name `ys` only, and
+	// MigrateFile rewrites the old spelling out of an existing config the first
+	// time it runs (see legacyValues).
+	//
+	// Nothing downstream may branch on it. Normalization folds it into
+	// TerminalLangYopta at the single funnel main.go already calls, so the C side
+	// (term_lang_from_string) knows one spelling; the pin is
+	// TestNormalizeTerminalLanguage_NeverEmitsALegacySpelling.
+	legacyTerminalLangYopta = "yc"
 	// DefaultTerminalLanguage is the language a bare `terminal` renders (mirrors
 	// DefaultGlassBlur for the glass param).
 	DefaultTerminalLanguage = TerminalLangGo
@@ -227,7 +247,7 @@ type Config struct {
 	// --style glass:N flag suffix (main.go). Validated by ValidateGlassBlur.
 	GlassBlur *float64 `yaml:"glass_blur"`
 	// TerminalLanguage selects the source language for overlay_style "terminal":
-	// "go" (default / absent), "python", "typescript", "rust" or "yc". Only meaningful
+	// "go" (default / absent), "python", "typescript", "rust" or "ys". Only meaningful
 	// for terminal; ignored for every other style. Per-run override: the
 	// --style terminal:<lang> flag suffix (main.go) WINS over this. A plain string
 	// so an ABSENT/empty key defaults to Go via NormalizeTerminalLanguage;
@@ -621,23 +641,41 @@ func setUnlockKeys(hashed, coded, legacy bool) []string {
 // NormalizeTerminalLanguage maps "" => the default terminal language (Go),
 // mirroring NormalizeOverlayStyle. A bare `--style terminal` (no :suffix) and an
 // absent value both normalize here; callers thread the result downstream.
+//
+// It is ALSO the one place a legacy spelling is folded into its current one
+// (`yc` => `ys`). Both sources of the value — the config key and the --style
+// terminal:<lang> suffix — pass through here before anything else sees the
+// string, which is what lets the rest of the program, C included, know exactly
+// one spelling per language. Pin:
+// TestNormalizeTerminalLanguage_NeverEmitsALegacySpelling.
 func NormalizeTerminalLanguage(s string) string {
-	if s == "" {
+	switch s {
+	case "":
 		return DefaultTerminalLanguage
+	case legacyTerminalLangYopta:
+		return TerminalLangYopta
+	default:
+		return s
 	}
-	return s
 }
 
-// ValidateTerminalLanguage accepts "" (treated as the default, Go) and the five
-// supported languages; anything else returns a non-nil error suitable for
-// main.go's stderr template. Gates the --style terminal:<lang> flag suffix.
+// ValidateTerminalLanguage accepts "" (treated as the default, Go), the five
+// supported languages and the deprecated `yc` spelling of YoptaScript; anything
+// else returns a non-nil error suitable for main.go's stderr template. Gates the
+// --style terminal:<lang> flag suffix.
+//
+// The error text lists the CURRENT spellings only. A user who reaches it typed
+// something that is neither, and offering them a deprecated name to copy would
+// hand out the one spelling this release is trying to retire. `yopta` stays
+// rejected for the reason it always was: it is a second live spelling, not a
+// legacy one, and accepting it would let the two drift.
 func ValidateTerminalLanguage(s string) error {
 	switch s {
 	case "", TerminalLangGo, TerminalLangPython, TerminalLangTypeScript,
-		TerminalLangRust, TerminalLangYopta:
+		TerminalLangRust, TerminalLangYopta, legacyTerminalLangYopta:
 		return nil
 	default:
-		return fmt.Errorf("unknown terminal language %q (valid: go, python, typescript, rust, yc)", s)
+		return fmt.Errorf("unknown terminal language %q (valid: go, python, typescript, rust, ys)", s)
 	}
 }
 
@@ -945,9 +983,9 @@ unlock_code: %s
 
 # --- terminal_language -------------------------------------------------------
 # Source language rendered by overlay_style 'terminal': go (default), python,
-# typescript, rust or yc. Each has its own compiled-in corpus + syntax
+# typescript, rust or ys. Each has its own compiled-in corpus + syntax
 # highlighting. Only used by 'terminal'; ignored otherwise.
-#   yc : YoptaScript (yopta.space) — JavaScript as spoken by the gopniks of the
+#   ys : YoptaScript (yopta.space) — JavaScript as spoken by the gopniks of the
 #        Russian courtyard. Same scrolling terminal, entirely in Cyrillic, and
 #        entirely unprintable. Whoever wanders up to your unattended MacBook gets
 #        to read that instead of your work.

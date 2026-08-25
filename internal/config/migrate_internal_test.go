@@ -3,6 +3,7 @@
 package config
 
 import (
+	"reflect"
 	"strings"
 	"testing"
 )
@@ -77,5 +78,55 @@ func TestMentionsKey(t *testing.T) {
 func TestFreshTemplate_NeedsNoMigration(t *testing.T) {
 	if missing := MissingSections([]byte(renderedTemplate())); len(missing) != 0 {
 		t.Errorf("a freshly rendered config reports missing sections: %v", missing)
+	}
+}
+
+// TestLegacyValues_MapToStringFields keeps the rename table and the safety
+// proof from drifting apart. foldLegacyValues finds a field by its yaml tag and
+// silently does nothing when there is none — the alternative would be panicking
+// inside a startup migration — so a typo'd or renamed key would quietly turn the
+// proof into a plain DeepEqual and reject the very rewrite the table authorises.
+func TestLegacyValues_MapToStringFields(t *testing.T) {
+	fields := make(map[string]reflect.Kind)
+	t2 := reflect.TypeFor[Config]()
+	for i := range t2.NumField() {
+		name, _, _ := strings.Cut(t2.Field(i).Tag.Get("yaml"), ",")
+		fields[name] = t2.Field(i).Type.Kind()
+	}
+	for _, lv := range legacyValues {
+		kind, ok := fields[lv.key]
+		if !ok {
+			t.Errorf("legacyValues names key %q, which no Config field carries as a yaml tag", lv.key)
+			continue
+		}
+		if kind != reflect.String {
+			t.Errorf("legacyValues names key %q, whose Config field is %v, not a string", lv.key, kind)
+		}
+	}
+}
+
+// TestLegacyValues_OldSpellingsStillLoad is the fail-safe pin. A rename is
+// published as a rewrite of the user's file, and that rewrite can simply not
+// happen — a read-only checkout, a busy publish lock, a config that does not
+// parse. If validation had stopped accepting the old spelling, every one of
+// those cases would turn an upgrade into a machine that refuses to start.
+func TestLegacyValues_OldSpellingsStillLoad(t *testing.T) {
+	for _, lv := range legacyValues {
+		if err := ValidateTerminalLanguage(lv.from); err != nil {
+			t.Errorf("ValidateTerminalLanguage(%q) = %v; the pre-rename spelling must keep loading", lv.from, err)
+		}
+		if got := NormalizeTerminalLanguage(lv.from); got != lv.to {
+			t.Errorf("NormalizeTerminalLanguage(%q) = %q, want %q", lv.from, got, lv.to)
+		}
+	}
+}
+
+// TestFreshTemplate_CarriesNoLegacySpelling pins the other half of the rename:
+// a config written today must not be born needing migration. Without it, a
+// forgotten `yc` in defaultConfigTemplate would have every fresh install
+// respell its own generated documentation on its second run.
+func TestFreshTemplate_CarriesNoLegacySpelling(t *testing.T) {
+	if _, renamed := RenameLegacyValues([]byte(renderedTemplate())); len(renamed) != 0 {
+		t.Errorf("a freshly rendered config still carries legacy spellings for %v", renamed)
 	}
 }

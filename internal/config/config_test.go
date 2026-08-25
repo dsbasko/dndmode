@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"regexp"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -363,25 +364,52 @@ func TestLoader_Load_PrettyErrorOnSyntaxError(t *testing.T) {
 }
 
 // TestValidateTerminalLanguage pins the --style terminal:<lang> gate: the five
-// supported languages and "" (default) are accepted; anything else (including
-// case variants and aliases) is rejected. "yopta" is in the reject list on
-// purpose: the language's own name is the obvious guess, and the flag takes the
-// short "yc" — a silent accept of both would let the two spellings drift.
+// supported languages, "" (default) and the deprecated "yc" spelling of
+// YoptaScript are accepted; anything else (including case variants and aliases)
+// is rejected.
+//
+// "yopta" is in the reject list on purpose, and it is NOT the same thing as
+// "yc". "yopta" would be a second LIVE spelling of a current language, and
+// accepting it would let the two drift. "yc" is a spelling this program used to
+// write into config files itself: rejecting it would mean an upgrade turning a
+// working config into a startup failure, which is a far worse outcome than a
+// name being out of date. It is folded into "ys" at a single funnel
+// (NormalizeTerminalLanguage) so nothing downstream sees two spellings, and
+// MigrateFile rewrites it out of the file on the next run.
 func TestValidateTerminalLanguage(t *testing.T) {
 	t.Parallel()
 	for _, s := range []string{
 		"", config.TerminalLangGo, config.TerminalLangPython,
 		config.TerminalLangTypeScript, config.TerminalLangRust,
 		config.TerminalLangYopta,
+		"yc", // deprecated spelling of YoptaScript; see the doc comment
 	} {
 		if err := config.ValidateTerminalLanguage(s); err != nil {
 			t.Errorf("ValidateTerminalLanguage(%q) = %v, want nil", s, err)
 		}
 	}
-	for _, s := range []string{"ruby", "golang", "py", "ts", "Go", "PYTHON", "c++", "yopta", "YC"} {
+	for _, s := range []string{"ruby", "golang", "py", "ts", "Go", "PYTHON", "c++", "yopta", "YC", "YS"} {
 		if err := config.ValidateTerminalLanguage(s); err == nil {
 			t.Errorf("ValidateTerminalLanguage(%q) = nil, want error", s)
 		}
+	}
+}
+
+// TestValidateTerminalLanguage_ErrorNamesOnlyCurrentSpellings keeps the reject
+// message from handing out the name this release is retiring. Whoever reads it
+// mistyped something and is looking for a value to copy.
+func TestValidateTerminalLanguage_ErrorNamesOnlyCurrentSpellings(t *testing.T) {
+	t.Parallel()
+	err := config.ValidateTerminalLanguage("ruby")
+	if err == nil {
+		t.Fatal("ValidateTerminalLanguage(\"ruby\") = nil, want error")
+	}
+	msg := err.Error()
+	if !strings.Contains(msg, config.TerminalLangYopta) {
+		t.Errorf("error %q does not name %q", msg, config.TerminalLangYopta)
+	}
+	if strings.Contains(msg, "yc") {
+		t.Errorf("error %q offers the deprecated spelling as a valid value", msg)
 	}
 }
 
@@ -398,6 +426,39 @@ func TestNormalizeTerminalLanguage(t *testing.T) {
 	} {
 		if got := config.NormalizeTerminalLanguage(s); got != s {
 			t.Errorf("NormalizeTerminalLanguage(%q) = %q, want unchanged", s, got)
+		}
+	}
+	if got := config.NormalizeTerminalLanguage("yc"); got != config.TerminalLangYopta {
+		t.Errorf("NormalizeTerminalLanguage(%q) = %q, want %q", "yc", got, config.TerminalLangYopta)
+	}
+}
+
+// TestNormalizeTerminalLanguage_NeverEmitsALegacySpelling is the pin the C side
+// leans on. term_lang_from_string (terminalview_darwin.m) knows the CURRENT
+// spellings only, and cgo is unreachable from _test.go, so nothing over there
+// can be tested — the guarantee has to be made on this side instead: whatever
+// ValidateTerminalLanguage lets through, Normalize turns into one of the
+// spellings C recognises. A legacy spelling that leaked past here would not
+// error; it would silently render Go while the user asked for YoptaScript.
+func TestNormalizeTerminalLanguage_NeverEmitsALegacySpelling(t *testing.T) {
+	t.Parallel()
+	canonical := []string{
+		config.TerminalLangGo, config.TerminalLangPython,
+		config.TerminalLangTypeScript, config.TerminalLangRust,
+		config.TerminalLangYopta,
+	}
+	// Every spelling the validator accepts, including the empty default and the
+	// deprecated ones — the exhaustive list, not a sample.
+	for _, s := range []string{
+		"", config.TerminalLangGo, config.TerminalLangPython,
+		config.TerminalLangTypeScript, config.TerminalLangRust,
+		config.TerminalLangYopta, "yc",
+	} {
+		if err := config.ValidateTerminalLanguage(s); err != nil {
+			t.Fatalf("ValidateTerminalLanguage(%q) = %v; the list above is stale", s, err)
+		}
+		if got := config.NormalizeTerminalLanguage(s); !slices.Contains(canonical, got) {
+			t.Errorf("NormalizeTerminalLanguage(%q) = %q, which term_lang_from_string does not know", s, got)
 		}
 	}
 }

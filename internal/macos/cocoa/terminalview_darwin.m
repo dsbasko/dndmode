@@ -135,7 +135,7 @@ static const char *const kRsKeywords[] = {
     "str", "String", "Vec", "Option", "Result", "Box", "dyn", "async",
     "await", "unsafe", "crate", "super",
 };
-// YoptaScript (terminal:yc) — the one NON-ASCII language: its keywords are
+// YoptaScript (terminal:ys) — the one NON-ASCII language: its keywords are
 // Cyrillic UTF-8 literals. Nothing in the tokenizer needs to know that: keyword
 // comparison is a byte-exact strncmp against the ident run, and an ident run
 // swallows every byte >= 0x80 (see term_is_ident_start), so a Cyrillic word is
@@ -149,7 +149,7 @@ static const char *const kRsKeywords[] = {
 // deliberately ABSENT: the corpus may not contain a line that reads like a file
 // boundary (see the anonymity note in terminalcorpus_darwin.h), so they would be
 // dead entries pointing at text that is not allowed to exist.
-static const char *const kYcKeywords[] = {
+static const char *const kYsKeywords[] = {
     "йопта", "куку", "гыы", "участковый", "ясенХуй", "вилкойвглаз",
     "иливжопураз", "го", "потрещим", "крч", "отвечаю", "харэ", "двигай",
     "естьчо", "лещ", "пахану", "хапнуть", "гоп", "тюряжка", "пнх",
@@ -186,7 +186,7 @@ typedef struct {
 // buffer.
 //
 // BYTES AND COLUMNS ARE NOT THE SAME NUMBER. They coincide for the four ASCII
-// languages, but `terminal:yc` (YoptaScript) is Cyrillic UTF-8, where one glyph
+// languages, but `terminal:ys` (YoptaScript) is Cyrillic UTF-8, where one glyph
 // is two bytes. `start`/`length` address the C string (NSString construction,
 // strncmp); `col`/`cols` address the fixed monospaced grid (glyph x-position,
 // typing progress). Mixing them up would place every Cyrillic line at double its
@@ -238,7 +238,7 @@ static NSInteger term_bytes_for_cols(const char *text, NSInteger start,
     return k;
 }
 
-// Any byte >= 0x80 counts as an identifier byte, so a Cyrillic word (terminal:yc)
+// Any byte >= 0x80 counts as an identifier byte, so a Cyrillic word (terminal:ys)
 // tokenizes as ONE ident run and reaches term_is_keyword whole. Harmless for the
 // four ASCII corpora, which contain no such byte.
 static BOOL term_is_ident_start(char c) {
@@ -382,12 +382,21 @@ typedef struct {
 
 // term_lang_from_string maps the (already config-validated) language string to the
 // enum; NULL / empty / unknown -> Go, matching config.NormalizeTerminalLanguage.
+//
+// Only CANONICAL spellings are listed. YoptaScript shipped as "yc" before it was
+// renamed to "ys", and that older spelling deliberately does NOT appear here: it
+// is folded into "ys" by config.NormalizeTerminalLanguage, which every caller of
+// this function goes through. Teaching the alias to C as well would put the
+// legacy spelling in two places — one of them untested, since cgo is unreachable
+// from _test.go — and the pair would drift the first time a third spelling
+// appeared. config.TestNormalizeTerminalLanguage_NeverEmitsALegacySpelling is
+// what keeps this list sufficient.
 static TermLang term_lang_from_string(const char *s) {
     if (s == NULL) { return TermLangGo; }
     if (strcmp(s, "python") == 0)     { return TermLangPython; }
     if (strcmp(s, "typescript") == 0) { return TermLangTypeScript; }
     if (strcmp(s, "rust") == 0)       { return TermLangRust; }
-    if (strcmp(s, "yc") == 0)         { return TermLangYopta; }
+    if (strcmp(s, "ys") == 0)         { return TermLangYopta; }
     return TermLangGo;
 }
 
@@ -409,8 +418,8 @@ static TermLangSpec term_lang_spec(TermLang lang) {
             return (TermLangSpec){ kRsBlocks, kRsBlocksCount,
                 { kRsKeywords, TERM_KWCOUNT(kRsKeywords), NO, NO } };
         case TermLangYopta:
-            return (TermLangSpec){ kYcBlocks, kYcBlocksCount,
-                { kYcKeywords, TERM_KWCOUNT(kYcKeywords), NO, YES } };
+            return (TermLangSpec){ kYsBlocks, kYsBlocksCount,
+                { kYsKeywords, TERM_KWCOUNT(kYsKeywords), NO, YES } };
         case TermLangGo:
         default:
             return (TermLangSpec){ kGoBlocks, kGoBlocksCount,
@@ -494,7 +503,7 @@ typedef enum {
 // per frame. Indexed by (NSUInteger)TermClass. Also caches the caret attributes
 // and the block-cursor glyph (built from a unichar rather than pasted in, so the
 // codepoint is stated outright instead of riding on the file's encoding — the
-// only non-ASCII in this file is kYcKeywords, where the bytes ARE the data).
+// only non-ASCII in this file is kYsKeywords, where the bytes ARE the data).
 - (void)buildAttributes {
     NSMutableArray<NSDictionary *> *a =
         [NSMutableArray arrayWithCapacity:(NSUInteger)kTermClassCount];
@@ -684,7 +693,7 @@ typedef enum {
     if (_lineCount > 0) {
         switch (_phase) {
             case TermPhaseTyping: {
-                // GLYPHS, not bytes: on a Cyrillic (yc) line the byte length is
+                // GLYPHS, not bytes: on a Cyrillic (ys) line the byte length is
                 // ~2x the width, so typing to it would stall the caret for a
                 // second line's worth of frames past the end of the text.
                 NSInteger bottomLen = _lines[_lineCount - 1].cols;
@@ -846,7 +855,7 @@ typedef enum {
 // pattern in window_darwin.m. Its Go wrappers are in terminalview_darwin.go.
 //
 // It exposes byte offsets AND columns because the two diverge exactly where the
-// UTF-8 bugs are — a Cyrillic (yc) line where col != start is the case the Go
+// UTF-8 bugs are — a Cyrillic (ys) line where col != start is the case the Go
 // test pins.
 int terminal_tokenize_for_test(const char *line, const char *lang, int maxSegs,
                                int *outStart, int *outLen,

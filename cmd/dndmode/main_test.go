@@ -140,7 +140,13 @@ func Test_parseStyleFlag(t *testing.T) {
 		{name: "terminal:python", in: "terminal:python", wantBase: "terminal", wantLang: "python"},
 		{name: "terminal:typescript", in: "terminal:typescript", wantBase: "terminal", wantLang: "typescript"},
 		{name: "terminal:rust", in: "terminal:rust", wantBase: "terminal", wantLang: "rust"},
-		{name: "terminal:yc", in: "terminal:yc", wantBase: "terminal", wantLang: "yc"},
+		{name: "terminal:ys", in: "terminal:ys", wantBase: "terminal", wantLang: "ys"},
+		// parseStyleFlag hands the suffix back VERBATIM — the deprecated
+		// spelling is folded into "ys" one step later, by the single
+		// config.NormalizeTerminalLanguage call that both the flag and the
+		// config key pass through. Normalizing here as well would put the alias
+		// table in two places.
+		{name: "terminal:yc (deprecated) still parses", in: "terminal:yc", wantBase: "terminal", wantLang: "yc"},
 		{name: "terminal language with spaces", in: "terminal: rust ", wantBase: "terminal", wantLang: "rust"},
 		{name: "terminal empty suffix → default", in: "terminal:", wantBase: "terminal", wantLang: ""},
 		{name: "unknown terminal language rejected", in: "terminal:ruby", wantErr: true},

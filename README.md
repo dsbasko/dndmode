@@ -241,6 +241,33 @@ secret is not resolvable, and guessing wrong here locks the machine with a code
 the owner does not believe is in effect. See
 [The unlock code](#the-unlock-code) for the grammar and the length rules.
 
+### `terminal:yc` is now `terminal:ys`
+
+The YoptaScript corpus for `overlay_style: terminal` used to be spelled `yc`; it
+is `ys` now, after the language it renders. **Nothing to do** - `yc` still
+loads, and the first time you start dndmode after the upgrade it rewrites the
+line in `~/.config/dndmode/config.yml` for you, along with the paragraph in that
+file describing it:
+
+```yaml
+# before
+terminal_language: yc
+
+# after
+terminal_language: ys
+```
+
+The rewrite is atomic and only ever changes the spelling: dndmode re-parses the
+result and refuses to publish it if any setting came out different, so a
+migration cannot cost you a working config. If it cannot write at all - a
+read-only checkout, a config.yml symlinked somewhere locked - nothing happens
+and the old spelling goes on working; it will try again next start.
+
+`--style terminal:yc` on the command line keeps working too, so an alias or a
+script does not have to be touched. Neither spelling is printed any more: the
+config template, `--style`'s usage line and the error you get for a typo all say
+`ys`.
+
 ## First-run setup
 
 1. Install dndmode (see [Install](#install)).
@@ -291,7 +318,7 @@ when omitted.
 
 | Flag | Values | Default | Effect |
 | --- | --- | --- | --- |
-| `--style` | `black` \| `matrix` \| `terminal`[`:go`\|`python`\|`typescript`\|`rust`\|`yc`] \| `dvd` \| `glass`[`:radius`] \| `none` | config | Overlay look for this run; wins over `overlay_style`. `terminal:<lang>` picks the source language (default `go`). |
+| `--style` | `black` \| `matrix` \| `terminal`[`:go`\|`python`\|`typescript`\|`rust`\|`ys`] \| `dvd` \| `glass`[`:radius`] \| `none` | config | Overlay look for this run; wins over `overlay_style`. `terminal:<lang>` picks the source language (default `go`). |
 | `--mute` | `true` \| `false` | config | Mute system audio for this run. |
 | `--focus` | `true` \| `false` | config | Toggle Do Not Disturb for this run. |
 | `--timer` | Go duration (`30m`, `1h30m`, `90s`) | off | Auto-unlock after the duration, then exit `0`. |
@@ -523,9 +550,9 @@ unlock_code: Ctrl+Option+Cmd+X
 
 # --- terminal_language -------------------------------------------------------
 # Source language rendered by overlay_style 'terminal': go (default), python,
-# typescript, rust or yc. Each has its own compiled-in corpus + syntax
+# typescript, rust or ys. Each has its own compiled-in corpus + syntax
 # highlighting. Only used by 'terminal'; ignored otherwise.
-#   yc : YoptaScript (yopta.space) - JavaScript as spoken by the gopniks of the
+#   ys : YoptaScript (yopta.space) - JavaScript as spoken by the gopniks of the
 #        Russian courtyard. Same scrolling terminal, entirely in Cyrillic, and
 #        entirely unprintable. Whoever wanders up to your unattended MacBook gets
 #        to read that instead of your work.
@@ -900,7 +927,7 @@ never reacts to input, so it leaks no signal that keystrokes are being intercept
 Pick the language two ways (same precedence as glass `glass_blur` vs
 `--style glass:<radius>`): set `terminal_language:` in `config.yml` for the
 default, and/or append `--style terminal:<lang>` to override it for a single run.
-Valid values are `go` (default), `python`, `typescript`, `rust`, and `yc`; a bare
+Valid values are `go` (default), `python`, `typescript`, `rust`, and `ys`; a bare
 `--style terminal` with no config key renders Go. Each language has its own
 compiled-in corpus, large enough that the stream does not repeat for over two
 hours, and its own syntax highlighting.
@@ -910,10 +937,10 @@ dndmode --style terminal            # Go (default)
 dndmode --style terminal:python
 dndmode --style terminal:typescript
 dndmode --style terminal:rust
-dndmode --style terminal:yc         # YoptaScript
+dndmode --style terminal:ys         # YoptaScript
 ```
 
-`yc` is [YoptaScript](https://yopta.space/) - a real joke language that transpiles
+`ys` is [YoptaScript](https://yopta.space/) - a real joke language that transpiles
 to JavaScript, written entirely in the slang of the Russian courtyard (`йопта` is
 `function`, `вилкойвглаз` is `if`, `отвечаю` is `return`, and the semicolon is
 `нах`). It scrolls like any other language, but anyone who wanders up to the

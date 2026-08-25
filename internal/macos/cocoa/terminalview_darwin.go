@@ -39,9 +39,9 @@ type termSegment struct {
 // termColSegment is one tokenized run with BOTH coordinate systems: bytes
 // [start, start+length) of the source line occupying display columns
 // [col, col+cols) of the monospaced grid. They coincide for ASCII and diverge
-// for the Cyrillic `yc` corpus, which is the case worth pinning — drawRect:
+// for the Cyrillic `ys` corpus, which is the case worth pinning — drawRect:
 // positions glyphs by col and clips the typing head by cols, so a col/cols bug
-// is invisible in every ASCII test and wrecks every yc line.
+// is invisible in every ASCII test and wrecks every ys line.
 type termColSegment struct {
 	start  int
 	length int

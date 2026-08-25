@@ -33,7 +33,7 @@ import (
 // (QUICK-gh8). blurRadius is the CIGaussianBlur radius (points) for the "glass"
 // style; a non-positive value means "use the built-in default" and it is ignored
 // for every other style. language selects the source language for the "terminal"
-// style ("go"/"python"/"typescript"/"rust"/"yc"; "" => go) and is ignored for every
+// style ("go"/"python"/"typescript"/"rust"/"ys"; "" => go) and is ignored for every
 // other style. Returns the boxed NSWindow pointer (caller owns; pass
 // to closeOverlayWindow exactly once). On failure returns (nil, error) with the
 // C-side strdup'd message bridged via C.GoString + C.free.

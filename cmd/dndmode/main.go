@@ -364,7 +364,7 @@ func run() int {
 	// for a single run without editing ~/.config/dndmode/config.yml. Empty (the
 	// default) means "use whatever the config says". Validated at Step 5b.1 with
 	// the same ValidateOverlayStyle gate as the config value.
-	styleFlag := flag.String("style", "", "override overlay_style for this run (black|matrix|terminal[:go|python|typescript|rust|yc]|dvd|glass[:radius]|none); empty = use config")
+	styleFlag := flag.String("style", "", "override overlay_style for this run (black|matrix|terminal[:go|python|typescript|rust|ys]|dvd|glass[:radius]|none); empty = use config")
 	// --mute / --focus override the config keys for a single run (same
 	// precedence as --style: non-empty WINS over YAML, empty = use config).
 	// Tri-state strings ("" | "true" | "false") rather than flag.Bool because a
@@ -479,13 +479,15 @@ func run() int {
 		debugOn = true
 	}
 
-	// --- Step 5.9: bring an older config.yml up to date (documentation only) ---
+	// --- Step 5.9: bring an older config.yml up to date ---
 	// A config written by an earlier release still WORKS — absent keys have
-	// always normalized to defaults — but it documents only the keys that
+	// always normalized to defaults, and a value whose name changed since is
+	// still accepted under its old spelling — but it documents only the keys that
 	// existed when it was created, and this file is the only documentation most
-	// users ever read. config.MigrateFile appends the missing commented
-	// sections and touches nothing else; it proves the edit changed no setting
-	// before writing, so it cannot alter how this run behaves.
+	// users ever read. config.MigrateFile appends the missing commented sections
+	// and respells the renamed values, and touches nothing else; it proves the
+	// edit changed no setting before writing, so it cannot alter how this run
+	// behaves.
 	//
 	// Placed BEFORE Step 5a rather than after, and that ordering is the whole
 	// reason this is not simply appended anywhere convenient. The fingerprint
@@ -503,13 +505,18 @@ func run() int {
 	// is advisory, logged at debug level, and leaves a working config in place.
 	if !created {
 		if release, lockErr := acquirePublishLock(filepath.Dir(cfgPath)); lockErr == nil {
-			added, migErr := config.MigrateFile(cfgPath)
+			mig, migErr := config.MigrateFile(cfgPath)
 			release()
 			switch {
 			case migErr != nil:
 				log.Debug("config migration skipped", slog.Any("err", migErr))
-			case len(added) > 0:
-				log.Debug("config documentation updated", slog.Any("keys", added))
+			case mig.Changed():
+				if len(mig.Documented) > 0 {
+					log.Debug("config documentation updated", slog.Any("keys", mig.Documented))
+				}
+				if len(mig.Renamed) > 0 {
+					log.Debug("config values respelled", slog.Any("keys", mig.Renamed))
+				}
 				// Re-read so cfg and cfgRaw describe the file as it now exists.
 				// A failure here is not fatal either: the values already loaded
 				// are still valid, and MigrateFile proved the rewrite was

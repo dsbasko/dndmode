@@ -216,12 +216,12 @@ func formatSegments(segs []termSegment) string {
 	return out + "]"
 }
 
-// TestTerminalView_Tokenize_Yopta_Keywords exercises the `yc` (YoptaScript)
+// TestTerminalView_Tokenize_Yopta_Keywords exercises the `ys` (YoptaScript)
 // corpus's own keyword table through the same tokenizer. Two things are pinned
 // that no ASCII case can reach: a Cyrillic word arrives at term_is_keyword as ONE
 // ident run (term_is_ident_start swallows every byte >= 0x80), and it is matched
 // byte-exactly, so a keyword that differs only by `ё` vs `е` does NOT light up —
-// which is why the corpus and kYcKeywords have to agree on the spelling.
+// which is why the corpus and kYsKeywords have to agree on the spelling.
 func TestTerminalView_Tokenize_Yopta_Keywords(t *testing.T) {
 	tests := []struct {
 		name string
@@ -256,7 +256,7 @@ func TestTerminalView_Tokenize_Yopta_Keywords(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := tokenizeLineColsForTest(tt.line, "yc")
+			got := tokenizeLineColsForTest(tt.line, "ys")
 			if len(got) != len(tt.want) {
 				t.Fatalf("tokenize(%q) produced %d segments, want %d: %v",
 					tt.line, len(got), len(tt.want), got)
@@ -292,7 +292,7 @@ func TestTerminalView_Tokenize_ColumnsTrackGlyphs(t *testing.T) {
 
 	for _, line := range lines {
 		t.Run(line, func(t *testing.T) {
-			segs := tokenizeLineColsForTest(line, "yc")
+			segs := tokenizeLineColsForTest(line, "ys")
 			if len(segs) == 0 {
 				t.Fatalf("tokenize(%q) produced no segments", line)
 			}
