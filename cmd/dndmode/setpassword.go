@@ -39,11 +39,13 @@ import (
 // only whether its diagnostics reach the terminal, and diagnosing a
 // --set-password that exits 1 without a word is exactly what it is for.
 type setPasswordFlags struct {
-	style string
-	timer string
-	mute  string
-	focus string
-	watch bool
+	style  string
+	timer  string
+	mute   string
+	focus  string
+	watch  bool
+	kill   bool
+	status bool
 }
 
 // conflictingFlag returns the name of the first flag that cannot be combined
@@ -62,6 +64,11 @@ type setPasswordFlags struct {
 // of its passes, which is exactly what a waiting watch would be arming
 // sessions into. Doing one and then the other is two commands, and it is
 // clearer as two.
+//
+// --kill and --status are refused because they are commands too: each one
+// does its thing and exits, and there is no order in which "stop the watch
+// process" or "describe it" combines with "capture a new code" that is
+// clearer than running them separately.
 func (f setPasswordFlags) conflictingFlag() string {
 	switch {
 	case f.style != "":
@@ -74,6 +81,10 @@ func (f setPasswordFlags) conflictingFlag() string {
 		return "--focus"
 	case f.watch:
 		return "--watch"
+	case f.kill:
+		return "--kill"
+	case f.status:
+		return "--status"
 	default:
 		return ""
 	}

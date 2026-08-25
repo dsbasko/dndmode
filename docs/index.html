@@ -97,7 +97,7 @@
       <div><p class="eyebrow" style="padding-bottom:8px">Awake</p><p style="font-size:14px;color:var(--ink2)">One IOKit power assertion, released on exit.</p></div>
       <div><p class="eyebrow" style="padding-bottom:8px">Silence</p><p style="font-size:14px;color:var(--ink2)">Audio muted and restored. Banners never show.</p></div>
     </div>
-    <p class="small" style="padding-top:24px">No daemon, no launchd, no menu-bar icon. You run it, you watch it, you end it.</p>
+    <p class="small" style="padding-top:24px">No launchd, no login item, no menu-bar icon. A session is a foreground process you run, watch and end; <code>--watch</code> waits in the background until <code>--kill</code>.</p>
   </div>
 </section>
 
@@ -756,8 +756,8 @@
         <p style="font-size:14.5px">It shows a blurred desktop on purpose. Use <code>black</code>, <code>matrix</code>, <code>terminal</code> or <code>dvd</code> if you need the desktop fully hidden.</p>
       </div>
       <div style="display:flex;flex-direction:column;gap:12px;padding:20px 0;border-top:1px solid var(--linesoft)">
-        <h4>Foreground only</h4>
-        <p style="font-size:14.5px">No daemon and no launchd mode. The terminal that launched dndmode must stay open &mdash; which is the point: the utility is meant to be observable.</p>
+        <h4>No launchd, no login item</h4>
+        <p style="font-size:14.5px">A session is a foreground process and the terminal that launched it must stay open &mdash; which is the point: the utility is meant to be observable. <code>--watch</code> runs in the background, but as an ordinary process: <code>--status</code> describes it, <code>--kill</code> ends it, nothing restarts it and nothing starts it at login.</p>
       </div>
       <div style="display:flex;flex-direction:column;gap:12px;padding:20px 0;border-top:1px solid var(--linesoft)">
         <h4>One instance at a time</h4>

@@ -942,7 +942,9 @@ unlock_code: %s
 #
 # If macOS or another app (Raycast, Alfred, Karabiner) already owns the
 # combination, --watch says so at startup instead of silently never firing.
-# Changing this value takes effect on the next --watch start.
+# The watch process runs in the background: 'dndmode --status' describes it
+# and 'dndmode --kill' stops it. Changing this value takes effect on the next
+# --watch start ('dndmode --kill', then 'dndmode --watch').
 # activate_hotkey: Ctrl+Option+Cmd+D
 
 # --- overlay_style -----------------------------------------------------------

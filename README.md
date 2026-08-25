@@ -14,13 +14,17 @@ behaves as if it is locked, and the long job you left running (an AI agent in YO
 mode, a build, a render) never gets interrupted. You come back, type your unlock
 code, and everything is exactly where you left it.
 
-It is a foreground CLI. No daemon, no launchd, no menu-bar icon. You run it, you
-watch it, you end it.
+A session is a foreground CLI: you run it, you watch it, you end it. Watch mode is
+the one thing that runs in the background - an ordinary process you start, inspect
+and stop from the same command - and even it has no launchd job and no menu-bar
+icon.
 
 ```bash
 dndmode            # lock now, run until the unlock code is typed
 dndmode --timer 1h # lock now, auto-unlock after an hour
-dndmode --watch    # don't lock yet - wait for a hotkey, like Ctrl+Cmd+Q does
+dndmode --watch    # don't lock yet - wait in the background for a hotkey, like Ctrl+Cmd+Q does
+dndmode --status   # is it waiting? is the shield up right now?
+dndmode --kill     # stop waiting
 ```
 
 **Quick install** via the personal Homebrew tap (other methods and the permission
@@ -323,8 +327,10 @@ when omitted.
 | `--focus` | `true` \| `false` | config | Toggle Do Not Disturb for this run. |
 | `--timer` | Go duration (`30m`, `1h30m`, `90s`) | off | Auto-unlock after the duration, then exit `0`. |
 | `--debug` | (boolean) | off | Un-silence banners, diagnostics, and logs. |
-| `--watch` | (boolean) | off | Don't lock yet. Wait for `activate_hotkey` and raise a session on every press - see [Watch mode](#watch-mode). |
-| `--set-password` | (boolean) | off | Not a session flag. Captures a new unlock code from real keystrokes and rewrites the config as a salted hash, then exits - see [Hashing the code](#hashing-the-code-with---set-password). Refuses to be combined with any of the five flags above. |
+| `--watch` | (boolean) | off | Don't lock yet. Start a background process that waits for `activate_hotkey` and raises a session on every press - see [Watch mode](#watch-mode). The session flags above apply to every session it raises. |
+| `--status` | (boolean) | off | Not a session flag. Reports the background `--watch` process - PID, uptime, whether the shield is up - and exits `0` if one is running, `9` if not. |
+| `--kill` | (boolean) | off | Not a session flag. Stops the background `--watch` process and exits `0` - also when none was running. |
+| `--set-password` | (boolean) | off | Not a session flag. Captures a new unlock code from real keystrokes and rewrites the config as a salted hash, then exits - see [Hashing the code](#hashing-the-code-with---set-password). Refuses to be combined with any flag in this table other than `--debug`. |
 
 ### Watch mode
 
@@ -335,9 +341,11 @@ and it comes down and returns to waiting. It is the shape `Ctrl+Cmd+Q` has, appl
 to a lock that does not suspend your work.
 
 ```bash
-dndmode --watch                     # wait, using activate_hotkey from the config
+dndmode --watch                     # start waiting in the background, using activate_hotkey from the config
 dndmode --watch --style matrix      # every session this run uses the matrix overlay
 dndmode --watch --timer 30m         # every session auto-unlocks after 30 minutes
+dndmode --status                    # PID, uptime, whether the shield is up right now
+dndmode --kill                      # stop waiting (exit 0 even if nothing was running)
 ```
 
 **While it waits, dndmode holds nothing** - no shield, no input tap, no power
@@ -348,10 +356,28 @@ its own trigger. **It is not a keylogger, and it cannot become one while idle.**
 Accessibility is still required for the sessions that follow, so `--watch` checks
 for it at startup rather than at the first press.
 
-Still a foreground process. No daemon, no launchd job, no menu-bar icon - the
-terminal that launched it must stay open, and `Ctrl-C` there ends it. (`Ctrl-C`
-cannot be pressed while a session is up, because the tap swallows it; that is the
-unlock code's job.)
+**It runs in the background.** `dndmode --watch` re-executes itself detached from
+the terminal, waits until that process has claimed the combination, prints a short
+summary (PID, hotkey, log path), and returns. What is left is an ordinary process: `ps` shows
+it as `dndmode --watch`, `dndmode --status` describes it, `dndmode --kill` (or a
+plain `SIGTERM`) ends it, and closing the terminal does not. There is still no
+launchd job and no menu-bar icon - nothing restarts it, nothing starts it at
+login, and it dies with the machine. Its output goes to
+`~/.config/dndmode/watch.log` (truncated on every start; `--debug` fills it the
+way it would have filled the terminal), and `--status` prints the path.
+
+Every check the foreground mode made still happens, in the background process,
+before the terminal gets its prompt back: a bad flag, an unusable config or a
+missing permission fails with the same exit code and the same message (printed on
+the terminal, gated by `--debug` as always), and `Ctrl-C` while it is waiting for
+an Accessibility grant stops it rather than leaving it to come up later. Only one
+watch process runs at a time - a second `--watch` exits `5` and names the first.
+
+`--status` exits `0` when a watch process is running and `9` when it is not, so a
+script can test it; `--kill` exits `0` whenever "not running" is true afterwards,
+including when it already was. `--kill` while a session is up brings the shield
+down - the same thing `pkill dndmode` always did, and reachable only from a shell
+that is not behind the shield (SSH, a script).
 
 **The activation combination is not a secret.** It is printed at startup and
 documented here, and anyone nearby can use it to raise the shield on your unattended
@@ -360,7 +386,7 @@ lower it: that still needs your unlock code. dndmode refuses to start if
 `activate_hotkey` is the same as the unlock code, since the published combination
 would then also lower the shield.
 
-**If an activation fails**, dndmode says so on the terminal *and* beeps, then keeps
+**If an activation fails**, dndmode says so in `watch.log` *and* beeps, then keeps
 waiting. That noise is deliberate: the dangerous outcome is not a failed lock but a
 user who pressed the combination, assumed it worked, and walked away. Failures are
 rare because almost everything is checked at startup - the remaining causes are a
@@ -369,7 +395,8 @@ Secure Event Input (a password field).
 
 If macOS or another app (Raycast, Alfred, Karabiner) already owns the combination,
 `--watch` says so at startup instead of silently never firing. Changing
-`activate_hotkey` takes effect on the next `--watch` start.
+`activate_hotkey` takes effect on the next `--watch` start: `dndmode --kill`, then
+`dndmode --watch`.
 
 A few notes on behavior:
 
@@ -388,12 +415,16 @@ A few notes on behavior:
 - **Invalid flag values** (`--timer 5x`, `--mute banana`, `--style neon`) exit with
   the config-error code `1`, and print the reason on stderr only under `--debug`.
 
-**One-shot command.** `dndmode --set-password` is not a session flag: it captures
+**One-shot commands.** `dndmode --set-password` is not a session flag: it captures
 a new unlock sequence from real keystrokes, stores it in the config as a salted
 hash instead of plain text, and exits without locking anything. It refuses to be
 combined with the session flags above; `--debug` is the one exception, and the
 only way to see why a refusal exited non-zero. See
 [Hashing the code with `--set-password`](#hashing-the-code-with---set-password).
+`--status` and `--kill` are commands in the same sense: they manage the background
+[watch](#watch-mode) process and exit, refuse every other flag but `--debug`, and
+- unlike everything else - print their answer whether or not `--debug` is set,
+because a status line that is silent by default answers nothing.
 
 ## Configuration
 
@@ -991,6 +1022,7 @@ only thing it tells you.
 | `6` | Required Shortcuts `dndmode-on` / `dndmode-off` not found (only when `focus: true`). |
 | `7` | Cannot read or delete `~/.config/dndmode/runtime.json`, or cannot claim `~/.config/dndmode/runtime.lock`. Both halves fail closed on a lock they cannot claim: a session refuses to raise the shield and `--set-password` refuses to install its tap, because without it neither can rule out the other. For `--set-password` anything else that leaves a running session unable to be *ruled out* lands here too - unreadable bytes, or a snapshot whose `pid` is missing, zero or negative. |
 | `8` | Internal panic, recovered after cleanup. |
+| `9` | `--status` only: no background watch process is running. |
 
 ## Threat model
 
@@ -1078,6 +1110,10 @@ Exit `4` also fires if the input tap was silently disabled and the watchdog coul
 bring it back. In that case, re-run and check that Accessibility is still granted.
 
 ### Another instance is already active (exit 5)
+
+If it is a background [watch](#watch-mode) process, `dndmode --status` names it and
+`dndmode --kill` stops it; a second `dndmode --watch` refuses with this code too
+(`already watching (PID …)`). For anything else:
 
 ```bash
 pgrep -x dndmode      # find the pid(s)
@@ -1183,10 +1219,12 @@ tccutil reset Accessibility com.dsbasko.dndmode
 tccutil reset ListenEvent com.dsbasko.dndmode
 ```
 
-`~/.config/dndmode` holds three files: `config.yml` (yours), `runtime.json`
-(written for the length of a session and deleted on exit) and `runtime.lock` (an
+`~/.config/dndmode` holds up to five files: `config.yml` (yours), `runtime.json`
+(written for the length of a session and deleted on exit), `runtime.lock` (an
 empty file used only as a lock; it is never written to and never removed while
-dndmode is installed).
+dndmode is installed), `watch.json` (written for the life of a background `--watch`
+process and deleted when it exits) and `watch.log` (that process's output,
+truncated on every `--watch` start).
 
 ## Building from source
 
@@ -1235,12 +1273,13 @@ internal/supervisor/  single-point shutdown fan-in
   a session that finds audio already muted leaves it muted.
 - **`glass` bleeds through.** It shows a blurred desktop on purpose. Use `black`,
   `matrix`, or `terminal` if you need the desktop fully hidden.
-- **Foreground only.** No daemon, no launchd job, no menu-bar icon. The terminal that
-  launched dndmode must stay open - including in [watch mode](#watch-mode), which
-  waits for a hotkey but is still an ordinary process you can see and `Ctrl-C`.
+- **No launchd job, no login item.** A session is a foreground process and the
+  terminal that launched it must stay open. [Watch mode](#watch-mode) runs in the
+  background, but as an ordinary process: nothing restarts it if it dies, nothing
+  starts it at login, and after a reboot it is `dndmode --watch` again.
 - **Changing `activate_hotkey` needs a restart.** Watch mode re-reads the unlock
   secret before every session, but the activation combination is claimed from macOS
-  once, at startup.
+  once, at startup - `dndmode --kill`, then `dndmode --watch`.
 - **Does not defeat clamshell sleep.** dndmode starts and locks input with the lid
   closed - with no display attached it comes up headless, says so on stderr, and
   paints the overlay the moment a display returns (lid opened, monitor plugged in).

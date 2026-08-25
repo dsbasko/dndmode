@@ -49,6 +49,7 @@ import (
 	"github.com/dsbasko/dndmode/internal/matcher"
 	"github.com/dsbasko/dndmode/internal/state"
 	runtimepkg "github.com/dsbasko/dndmode/internal/state/runtime"
+	watchpkg "github.com/dsbasko/dndmode/internal/state/watch"
 	"github.com/dsbasko/dndmode/internal/supervisor"
 )
 
@@ -226,9 +227,19 @@ func main() {
 // 2. slog logger to stderr (P1 /).
 // 2.5. --set-password → runSetPassword and return. Deliberately ahead of Step
 //
-//		3: the command rewrites one config key and exits, so it must not build a
-//		RestoreState, install the session signal handlers, or print the cleanup
-//		banner. See setpassword.go.
+//	3: the command rewrites one config key and exits, so it must not build a
+//	RestoreState, install the session signal handlers, or print the cleanup
+//	banner. See setpassword.go.
+//
+// 2.6. --kill / --status → runWatchControl and return, for the same reason.
+//
+//	See control.go.
+//
+// 2.7. --watch without DNDMODE_WATCH_DAEMON → spawnWatchDaemon and return:
+//
+//	the terminal process is only the launcher; the background process it
+//	starts runs everything below. See daemon.go.
+//
 //	 3. signal.NotifyContext(ctx, SIGINT, SIGTERM, SIGHUP) (replaces the
 //	    plain-context cancel pattern used in Phase 2; SIGINT/SIGTERM/SIGHUP now
 //	    flow into ctx.Done directly).
@@ -395,8 +406,13 @@ func run() int {
 	// --watch turns the one-shot session into a resident trigger: instead of
 	// locking immediately, dndmode registers the activate_hotkey combination
 	// with Carbon, waits, and raises a full session every time it is pressed —
-	// returning to waiting after each unlock. Still a foreground process; there
-	// is deliberately no daemon and no launchd job.
+	// returning to waiting after each unlock.
+	//
+	// It runs in the BACKGROUND: the command re-executes this binary detached
+	// from the terminal, waits until that process is ready, and returns
+	// (daemon.go). The background process is an ordinary one — `ps` shows it,
+	// --status describes it, --kill or SIGTERM ends it — and there is still no
+	// launchd job: nothing restarts it and nothing starts it at login.
 	//
 	// While it waits the process holds nothing: no shield, no tap, no power
 	// assertion, no runtime.json, no Focus. It does not need Accessibility to
@@ -404,7 +420,13 @@ func run() int {
 	// observes a keystroke that is not its own trigger. Accessibility IS still
 	// required for the sessions that follow, which is why the shell checks for
 	// it up front (Step 9) rather than at the first press.
-	watchFlag := flag.Bool("watch", false, "wait for the activate_hotkey combination and lock on each press, instead of locking immediately")
+	watchFlag := flag.Bool("watch", false, "start a background process that waits for the activate_hotkey combination and locks on each press; see --status and --kill")
+	// --kill / --status are the controls for that background process. Like
+	// --set-password they are commands rather than session flags: dispatched
+	// at Step 2.6 below, before Step 3, so they build no RestoreState and
+	// refuse every session flag (controlFlags.conflict).
+	killFlag := flag.Bool("kill", false, "stop the background --watch process, then exit 0 (also 0 when none was running)")
+	statusFlag := flag.Bool("status", false, "report the background --watch process, then exit: 0 when it is running, 9 when it is not")
 	flag.Parse()
 	// Raise the output gate for the whole run when --debug is set. `debug: true`
 	// in config can also raise it after Load (Step 5); either source enables
@@ -433,12 +455,60 @@ func run() int {
 	// `debug: true` to the gate errW and the logger already hold.
 	if *setPasswordFlag {
 		return runSetPassword(context.Background(), setPasswordFlags{
-			style: *styleFlag,
-			timer: *timerFlag,
-			mute:  *muteFlag,
-			focus: *focusFlag,
-			watch: *watchFlag,
+			style:  *styleFlag,
+			timer:  *timerFlag,
+			mute:   *muteFlag,
+			focus:  *focusFlag,
+			watch:  *watchFlag,
+			kill:   *killFlag,
+			status: *statusFlag,
 		}, os.Stdout, errW, &debugOn, log)
+	}
+
+	// --- Step 2.6: --kill / --status (return; never reach the session steps) ---
+	// Same placement and the same reasoning as --set-password: these manage
+	// the background watch process and start nothing, so they must not build
+	// a RestoreState or print the cleanup banner. Their output is ungated —
+	// see control.go for why.
+	if *killFlag || *statusFlag {
+		return runWatchControl(controlFlags{
+			style:       *styleFlag,
+			timer:       *timerFlag,
+			mute:        *muteFlag,
+			focus:       *focusFlag,
+			watch:       *watchFlag,
+			setPassword: *setPasswordFlag,
+			kill:        *killFlag,
+			status:      *statusFlag,
+		}, os.Stdout, os.Stderr, log)
+	}
+
+	// --- Step 2.7: --watch launcher (return; the background process does the rest) ---
+	// The process the user typed `dndmode --watch` into is only the launcher:
+	// it re-executes this binary detached and waits for it to report ready
+	// (daemon.go). Everything below this line, when *watchFlag is set, runs in
+	// that background process — identified by daemonReadyPipe — which inherits
+	// the terminal's stdout/stderr for the duration of its startup, so every
+	// diagnostic it prints lands exactly where the foreground mode's did.
+	//
+	// The launcher runs BEFORE Step 3 for the same reason the commands above
+	// do: it starts no session of its own and must not print a cleanup banner
+	// for one. Flag validation, config loading and every permission check
+	// happen once, in the background process, which is the one that has to
+	// pass them.
+	var readyPipe *os.File
+	if *watchFlag {
+		pipe, isDaemon, perr := daemonReadyPipe()
+		if perr != nil {
+			// Ungated: the message tells the user how to fix their
+			// environment, and nothing about it is secret.
+			_, _ = fmt.Fprintf(os.Stderr, "dndmode: %v\n", perr)
+			return exitPlatformErr
+		}
+		if !isDaemon {
+			return spawnWatchDaemon(os.Stderr)
+		}
+		readyPipe = pipe
 	}
 
 	// --- Step 3: RestoreState + deferred Cleanup with stdout banner ---
@@ -669,6 +739,20 @@ func run() int {
 			_, _ = fmt.Fprintf(errW, "dndmode: %v. Fix %s.\n", err, cfgPath)
 			return exitConfigErr
 		}
+		// overlay_style none locks nothing, so a --watch that waits to raise
+		// it would wait to do nothing — and, before this check, would have
+		// taken the Step 8a caffeinate-only branch in the background with no
+		// hotkey and no way to become ready, leaving the launcher hanging.
+		// Refused here, next to the other --watch resolution failures, while
+		// the user is still at the terminal.
+		if overlayStyle == config.OverlayStyleNone {
+			if styleSource == "flag" {
+				_, _ = fmt.Fprintln(errW, "dndmode: --watch cannot be combined with --style none: awake-only mode has nothing to lock on a keypress.")
+			} else {
+				_, _ = fmt.Fprintf(errW, "dndmode: --watch cannot be used with overlay_style none: awake-only mode has nothing to lock on a keypress. Change overlay_style in %s or pass --style.\n", cfgPath)
+			}
+			return exitConfigErr
+		}
 	}
 
 	// --- Step 6: Print banner (stdout-only) ---
@@ -761,6 +845,36 @@ func run() int {
 			_, _ = fmt.Fprintf(errW, "dndmode: platform check failed: %v. Re-run on macOS 14+ Apple Silicon.\n", err)
 		}
 		return exitPlatformErr
+	}
+
+	// --- Step 5d: refuse to start a second watch process ---
+	// The record is the only handle --status / --kill have on the background
+	// process, and a second one would overwrite it and leave the first
+	// unreachable — still holding the combination, so the second would fail
+	// at Carbon registration anyway, but with a message that blames Raycast.
+	// Checked here, after the platform check (a wrong-arch host still gets
+	// exit 2 first) and BEFORE WaitForGrants, so a duplicate --watch never
+	// puts up a permission prompt for a run that was never going to start.
+	// Re-checked under the publish lock when the record is written
+	// (becomeWatchDaemon), which is what closes the window between two
+	// --watch started together.
+	//
+	// An unreadable record is inconclusive and NOT fatal here: the Carbon
+	// registration refuses on its own if a real watch process holds the
+	// combination. Ungated stderr for the refusal, like every other line of
+	// watch-mode lifecycle output.
+	watchMgr := watchpkg.NewManager(filepath.Join(home, watchRecordRelPath), log)
+	if *watchFlag {
+		if st, werr := watchpkg.Inspect(watchMgr, watchpkg.NewKernProber()); werr != nil {
+			log.Warn("watch pre-check inconclusive", slog.Any("err", werr))
+		} else if st.Running {
+			_, _ = fmt.Fprintf(os.Stderr,
+				"dndmode: already watching (PID %d). Run `dndmode --kill` to stop it first, or `dndmode --status` to see it.\n",
+				st.Record.PID)
+			return exitConcurrentInstance
+		} else if st.Stale {
+			log.Debug("stale watch record will be replaced", slog.Int("pid", st.Record.PID))
+		}
 	}
 
 	// --- Step 8a (overlay_style=none): caffeinate-only fast path ---
@@ -1481,8 +1595,8 @@ func run() int {
 	if err != nil {
 		if errors.Is(err, globalhotkey.ErrComboTaken) {
 			_, _ = fmt.Fprintf(watchErrW,
-				"dndmode: %s is already claimed by macOS or another app (Raycast, Alfred, Karabiner…). "+
-					"Pick a different activate_hotkey in %s.\n", comboLabel, cfgPath)
+				"dndmode: %s is already claimed by macOS, by another app (Raycast, Alfred, Karabiner…) or by another dndmode --watch. "+
+					"Run `dndmode --status`, or pick a different activate_hotkey in %s.\n", comboLabel, cfgPath)
 			return exitConfigErr
 		}
 		_, _ = fmt.Fprintf(watchErrW, "dndmode: cannot register %s: %v\n", comboLabel, err)
@@ -1490,13 +1604,26 @@ func run() int {
 	}
 	rs.Push(hotkeyReg) // shell-level LIFO — released once, at process exit
 
-	// Written UNGATED, unlike every other banner in this program. The gate
-	// exists so a terminal left visible under overlay_style none/glass cannot
-	// leak hints about the unlock secret; these lines carry the ACTIVATION
-	// combination, which is public by construction, and a watch mode that says
-	// nothing for hours is indistinguishable from one that died.
-	_, _ = fmt.Fprintf(watchOutW,
-		"dndmode: watching. press %s to lock, Ctrl-C to quit.\n", comboLabel)
+	// --- Detach ---------------------------------------------------------------
+	// Publish the record, print the one banner the terminal gets, send every
+	// later line to the log and tell the launcher it may return. Written
+	// UNGATED, unlike every other banner in this program: the gate exists so a
+	// terminal left visible under overlay_style none/glass cannot leak hints
+	// about the unlock secret, while these lines carry the ACTIVATION
+	// combination, which is public by construction. After this call
+	// watchOutW/watchErrW — os.Stdout and os.Stderr — are the log file.
+	if code := becomeWatchDaemon(daemonDeps{
+		dir:        filepath.Dir(cfgPath),
+		record:     watchMgr,
+		comboLabel: comboLabel,
+		ready:      readyPipe,
+		rs:         rs,
+		term:       watchOutW,
+		errW:       watchErrW,
+		log:        log,
+	}); code != exitOK {
+		return code
+	}
 
 	// Sessions run on their own goroutine because the main one is about to be
 	// consumed by [NSApp run] for the rest of the process's life.
@@ -1530,9 +1657,9 @@ func run() int {
 		}
 	})
 
-	// Blocks until Ctrl-C / SIGTERM cancels ctx. A session that is up at that
-	// moment is torn down by the same cancellation: its ctx is a CHILD of this
-	// one, so the shield never outlives the process.
+	// Blocks until SIGTERM (`dndmode --kill`) cancels ctx. A session that is
+	// up at that moment is torn down by the same cancellation: its ctx is a
+	// CHILD of this one, so the shield never outlives the process.
 	runErr := cocoa.RunApp(ctx)
 
 	// Wait for a session in flight to finish unwinding BEFORE returning, and
@@ -1664,7 +1791,7 @@ func runOneWatchSession(parent context.Context, d watchSessionDeps) {
 		return
 	}
 	if parent.Err() == nil {
-		_, _ = fmt.Fprintf(d.outW, "dndmode: watching. press %s to lock, Ctrl-C to quit.\n", d.comboLabel)
+		_, _ = fmt.Fprintln(d.outW, watchingBanner(d.comboLabel))
 	}
 }
 
