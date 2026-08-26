@@ -216,6 +216,82 @@ func main() {
 	os.Exit(run())
 }
 
+// cliFlags is the parsed command line. Every field is a pointer into the
+// FlagSet, exactly what flag.Bool / flag.String return; run() dereferences
+// them after Parse.
+type cliFlags struct {
+	debug, setPassword, watch, kill, status *bool
+	style, mute, focus, timer               *string
+}
+
+// defineFlags registers every flag on fs and returns the pointers. It is the
+// single place flags are declared, so usage_test can walk the FlagSet and
+// check that --help (usageText) names each one.
+func defineFlags(fs *flag.FlagSet) cliFlags {
+	var fl cliFlags
+	// --debug un-silences ALL console output for the run (banners + diagnostics +
+	// debug-level logging). Default OFF = silent; only the exit code speaks.
+	fl.debug = fs.Bool("debug", false, "enable all console output (banners + diagnostics + debug logging); default: silent, exit codes only")
+	// --style overrides overlay_style from the YAML config (QUICK-gh8 follow-up):
+	// when non-empty it WINS over cfg.OverlayStyle so an operator can pick a look
+	// for a single run without editing ~/.config/dndmode/config.yml. Empty (the
+	// default) means "use whatever the config says". Validated at Step 5b.1 with
+	// the same ValidateOverlayStyle gate as the config value.
+	fl.style = fs.String("style", "", "override overlay_style for this run (black|matrix|terminal[:go|python|typescript|rust|ys]|dvd|glass[:radius]|none); empty = use config")
+	// --mute / --focus override the config keys for a single run (same
+	// precedence as --style: non-empty WINS over YAML, empty = use config).
+	// Tri-state strings ("" | "true" | "false") rather than flag.Bool because a
+	// plain bool flag cannot express "absent → fall back to config" — a missing
+	// --mute must mean "use cfg.Mute (default true)", not "false". Parsed via
+	// strconv.ParseBool at Step 8b; junk → exitConfigErr (mirrors invalid --style).
+	fl.mute = fs.String("mute", "", "override mute for this run (true|false); empty = use config")
+	fl.focus = fs.String("focus", "", "override focus/DND for this run (true|false); empty = use config")
+	// --timer sets a per-run auto-disable deadline: after the given Go duration
+	// (time.ParseDuration grammar — "30m", "1h30m", "90s") elapses while dndmode is
+	// ACTIVE, dndmode tears down and exits 0 exactly as if the unlock code were
+	// pressed. Empty (the default) means no deadline — run until the unlock code or a
+	// signal (SIGINT/SIGTERM/SIGHUP). Per-run ONLY: there is intentionally no config
+	// key (a persistent auto-off default would surprise; typing --timer is the
+	// deliberate opt-in). Works for EVERY overlay_style, including none/caffeinate,
+	// because the timer merely triggers the same ctx-cancel shutdown both modes
+	// already await (see armTimer). Parsed at Step 5b.2 via parseTimer; junk /
+	// non-positive → exitConfigErr (mirrors invalid --style), naming --timer.
+	fl.timer = fs.String("timer", "", "auto-disable after this long, then exit 0 (Go duration, e.g. 30m, 1h30m, 90s); empty = run until the unlock code or a signal")
+	// --set-password is a one-shot maintenance command, not a session modifier:
+	// it captures a new unlock sequence from real keystrokes (twice, so a typo
+	// cannot lock the user out), rewrites unlock_code in the config as a salted
+	// unlock_salt / unlock_hash pair, and exits. Dispatched at Step 2.5 below,
+	// BEFORE Step 3, so it never builds a RestoreState and never touches Focus,
+	// audio, the IOPMAssertion or the single-instance lock. Every other session
+	// flag is refused alongside it (setPasswordFlags.conflictingFlag).
+	fl.setPassword = fs.Bool("set-password", false, "capture a new unlock sequence and store it hashed in the config, then exit")
+	// --watch turns the one-shot session into a resident trigger: instead of
+	// locking immediately, dndmode registers the activate_hotkey combination
+	// with Carbon, waits, and raises a full session every time it is pressed —
+	// returning to waiting after each unlock.
+	//
+	// It runs in the BACKGROUND: the command re-executes this binary detached
+	// from the terminal, waits until that process is ready, and returns
+	// (daemon.go). The background process is an ordinary one — `ps` shows it,
+	// --status describes it, --kill or SIGTERM ends it — and there is still no
+	// launchd job: nothing restarts it and nothing starts it at login.
+	//
+	// While it waits the process holds nothing: no shield, no tap, no power
+	// assertion, no runtime.json, no Focus. It does not need Accessibility to
+	// wait, either — RegisterEventHotKey is matched by the OS, so dndmode never
+	// observes a keystroke that is not its own trigger. Accessibility IS still
+	// required for the sessions that follow, which is why the shell checks for
+	// it up front (Step 9) rather than at the first press.
+	fl.watch = fs.Bool("watch", false, "start a background process that waits for the activate_hotkey combination and locks on each press; see --status and --kill")
+	// --kill / --status are the controls for that background process. Like
+	// --set-password they are commands rather than session flags: dispatched
+	// at Step 2.6 below, before Step 3, so they build no RestoreState and
+	// refuse every session flag (controlFlags.conflict).
+	fl.kill = fs.Bool("kill", false, "stop the background --watch process, then exit 0 (also 0 when none was running)")
+	fl.status = fs.Bool("status", false, "report the background --watch process, then exit: 0 when it is running, 9 when it is not")
+	return fl
+}
+
 // run is the testable entry point (main calls os.Exit(run())). Acceptance
 // tests fork the binary as a subprocess; unit-level testing of run()
 // directly is not done because too much main-thread Cocoa state crosses
@@ -367,71 +443,15 @@ func run() int {
 	}()
 
 	// --- Step 1: Parse flags (stdlib flag) ---
-	// --debug un-silences ALL console output for the run (banners + diagnostics +
-	// debug-level logging). Default OFF = silent; only the exit code speaks.
-	debugFlag := flag.Bool("debug", false, "enable all console output (banners + diagnostics + debug logging); default: silent, exit codes only")
-	// --style overrides overlay_style from the YAML config (QUICK-gh8 follow-up):
-	// when non-empty it WINS over cfg.OverlayStyle so an operator can pick a look
-	// for a single run without editing ~/.config/dndmode/config.yml. Empty (the
-	// default) means "use whatever the config says". Validated at Step 5b.1 with
-	// the same ValidateOverlayStyle gate as the config value.
-	styleFlag := flag.String("style", "", "override overlay_style for this run (black|matrix|terminal[:go|python|typescript|rust|ys]|dvd|glass[:radius]|none); empty = use config")
-	// --mute / --focus override the config keys for a single run (same
-	// precedence as --style: non-empty WINS over YAML, empty = use config).
-	// Tri-state strings ("" | "true" | "false") rather than flag.Bool because a
-	// plain bool flag cannot express "absent → fall back to config" — a missing
-	// --mute must mean "use cfg.Mute (default true)", not "false". Parsed via
-	// strconv.ParseBool at Step 8b; junk → exitConfigErr (mirrors invalid --style).
-	muteFlag := flag.String("mute", "", "override mute for this run (true|false); empty = use config")
-	focusFlag := flag.String("focus", "", "override focus/DND for this run (true|false); empty = use config")
-	// --timer sets a per-run auto-disable deadline: after the given Go duration
-	// (time.ParseDuration grammar — "30m", "1h30m", "90s") elapses while dndmode is
-	// ACTIVE, dndmode tears down and exits 0 exactly as if the unlock code were
-	// pressed. Empty (the default) means no deadline — run until the unlock code or a
-	// signal (SIGINT/SIGTERM/SIGHUP). Per-run ONLY: there is intentionally no config
-	// key (a persistent auto-off default would surprise; typing --timer is the
-	// deliberate opt-in). Works for EVERY overlay_style, including none/caffeinate,
-	// because the timer merely triggers the same ctx-cancel shutdown both modes
-	// already await (see armTimer). Parsed at Step 5b.2 via parseTimer; junk /
-	// non-positive → exitConfigErr (mirrors invalid --style), naming --timer.
-	timerFlag := flag.String("timer", "", "auto-disable after this long, then exit 0 (Go duration, e.g. 30m, 1h30m, 90s); empty = run until the unlock code or a signal")
-	// --set-password is a one-shot maintenance command, not a session modifier:
-	// it captures a new unlock sequence from real keystrokes (twice, so a typo
-	// cannot lock the user out), rewrites unlock_code in the config as a salted
-	// unlock_salt / unlock_hash pair, and exits. Dispatched at Step 2.5 below,
-	// BEFORE Step 3, so it never builds a RestoreState and never touches Focus,
-	// audio, the IOPMAssertion or the single-instance lock. Every other session
-	// flag is refused alongside it (setPasswordFlags.conflictingFlag).
-	setPasswordFlag := flag.Bool("set-password", false, "capture a new unlock sequence and store it hashed in the config, then exit")
-	// --watch turns the one-shot session into a resident trigger: instead of
-	// locking immediately, dndmode registers the activate_hotkey combination
-	// with Carbon, waits, and raises a full session every time it is pressed —
-	// returning to waiting after each unlock.
-	//
-	// It runs in the BACKGROUND: the command re-executes this binary detached
-	// from the terminal, waits until that process is ready, and returns
-	// (daemon.go). The background process is an ordinary one — `ps` shows it,
-	// --status describes it, --kill or SIGTERM ends it — and there is still no
-	// launchd job: nothing restarts it and nothing starts it at login.
-	//
-	// While it waits the process holds nothing: no shield, no tap, no power
-	// assertion, no runtime.json, no Focus. It does not need Accessibility to
-	// wait, either — RegisterEventHotKey is matched by the OS, so dndmode never
-	// observes a keystroke that is not its own trigger. Accessibility IS still
-	// required for the sessions that follow, which is why the shell checks for
-	// it up front (Step 9) rather than at the first press.
-	watchFlag := flag.Bool("watch", false, "start a background process that waits for the activate_hotkey combination and locks on each press; see --status and --kill")
-	// --kill / --status are the controls for that background process. Like
-	// --set-password they are commands rather than session flags: dispatched
-	// at Step 2.6 below, before Step 3, so they build no RestoreState and
-	// refuse every session flag (controlFlags.conflict).
-	killFlag := flag.Bool("kill", false, "stop the background --watch process, then exit 0 (also 0 when none was running)")
-	statusFlag := flag.Bool("status", false, "report the background --watch process, then exit: 0 when it is running, 9 when it is not")
+	// The definitions and the reasoning behind each flag live in defineFlags;
+	// --help prints usageText (usage.go) rather than flag.PrintDefaults.
+	fl := defineFlags(flag.CommandLine)
+	flag.Usage = printUsage
 	flag.Parse()
 	// Raise the output gate for the whole run when --debug is set. `debug: true`
 	// in config can also raise it after Load (Step 5); either source enables
 	// output. Never lowered — debug is additive.
-	debugOn = *debugFlag
+	debugOn = *fl.debug
 
 	// --- Step 2: slog logger — writes through the gated errW ---
 	// Level is always Debug; the errW gate (not the level) decides visibility, so
@@ -453,15 +473,15 @@ func run() int {
 	// &debugOn, not debugOn: the branch loads the config itself (Step 5 is
 	// below it and it never gets there), so it is the one that has to apply
 	// `debug: true` to the gate errW and the logger already hold.
-	if *setPasswordFlag {
+	if *fl.setPassword {
 		return runSetPassword(context.Background(), setPasswordFlags{
-			style:  *styleFlag,
-			timer:  *timerFlag,
-			mute:   *muteFlag,
-			focus:  *focusFlag,
-			watch:  *watchFlag,
-			kill:   *killFlag,
-			status: *statusFlag,
+			style:  *fl.style,
+			timer:  *fl.timer,
+			mute:   *fl.mute,
+			focus:  *fl.focus,
+			watch:  *fl.watch,
+			kill:   *fl.kill,
+			status: *fl.status,
 		}, os.Stdout, errW, &debugOn, log)
 	}
 
@@ -470,23 +490,23 @@ func run() int {
 	// the background watch process and start nothing, so they must not build
 	// a RestoreState or print the cleanup banner. Their output is ungated —
 	// see control.go for why.
-	if *killFlag || *statusFlag {
+	if *fl.kill || *fl.status {
 		return runWatchControl(controlFlags{
-			style:       *styleFlag,
-			timer:       *timerFlag,
-			mute:        *muteFlag,
-			focus:       *focusFlag,
-			watch:       *watchFlag,
-			setPassword: *setPasswordFlag,
-			kill:        *killFlag,
-			status:      *statusFlag,
+			style:       *fl.style,
+			timer:       *fl.timer,
+			mute:        *fl.mute,
+			focus:       *fl.focus,
+			watch:       *fl.watch,
+			setPassword: *fl.setPassword,
+			kill:        *fl.kill,
+			status:      *fl.status,
 		}, os.Stdout, os.Stderr, log)
 	}
 
 	// --- Step 2.7: --watch launcher (return; the background process does the rest) ---
 	// The process the user typed `dndmode --watch` into is only the launcher:
 	// it re-executes this binary detached and waits for it to report ready
-	// (daemon.go). Everything below this line, when *watchFlag is set, runs in
+	// (daemon.go). Everything below this line, when *fl.watch is set, runs in
 	// that background process — identified by daemonReadyPipe — which inherits
 	// the terminal's stdout/stderr for the duration of its startup, so every
 	// diagnostic it prints lands exactly where the foreground mode's did.
@@ -497,7 +517,7 @@ func run() int {
 	// happen once, in the background process, which is the one that has to
 	// pass them.
 	var readyPipe *os.File
-	if *watchFlag {
+	if *fl.watch {
 		pipe, isDaemon, perr := daemonReadyPipe()
 		if perr != nil {
 			// Ungated: the message tells the user how to fix their
@@ -652,10 +672,10 @@ func run() int {
 	styleSource := "config"
 	var blurOverride *float64 // set only by a --style glass:N suffix
 	var langOverride string   // set only by a --style terminal:<lang> suffix
-	if *styleFlag != "" {
-		base, bo, lo, perr := parseStyleFlag(*styleFlag)
+	if *fl.style != "" {
+		base, bo, lo, perr := parseStyleFlag(*fl.style)
 		if perr != nil {
-			_, _ = fmt.Fprintf(errW, "dndmode: invalid --style %q: %v.\n", *styleFlag, perr)
+			_, _ = fmt.Fprintf(errW, "dndmode: invalid --style %q: %v.\n", *fl.style, perr)
 			return exitConfigErr
 		}
 		overlayStyle = base
@@ -710,9 +730,9 @@ func run() int {
 	// timer; armTimer (full path Step 18 / runCaffeinateOnly) no-ops on it. The
 	// stderr template names --timer as the source, mirroring the invalid --style
 	// branch above.
-	timerDur, err := parseTimer(*timerFlag)
+	timerDur, err := parseTimer(*fl.timer)
 	if err != nil {
-		_, _ = fmt.Fprintf(errW, "dndmode: invalid --timer %q: %v.\n", *timerFlag, err)
+		_, _ = fmt.Fprintf(errW, "dndmode: invalid --timer %q: %v.\n", *fl.timer, err)
 		return exitConfigErr
 	}
 
@@ -733,7 +753,7 @@ func run() int {
 	// one-shot session, and a config carrying a broken one must not stop a
 	// plain `dndmode` from locking.
 	var activateSpec hotkey.Spec
-	if *watchFlag {
+	if *fl.watch {
 		activateSpec, err = config.ResolveActivateHotkey(&cfg, unlockVerifier)
 		if err != nil {
 			_, _ = fmt.Fprintf(errW, "dndmode: %v. Fix %s.\n", err, cfgPath)
@@ -864,7 +884,7 @@ func run() int {
 	// combination. Ungated stderr for the refusal, like every other line of
 	// watch-mode lifecycle output.
 	watchMgr := watchpkg.NewManager(filepath.Join(home, watchRecordRelPath), log)
-	if *watchFlag {
+	if *fl.watch {
 		if st, werr := watchpkg.Inspect(watchMgr, watchpkg.NewKernProber()); werr != nil {
 			log.Warn("watch pre-check inconclusive", slog.Any("err", werr))
 		} else if st.Running {
@@ -898,14 +918,14 @@ func run() int {
 	// config (config.NormalizeMute applies the nil⇒true rule on the YAML side).
 	// Junk flag values exit 1 (exitConfigErr) with a source-naming stderr line,
 	// exactly like an invalid --style.
-	effectiveMute, err := resolveBoolFlag(*muteFlag, config.NormalizeMute(cfg.Mute))
+	effectiveMute, err := resolveBoolFlag(*fl.mute, config.NormalizeMute(cfg.Mute))
 	if err != nil {
-		_, _ = fmt.Fprintf(errW, "dndmode: invalid --mute %q: %v.\n", *muteFlag, err)
+		_, _ = fmt.Fprintf(errW, "dndmode: invalid --mute %q: %v.\n", *fl.mute, err)
 		return exitConfigErr
 	}
-	effectiveFocus, err := resolveBoolFlag(*focusFlag, cfg.Focus)
+	effectiveFocus, err := resolveBoolFlag(*fl.focus, cfg.Focus)
 	if err != nil {
-		_, _ = fmt.Fprintf(errW, "dndmode: invalid --focus %q: %v.\n", *focusFlag, err)
+		_, _ = fmt.Fprintf(errW, "dndmode: invalid --focus %q: %v.\n", *fl.focus, err)
 		return exitConfigErr
 	}
 
@@ -1545,7 +1565,7 @@ func run() int {
 	// One-shot mode is unchanged: the session gets the root ctx, the shell's
 	// own rs (whose deferred Cleanup prints the banner) and ownership of the
 	// run loop, which is exactly the straight-line behaviour it always had.
-	if !*watchFlag {
+	if !*fl.watch {
 		return runSession(ctx, cancel, rs, true)
 	}
 
