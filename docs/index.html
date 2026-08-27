@@ -1,0 +1,538 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>dndmode: заблокируй оставленный Mac, не останавливая работу</title>
+<meta name="description" content="dndmode: CLI для macOS на Apple Silicon. Щит на каждом дисплее, ввод мёртв на уровне HID, пока не наберёшь секретную комбинацию. Mac не спит, агент работает.">
+<script>try{var t=localStorage.getItem('ds-theme');if(t==='light'||t==='dark')document.documentElement.setAttribute('data-theme',t)}catch(e){}</script>
+<script>try{var l=localStorage.getItem('ds-lang');document.documentElement.lang=(l==='en')?'en':'ru'}catch(e){document.documentElement.lang='ru'}</script>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600;700&amp;display=swap">
+<style>
+/* Instrument Sans carries no Cyrillic; IBM Plex Sans (the face the dndmode site
+   actually used, and this system's named substitution) picks it up. */
+:root{--font-sans:'Instrument Sans','IBM Plex Sans',-apple-system,BlinkMacSystemFont,system-ui,sans-serif}
+html{scroll-behavior:smooth;scroll-padding-top:var(--scroll-pad)}
+body{margin:0;overflow-x:hidden}
+a{color:var(--text-link)}
+a:hover{color:var(--text-link-hover)}
+html[lang="ru"] [data-l="en"],html[lang="en"] [data-l="ru"]{display:none}
+@keyframes dsBlink{0%,49%{opacity:1}50%,100%{opacity:0}}
+@keyframes dsBreathe{0%,100%{opacity:.9;transform:scale(1)}50%{opacity:.45;transform:scale(.8)}}
+@keyframes dsType{from{width:0}to{width:100%}}
+@keyframes dsDvdX{from{transform:translateX(0)}to{transform:translateX(calc(100% - 54px))}}
+@keyframes dsDvdY{from{transform:translateY(0)}to{transform:translateY(calc(100% - 26px))}}
+@keyframes dsHue{0%{color:#FF3333}12%{color:#FF8C1A}25%{color:#FFF233}37%{color:#4DFF59}50%{color:#33F2FF}62%{color:#598CFF}75%{color:#CC59FF}87%{color:#FF66D9}100%{color:#FF3333}}
+summary{list-style:none;cursor:pointer}
+summary::-webkit-details-marker{display:none}
+details[open] .ds-faq-plus{transform:rotate(45deg)}
+details[open]{border-color:var(--border-strong);background:var(--surface-card-hover)}
+.wf-rail{display:flex;flex-direction:column;align-items:center;gap:var(--section-lead-gap)}
+.wf-side{max-width:720px;text-align:center;display:flex;flex-direction:column;align-items:center}
+.wf-flow{width:100%;max-width:820px;text-align:left}
+.path-row{display:grid;grid-template-columns:repeat(6,minmax(0,1fr));gap:10px;align-items:stretch}
+@media (max-width:1099px){.path-row{grid-template-columns:repeat(3,minmax(0,1fr))}}
+@media (max-width:767px){.path-row{grid-template-columns:minmax(0,1fr)}}
+[data-anim="off"] .sty *{animation:none !important}
+@media (prefers-reduced-motion:reduce){*{animation-duration:.001ms !important;animation-iteration-count:1 !important;transition-duration:.001ms !important}}
+</style>
+<!-- The design system loads after the page style, in the order the design tool applies them. -->
+<link rel="stylesheet" href="styles.css">
+</head>
+<body>
+<div style="background:var(--surface-page);color:var(--text-body);font-family:var(--font-sans);font-size:16px;line-height:1.6">
+
+<div style="position:relative;z-index:2;margin-bottom:-88px">
+<nav class="nav-bar">
+<div class="nav-inner" style="max-width:var(--wrap-max);margin:24px auto 0;padding:0 var(--wrap-pad);min-height:64px;display:flex;align-items:center;gap:12px">
+<a class="nav-github" href="https://github.com/dsbasko/dndmode" style="display:inline-flex;align-items:center;gap:8px;height:36px;padding:0 14px;flex:none;margin-right:auto;border-radius:999px;border:1px solid var(--border-default);background:var(--surface-card);box-shadow:var(--sheen-top);font-size:13.5px;font-weight:500;color:var(--text-body);text-decoration:none">GitHub<span aria-hidden="true" style="font-size:12px;color:var(--text-muted)">↗</span></a>
+<div class="ds-seg-group" role="radiogroup" aria-label="Language"><button type="button" class="ds-seg ds-seg-lang" role="radio" aria-checked="false" aria-label="English" title="English" lang="en" data-lang-pick="en">EN</button><button type="button" class="ds-seg ds-seg-lang" role="radio" aria-checked="false" aria-label="Русский" title="Русский" lang="ru" data-lang-pick="ru">RU</button></div>
+<div class="ds-seg-group" role="radiogroup" aria-label="Colour theme"><button type="button" class="ds-seg ds-seg-theme" role="radio" aria-checked="false" aria-label="Light" title="Light" data-theme-pick="light"><svg width="15" height="15" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="8" cy="8" r="3.1"></circle><path d="M8 1.4v1.5M8 13.1v1.5M1.4 8h1.5M13.1 8h1.5M3.3 3.3l1.1 1.1M11.6 11.6l1.1 1.1M12.7 3.3l-1.1 1.1M4.4 11.6l-1.1 1.1"></path></svg></button><button type="button" class="ds-seg ds-seg-theme" role="radio" aria-checked="false" aria-label="Dark" title="Dark" data-theme-pick="dark"><svg width="15" height="15" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M13.2 9.4A5.6 5.6 0 0 1 6.6 2.8a5.6 5.6 0 1 0 6.6 6.6Z"></path></svg></button><button type="button" class="ds-seg ds-seg-theme" role="radio" aria-checked="false" aria-label="System" title="System" data-theme-pick="system"><svg width="15" height="15" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="1.8" y="2.6" width="12.4" height="8.6" rx="1.4"></rect><path d="M5.6 13.8h4.8"></path></svg></button></div>
+</div>
+</nav>
+</div>
+
+<main id="top">
+
+<section style="position:relative;overflow:hidden;padding-top:calc(var(--hero-y) + 88px)">
+<div aria-hidden="true" style="position:absolute;inset:-140px 0 auto 0;height:820px;background:var(--glow-hero);filter:blur(10px);pointer-events:none"></div>
+<div aria-hidden="true" style="position:absolute;inset:0;background-image:linear-gradient(var(--border-soft) 1px,transparent 1px),linear-gradient(90deg,var(--border-soft) 1px,transparent 1px);background-size:64px 64px;mask-image:radial-gradient(60% 45% at 50% 0%,#000,transparent 75%);-webkit-mask-image:radial-gradient(60% 45% at 50% 0%,#000,transparent 75%);opacity:.5;pointer-events:none"></div>
+<div class="ds-wrap" style="position:relative">
+<div style="display:flex;flex-direction:column;align-items:center;text-align:center;gap:var(--hero-gap)">
+<span style="display:inline-flex;align-items:center;gap:7px;height:30px;padding:0 12px;border-radius:999px;border:1px solid var(--border-default);background:var(--surface-card);box-shadow:var(--sheen-top);font-size:13px;font-weight:500;color:var(--text-body)"><span style="width:6px;height:6px;border-radius:50%;background:var(--c-accent);box-shadow:0 0 8px var(--c-accent)"></span><span data-l="ru">CLI для&nbsp;macOS&nbsp; ·&nbsp; открытый код&nbsp; ·&nbsp; ноль сетевых вызовов</span><span data-l="en">A macOS CLI · open source · zero network calls</span></span>
+<h1 style="max-width:17ch;font-size:var(--size-h1);line-height:1.03;letter-spacing:-0.035em;font-weight:600;color:var(--text-strong);margin:0">
+<span data-l="ru">Заблокируй оставленный Mac, <span style="color: var(--c-accent);">не&nbsp;останавливая работу</span></span>
+<span data-l="en">Lock your unattended Mac <span style="color:var(--c-accent)">without killing the work</span></span>
+</h1>
+<p data-l="ru" style="margin:0;font-size:var(--size-lead);line-height:1.55;letter-spacing:-0.01em;color:var(--text-body);max-width:56ch">Полноэкранный щит на каждом дисплее, клавиатура и&nbsp;трекпад мертвы на уровне HID, Mac не&nbsp;засыпает. Щит стоит, пока ты не&nbsp;вернёшься и&nbsp;не&nbsp;наберёшь секретную комбинацию, а&nbsp;агент, сборка и&nbsp;рендер идут на полной скорости.</p>
+<p data-l="en" style="margin:0;font-size:var(--size-lead);line-height:1.55;letter-spacing:-0.01em;color:var(--text-body);max-width:56ch">A full-screen shield on every display, keyboard and trackpad dead at the HID level, the Mac kept awake. The shield stays up until you come back and type the unlock code. Your agent, build or render runs at full speed.</p>
+<div style="display:flex;flex-wrap:wrap;gap:10px;justify-content:center">
+<a href="#install" style="display:inline-flex;align-items:center;justify-content:center;gap:8px;height:50px;padding:0 26px;border-radius:10px;background:var(--control-solid-bg);color:var(--control-solid-fg);font-size:16px;font-weight:500;text-decoration:none;box-shadow:var(--shadow-sm)"><span data-l="ru">Установить</span><span data-l="en">Install it</span></a>
+<a href="https://github.com/dsbasko/dndmode" style="display:inline-flex;align-items:center;justify-content:center;gap:8px;height:50px;padding:0 26px;border-radius:10px;background:var(--surface-card);border:1px solid var(--border-default);box-shadow:var(--sheen-top);color:var(--text-strong);font-size:16px;font-weight:500;text-decoration:none"><span data-l="ru">Читать исходники</span><span data-l="en">Read the source</span></a>
+</div>
+<div style="width:min(620px,100%);text-align:left">
+<div class="ds-term">
+<div class="ds-term-body has-copy">
+<div style="white-space:nowrap"><span style="color:var(--syntax-prompt)">$ </span>brew install dsbasko/tap/dndmode</div>
+<div style="white-space:nowrap"><span style="color:var(--syntax-prompt)">$ </span>dndmode<span style="color:var(--syntax-comment)">  # <span data-l="ru">запереть сейчас</span><span data-l="en">lock now</span></span></div>
+<div style="white-space:nowrap"><span style="color:var(--syntax-prompt)">$ </span>dndmode --watch<span style="color:var(--syntax-comment)">  # <span data-l="ru">ждать хоткей в&nbsp;фоне</span><span data-l="en">wait for the hotkey in the background</span></span></div>
+</div>
+<button type="button" class="ds-term-copy" aria-label="Copy to clipboard" data-copy="brew install dsbasko/tap/dndmode">Copy</button>
+</div>
+</div>
+<div style="display:flex;flex-wrap:wrap;gap:8px;justify-content:center">
+<span style="display:inline-flex;align-items:center;height:28px;padding:0 11px;border-radius:999px;border:1px solid var(--border-default);background:var(--c-surface-2);font-family:var(--font-mono);font-size:11.5px;color:var(--text-body)">macOS 14+ · arm64</span>
+<span style="display:inline-flex;align-items:center;height:28px;padding:0 11px;border-radius:999px;border:1px solid var(--border-default);background:var(--c-surface-2);font-family:var(--font-mono);font-size:11.5px;color:var(--text-body)">Go + cgo</span>
+<span style="display:inline-flex;align-items:center;height:28px;padding:0 11px;border-radius:999px;border:1px solid var(--border-default);background:var(--c-surface-2);font-family:var(--font-mono);font-size:11.5px;color:var(--text-body)">zero network calls</span>
+<span style="display:inline-flex;align-items:center;height:28px;padding:0 11px;border-radius:999px;border:1px solid var(--border-default);background:var(--c-surface-2);font-family:var(--font-mono);font-size:11.5px;color:var(--text-body)">MIT</span>
+</div>
+</div>
+
+<div style="padding-top:clamp(40px,5vw,64px);position:relative">
+<div aria-hidden="true" style="position:absolute;inset:-6% 4% 24% 4%;background:radial-gradient(50% 50% at 50% 45%,var(--glow-accent),transparent 70%);filter:blur(24px);pointer-events:none"></div>
+<div class="ds-frame" style="position:relative;display:flex;flex-direction:column;align-items:center;width:min(100%,940px);margin:0 auto">
+<div style="width:100%;border-radius:clamp(10px,1.4vw,18px);padding:clamp(7px,1vw,11px);background:#2b2e34;border:1px solid rgba(255,255,255,0.10);box-shadow:var(--shadow-float)">
+<div style="display:flex;align-items:center;justify-content:center;height:clamp(6px,0.9vw,10px)"><span style="width:5px;height:5px;border-radius:50%;background:rgba(255,255,255,0.16)"></span></div>
+<div style="position:relative;aspect-ratio:16 / 10;border-radius:4px;overflow:hidden;background:#000">
+<canvas data-rain="hero" aria-hidden="true" style="position:absolute;inset:0;width:100%;height:100%;display:block"></canvas>
+<div style="position:absolute;right:22px;bottom:22px;width:min(300px,44%);border-radius:var(--radius-md);border:1px solid rgba(255,255,255,0.12);background:rgba(13,15,19,0.92);box-shadow:var(--shadow-md);overflow:hidden">
+<div style="display:flex;align-items:center;gap:9px;padding:12px 14px;border-bottom:1px solid rgba(255,255,255,0.08)">
+<span style="width:7px;height:7px;border-radius:50%;background:#4ade9b;box-shadow:0 0 10px #4ade9b;animation:dsBreathe 2s ease-in-out infinite"></span>
+<span style="font-size:12px;font-weight:500;color:#f5f6f8"><span data-l="ru">работа идёт</span><span data-l="en">still running</span></span>
+<span style="margin-left:auto;font-family:var(--font-mono);font-size:11.5px;color:#9ba1ad">02:14:07</span>
+</div>
+<div style="padding:12px 14px;font-family:var(--font-mono);font-size:11.5px;line-height:1.95;color:#9ba1ad">
+<div>go build ./... <span style="color:#4ade9b">ok</span></div>
+<div>go test -race <span style="color:#4ade9b">428 passed</span></div>
+<div>writing patch <span style="color:#4ccbf0;animation:dsBlink 1.05s steps(1) infinite">▊</span></div>
+</div>
+</div>
+</div>
+</div>
+<div style="width:106%;height:clamp(9px,1.1vw,14px);border-radius:0 0 clamp(8px,1vw,14px) clamp(8px,1vw,14px);background:#31343a;box-shadow:0 14px 26px rgba(0,0,0,0.30);display:flex;align-items:flex-end;justify-content:center">
+<div style="width:clamp(60px,10%,110px);height:5px;border-radius:0 0 5px 5px;background:rgba(0,0,0,0.32)"></div>
+</div>
+</div>
+</div>
+</div>
+</section>
+
+<section id="watch" style="padding:var(--section-y) 0;border-top:1px solid var(--border-soft)">
+<div class="ds-wrap">
+<div class="wf-rail">
+
+<div class="wf-side">
+<h2 style="margin:0;font-size:var(--size-h2);line-height:1.07;letter-spacing:-0.03em;font-weight:600;color:var(--text-strong)"><span data-l="ru">Блокируй сейчас<br>или&nbsp;по&nbsp;хоткею</span><span data-l="en">Lock now, or lock on a hotkey</span></h2>
+<p data-l="ru" style="margin:20px 0 0;font-size:var(--size-lead);line-height:1.55;color:var(--text-body)">Без&nbsp;флага <code>--watch</code> щит поднимается сразу. С <code>--watch</code> процесс ждёт в&nbsp;фоне: нажми хоткей где угодно, и&nbsp;щит поднимется с&nbsp;анимацией из <code>config.yml</code>.</p>
+<p data-l="en" style="margin:20px 0 0;font-size:var(--size-lead);line-height:1.55;color:var(--text-body)">Without the <code>--watch</code> flag the shield goes up right away. With <code>--watch</code> the process waits in the background: press the hotkey anywhere, and the shield goes up with the animation set in <code>config.yml</code>.</p>
+</div>
+
+<div class="wf-flow" style="max-width:840px">
+
+<div style="display:flex;flex-wrap:wrap;gap:4px 0">
+<div style="flex:0 0 132px;padding-right:20px;text-align:right"><span style="font-family:var(--font-mono);font-size:11.5px;letter-spacing:.08em;text-transform:uppercase;color:var(--text-muted)">start</span></div>
+<div style="position:relative;flex:1 1 320px;min-width:0;padding:0 0 48px 26px;border-left:1px solid var(--border-soft);display:flex;flex-direction:column;gap:8px">
+<span style="position:absolute;left:-4px;top:9px;width:7px;height:7px;border-radius:50%;background:var(--border-strong)"></span>
+<code style="align-self:flex-start;font-size:13px">dndmode --watch</code>
+<h3 style="margin:0;font-size:16.5px;line-height:1.3;font-weight:600;color:var(--text-strong)"><span data-l="ru">Фоновый процесс, а&nbsp;не&nbsp;демон</span><span data-l="en">Background process, not a daemon</span></h3>
+<p data-l="ru" style="margin:0;font-size:14.5px;line-height:1.6;color:var(--text-body)">Процесс виден в <code style="font-size:12px">ps</code>, его описывает <code style="font-size:12px">--status</code> и&nbsp;останавливает <code style="font-size:12px">--kill</code>. Ни&nbsp;launchd, ни&nbsp;login item, ни&nbsp;иконки в&nbsp;строке меню. После перезагрузки его нет.</p>
+<p data-l="en" style="margin:0;font-size:14.5px;line-height:1.6;color:var(--text-body)"><code style="font-size:12px">ps</code> shows it, <code style="font-size:12px">--status</code> describes it and <code style="font-size:12px">--kill</code> stops it. No launchd job, no login item, no menu-bar icon: after a reboot it is gone.</p>
+</div>
+</div>
+
+<div style="display:flex;flex-wrap:wrap;gap:4px 0">
+<div style="flex:0 0 132px;padding-right:20px;text-align:right"><span style="font-family:var(--font-mono);font-size:11.5px;letter-spacing:.08em;text-transform:uppercase;color:var(--text-muted)">waiting</span></div>
+<div style="position:relative;flex:1 1 320px;min-width:0;padding:0 0 48px 26px;border-left:1px solid var(--border-soft);display:flex;flex-direction:column;gap:8px">
+<span style="position:absolute;left:-4px;top:9px;width:7px;height:7px;border-radius:50%;background:var(--border-strong)"></span>
+<h3 style="margin:0;font-size:16.5px;line-height:1.3;font-weight:600;color:var(--text-strong)"><span data-l="ru">Ничего не&nbsp;держит и&nbsp;не&nbsp;видит</span><span data-l="en">Holds nothing, sees nothing</span></h3>
+<p data-l="ru" style="margin:0;font-size:14.5px;line-height:1.6;color:var(--text-body)">В&nbsp;ожидании у&nbsp;процесса нет ни&nbsp;щита, ни&nbsp;tap-а, ни&nbsp;awake lock. Нажатий он не&nbsp;видит: хоткей матчит сама macOS через Carbon. Mac спит и&nbsp;ведёт себя как&nbsp;обычно.</p>
+<p data-l="en" style="margin:0;font-size:14.5px;line-height:1.6;color:var(--text-body)">While waiting, the process holds no shield, no tap and no awake lock. It sees no keypress: macOS itself matches the hotkey via Carbon. The Mac sleeps and behaves normally.</p>
+<div style="display:flex;flex-wrap:wrap;gap:6px;padding-top:2px"><code style="font-size:11.5px">RegisterEventHotKey</code><code style="font-size:11.5px">Carbon</code></div>
+</div>
+</div>
+
+<div style="display:flex;flex-wrap:wrap;gap:4px 0">
+<div style="flex:0 0 132px;padding-right:20px;text-align:right"><span style="font-family:var(--font-mono);font-size:11.5px;letter-spacing:.08em;text-transform:uppercase;color:var(--c-accent)">press</span></div>
+<div style="position:relative;flex:1 1 320px;min-width:0;padding:0 0 48px 26px;border-left:1px solid var(--border-soft);display:flex;flex-direction:column;gap:12px">
+<span style="position:absolute;left:-5px;top:8px;width:9px;height:9px;border-radius:50%;background:var(--c-accent)"></span>
+<div style="display:flex;flex-wrap:wrap;align-items:center;gap:10px 14px">
+<span style="display:flex;align-items:center;gap:6px"><span style="display:flex;align-items:center;justify-content:center;min-width:32px;height:32px;padding:0 8px;border-radius:9px;border:1px solid var(--border-strong);background:var(--c-surface);box-shadow:var(--sheen-top);font-family:var(--font-mono);font-size:14px;line-height:1;color:var(--text-strong)">⌃</span><span style="display:flex;align-items:center;justify-content:center;min-width:32px;height:32px;padding:0 8px;border-radius:9px;border:1px solid var(--border-strong);background:var(--c-surface);box-shadow:var(--sheen-top);font-family:var(--font-mono);font-size:14px;line-height:1;color:var(--text-strong)">⌥</span><span style="display:flex;align-items:center;justify-content:center;min-width:32px;height:32px;padding:0 8px;border-radius:9px;border:1px solid var(--border-strong);background:var(--c-surface);box-shadow:var(--sheen-top);font-family:var(--font-mono);font-size:14px;line-height:1;color:var(--text-strong)">⌘</span><span style="display:flex;align-items:center;justify-content:center;min-width:32px;height:32px;padding:0 8px;border-radius:9px;border:1px solid var(--border-accent);background:var(--fill-accent);box-shadow:var(--sheen-top);font-family:var(--font-mono);font-size:14px;line-height:1;color:var(--c-accent)">D</span></span>
+<span style="font-family:var(--font-mono);font-size:11.5px;letter-spacing:.08em;text-transform:uppercase;color:var(--c-accent)">activate_hotkey</span>
+</div>
+<h3 style="margin:0;font-size:16.5px;line-height:1.3;font-weight:600;color:var(--text-strong)"><span data-l="ru">Нажми хоткей: щит тот&nbsp;же, что&nbsp;у <code style="font-size:14px">dndmode</code></span><span data-l="en">Press the hotkey: the shield is the same as <code style="font-size:14px">dndmode</code></span></h3>
+<p data-l="ru" style="margin:0;font-size:14.5px;line-height:1.6;color:var(--text-body)">При&nbsp;каждом нажатии хоткея процесс перечитывает секрет из&nbsp;конфига и&nbsp;строит обычную сессию. HID-замок тот&nbsp;же, и&nbsp;флаги те&nbsp;же: <code style="font-size:12px">--style</code>, <code style="font-size:12px">--timer</code>, <code style="font-size:12px">--mute</code>, <code style="font-size:12px">--focus</code>.</p>
+<p data-l="en" style="margin:0;font-size:14.5px;line-height:1.6;color:var(--text-body)">On every hotkey press the process re-reads the secret from the config and builds an ordinary session. The HID lock is the same, and so are <code style="font-size:12px">--style</code>, <code style="font-size:12px">--timer</code>, <code style="font-size:12px">--mute</code>, <code style="font-size:12px">--focus</code>.</p>
+<div style="display:flex;flex-wrap:wrap;gap:6px"><code style="font-size:11.5px">kCGHIDEventTap</code><code style="font-size:11.5px">runtime.json</code></div>
+</div>
+</div>
+
+<div style="display:flex;flex-wrap:wrap;gap:4px 0">
+<div style="flex:0 0 132px;padding-right:20px;text-align:right"><span style="font-family:var(--font-mono);font-size:11.5px;letter-spacing:.08em;text-transform:uppercase;color:var(--text-muted)">↺ unlock</span></div>
+<div style="position:relative;flex:1 1 320px;min-width:0;padding:0 0 0 26px;display:flex;flex-direction:column;gap:8px">
+<span style="position:absolute;left:-4px;top:9px;width:7px;height:7px;border-radius:50%;background:var(--border-strong)"></span>
+<h3 style="margin:0;font-size:16.5px;line-height:1.3;font-weight:600;color:var(--text-strong)"><span data-l="ru">Набери unlock code: процесс снова ждёт</span><span data-l="en">Type the unlock code: it waits again</span></h3>
+<p data-l="ru" style="margin:0;font-size:14.5px;line-height:1.6;color:var(--text-body)">Сессия завершается, щит опускается, и&nbsp;процесс ждёт следующего нажатия. В&nbsp;любой момент <code style="font-size:12px">--status</code> покажет PID, аптайм и&nbsp;поднят&nbsp;ли щит, а <code style="font-size:12px">--kill</code> остановит процесс.</p>
+<p data-l="en" style="margin:0;font-size:14.5px;line-height:1.6;color:var(--text-body)">The session ends, the shield comes down, and the process waits for the next press. Ask <code style="font-size:12px">--status</code> for PID, uptime and whether the shield is up; <code style="font-size:12px">--kill</code> stops the process.</p>
+</div>
+</div>
+</div>
+</div>
+
+</div></section>
+
+<section id="styles" data-anim="on" style="position:relative;overflow:hidden;padding:var(--section-y) 0;border-top:1px solid var(--border-soft)">
+<div aria-hidden="true" style="position:absolute;inset:0 0 auto 0;height:520px;background:var(--glow-section);pointer-events:none"></div>
+<div class="ds-wrap" style="position:relative">
+<div style="display:flex;flex-direction:column;align-items:center;text-align:center;gap:var(--intro-gap);max-width:720px;margin:0 auto">
+<p style="margin:0;font-family:var(--font-mono);font-size:12px;font-weight:500;letter-spacing:.08em;text-transform:uppercase;color:var(--c-accent)"><span data-l="ru">Стили щита</span><span data-l="en">Shield styles</span></p>
+<h2 style="margin:0;font-size:var(--size-h2);line-height:1.07;letter-spacing:-0.03em;font-weight:600;color:var(--text-strong)"><span data-l="ru">Шесть стилей.<br>Четыре запирают одинаково</span><span data-l="en">Six styles. Four of them lock identically</span></h2>
+<p data-l="ru" style="margin:0;font-size:var(--size-lead);line-height:1.55;color:var(--text-body);max-width:58ch">Анимированные стили меняют только картинку поверх того&nbsp;же непрозрачного чёрного щита: тот&nbsp;же уровень окна, тот&nbsp;же HID-замок. Анимация никогда не&nbsp;реагирует на ввод. Любой отклик выдал&nbsp;бы перехват.</p>
+<p data-l="en" style="margin:0;font-size:var(--size-lead);line-height:1.55;color:var(--text-body);max-width:58ch">The animated styles only change what is drawn over the same opaque black shield: the same window level, the same HID lock. The animation never reacts to input. Any response would give the interception away.</p>
+<div class="ds-grid-3" style="padding-top:var(--section-lead-gap)">
+<div style="display:flex;flex-direction:column;gap:12px">
+<div style="position:relative;aspect-ratio:16 / 10;border-radius:var(--radius-md);border:1px solid var(--border-strong);background:#000;overflow:hidden"><div style="position:absolute;inset:0;display:flex;align-items:center;justify-content:center"><span style="font-family:var(--font-mono);font-size:10.5px;letter-spacing:.3em;text-transform:uppercase;color:rgba(255,255,255,0.18)">shield up</span></div></div>
+<div style="display:flex;flex-wrap:wrap;align-items:baseline;gap:8px">
+<code style="font-size:12.5px">--style black</code>
+<span style="font-family:var(--font-mono);font-size:11px;letter-spacing:.08em;text-transform:uppercase;color:var(--text-muted)">black</span>
+</div>
+<p data-l="ru" style="margin:0;font-size:13.5px;line-height:1.6;color:var(--text-body)">Непрозрачный чёрный щит, стиль по&nbsp;умолчанию. Сквозь него не&nbsp;просвечивает ничего.</p>
+<p data-l="en" style="margin:0;font-size:13.5px;line-height:1.6;color:var(--text-body)">An opaque black shield, the default style. Nothing bleeds through.</p>
+</div>
+<div style="display:flex;flex-direction:column;gap:12px">
+<div style="position:relative;aspect-ratio:16 / 10;border-radius:var(--radius-md);border:1px solid var(--border-strong);background:#000;overflow:hidden"><canvas data-rain="card" aria-hidden="true" style="position:absolute;inset:0;width:100%;height:100%;display:block"></canvas></div>
+<div style="display:flex;flex-wrap:wrap;align-items:baseline;gap:8px">
+<code style="font-size:12.5px">--style matrix</code>
+<span style="font-family:var(--font-mono);font-size:11px;letter-spacing:.08em;text-transform:uppercase;color:var(--text-muted)">matrix</span>
+</div>
+<p data-l="ru" style="margin:0;font-size:13.5px;line-height:1.6;color:var(--text-body)">Зелёный цифровой дождь поверх того&nbsp;же чёрного щита. Только косметика: все гарантии блокировки те&nbsp;же.</p>
+<p data-l="en" style="margin:0;font-size:13.5px;line-height:1.6;color:var(--text-body)">Green digital rain over the same black shield. Cosmetic only: every blocking guarantee stays the same.</p>
+</div>
+<div style="display:flex;flex-direction:column;gap:12px">
+<div style="position:relative;aspect-ratio:16 / 10;border-radius:var(--radius-md);border:1px solid var(--border-strong);background:#000;overflow:hidden"><div style="position:absolute;inset:0;padding:14px;font-family:var(--font-mono);font-size:9.5px;line-height:1.85;color:rgba(255,255,255,0.42)">
+<div style="white-space:nowrap;overflow:hidden;color:#7dd3a0">func (s *Session) start() error {</div>
+<div style="white-space:nowrap;overflow:hidden">&nbsp;&nbsp;tap, err := hid.Install(headInsert)</div>
+<div style="white-space:nowrap;overflow:hidden">&nbsp;&nbsp;if err != nil { return err }</div>
+<div style="white-space:nowrap;overflow:hidden;color:#8ab4f8">&nbsp;&nbsp;go s.poll(ring, 10*time.Milli<span style="color:#4ccbf0;animation:dsBlink 1.05s steps(1) infinite">▊</span></div>
+</div></div>
+<div style="display:flex;flex-wrap:wrap;align-items:baseline;gap:8px">
+<code style="font-size:12.5px">--style terminal</code>
+<span style="font-family:var(--font-mono);font-size:11px;letter-spacing:.08em;text-transform:uppercase;color:var(--text-muted)">terminal</span>
+</div>
+<p data-l="ru" style="margin:0;font-size:13.5px;line-height:1.6;color:var(--text-body)">Поток псевдоисходников с&nbsp;подсветкой печатает сам себя за&nbsp;мигающим курсором. Язык на выбор: <code style="font-size:11.5px">go</code>, <code style="font-size:11.5px">python</code>, <code style="font-size:11.5px">typescript</code>, <code style="font-size:11.5px">rust</code> или <code style="font-size:11.5px">ys</code>.</p>
+<p data-l="en" style="margin:0;font-size:13.5px;line-height:1.6;color:var(--text-body)">A stream of syntax-highlighted pseudo-source types itself out behind a blinking caret. Your choice of language: <code style="font-size:11.5px">go</code>, <code style="font-size:11.5px">python</code>, <code style="font-size:11.5px">typescript</code>, <code style="font-size:11.5px">rust</code> or <code style="font-size:11.5px">ys</code>.</p>
+</div>
+<div style="display:flex;flex-direction:column;gap:12px">
+<div style="position:relative;aspect-ratio:16 / 10;border-radius:var(--radius-md);border:1px solid var(--border-strong);background:#000;overflow:hidden"><div style="position:absolute;inset:12px;animation:dsDvdX 5.7s linear infinite alternate">
+<div style="width:54px;height:100%;animation:dsDvdY 2.3s linear infinite alternate">
+<div style="display:flex;align-items:center;justify-content:center;height:26px;font-family:var(--font-mono);font-size:11px;letter-spacing:-0.01em;color:#FF3333;animation:dsHue 18.4s steps(1) infinite">dndmode</div>
+</div>
+</div></div>
+<div style="display:flex;flex-wrap:wrap;align-items:baseline;gap:8px">
+<code style="font-size:12.5px">--style dvd</code>
+<span style="font-family:var(--font-mono);font-size:11px;letter-spacing:.08em;text-transform:uppercase;color:var(--text-muted)">dvd</span>
+</div>
+<p data-l="ru" style="margin:0;font-size:13.5px;line-height:1.6;color:var(--text-body)">Логотип DVD VIDEO скачет по&nbsp;чёрному щиту и&nbsp;на каждом отскоке меняет цвет, как&nbsp;скринсейвер старого DVD-плеера.</p>
+<p data-l="en" style="margin:0;font-size:13.5px;line-height:1.6;color:var(--text-body)">The DVD VIDEO logo bounces around the black shield and changes colour on every edge hit, like the old DVD-player screensaver.</p>
+</div>
+<div style="display:flex;flex-direction:column;gap:12px">
+<div style="position:relative;aspect-ratio:16 / 10;border-radius:var(--radius-md);border:1px solid var(--border-strong);background:#000;overflow:hidden"><div style="position:absolute;inset:0;background:radial-gradient(60% 60% at 25% 30%,#3b6ea5,transparent 70%),radial-gradient(50% 50% at 78% 68%,#7a4d8f,transparent 70%),#101318"></div>
+<div style="position:absolute;inset:0;backdrop-filter:blur(16px);-webkit-backdrop-filter:blur(16px);background:rgba(255,255,255,0.06)"></div></div>
+<div style="display:flex;flex-wrap:wrap;align-items:baseline;gap:8px">
+<code style="font-size:12.5px">--style glass</code>
+<span style="font-family:var(--font-mono);font-size:11px;letter-spacing:.08em;text-transform:uppercase;color:var(--text-muted)">glass</span>
+</div>
+<p data-l="ru" style="margin:0;font-size:13.5px;line-height:1.6;color:var(--text-body)">Матовое стекло вместо чёрного: сквозь щит просвечивает размытый рабочий стол. За&nbsp;этот вид ты отдаёшь гарантию «ничего не&nbsp;видно», но&nbsp;ввод по-прежнему заблокирован. Нужно разрешение Screen Recording.</p>
+<p data-l="en" style="margin:0;font-size:13.5px;line-height:1.6;color:var(--text-body)">Frosted glass instead of black: the blurred desktop shows through the shield. You trade the no-bleed-through guarantee for the look, but input stays fully blocked. Needs the Screen Recording permission.</p>
+</div>
+<div style="display:flex;flex-direction:column;gap:12px">
+<div style="position:relative;aspect-ratio:16 / 10;border-radius:var(--radius-md);border:1px solid var(--border-strong);background:#000;overflow:hidden"><div style="position:absolute;inset:0;padding:14px;font-family:var(--font-mono);font-size:10px;line-height:1.9;color:rgba(255,255,255,0.34)">
+<div style="white-space:nowrap">$ dndmode --style none</div>
+<div style="white-space:nowrap">$ pmset -g assertions</div>
+<div style="white-space:nowrap;color:rgba(255,255,255,0.5)">&nbsp;&nbsp;dndmode active</div>
+</div></div>
+<div style="display:flex;flex-wrap:wrap;align-items:baseline;gap:8px">
+<code style="font-size:12.5px">--style none</code>
+<span style="font-family:var(--font-mono);font-size:11px;letter-spacing:.08em;text-transform:uppercase;color:var(--text-muted)">none</span>
+</div>
+<p data-l="ru" style="margin:0;font-size:13.5px;line-height:1.6;color:var(--text-body)">Только awake: ни&nbsp;щита, ни&nbsp;блокировки ввода, ни&nbsp;Focus, ни&nbsp;мьюта. Tap не&nbsp;ставится, поэтому Accessibility не&nbsp;нужен. Выход по <code style="font-size:11.5px">Ctrl-C</code>.</p>
+<p data-l="en" style="margin:0;font-size:13.5px;line-height:1.6;color:var(--text-body)">Awake-only: no shield, no input blocking, no Focus, no mute. No tap is installed, so it needs no Accessibility; exit with <code style="font-size:11.5px">Ctrl-C</code>.</p>
+</div>
+</div>
+<p style="margin:22px auto 0;font-size:13.5px;line-height:1.6;color:var(--text-muted);max-width:82ch;text-align:center"><span data-l="ru">Анимации ограничены ~30&nbsp;FPS. Все стили, кроме <code style="font-size:12px">glass</code> и <code style="font-size:12px">none</code>, запирают одинаково.</span><span data-l="en">Animations are capped at ~30&nbsp;FPS. Every style except <code style="font-size:12px">glass</code> and <code style="font-size:12px">none</code> locks identically.</span></p>
+</div>
+</div></section>
+
+<section id="unlock" style="padding:var(--section-y) 0;border-top:1px solid var(--border-soft)">
+<div class="ds-wrap">
+<div style="display:flex;flex-direction:column;align-items:center;text-align:center;gap:var(--intro-gap);max-width:760px;margin:0 auto">
+<p style="margin:0;font-family:var(--font-mono);font-size:12px;font-weight:500;letter-spacing:.08em;text-transform:uppercase;color:var(--c-accent)"><span data-l="ru">Unlock code</span><span data-l="en">Unlock code</span></p>
+<h2 style="margin:0;font-size:var(--size-h2);line-height:1.07;letter-spacing:-0.03em;font-weight:600;color:var(--text-strong)"><span data-l="ru">Фраза, набранная в&nbsp;мёртвую клавиатуру, а&nbsp;не&nbsp;хоткей</span><span data-l="en">A passphrase typed into a dead keyboard, not a hotkey</span></h2>
+<p data-l="ru" style="margin:0;font-size:var(--size-lead);line-height:1.55;color:var(--text-body);max-width:58ch">dndmode следит за&nbsp;хвостом всего набранного и&nbsp;завершает сессию, как&nbsp;только хвост совпадёт с&nbsp;кодом. Приглашения и&nbsp;индикатора нет, на неверный код dndmode не&nbsp;отвечает, сбросить попытку нельзя. Продолжай печатать, пока не&nbsp;совпадёт.</p>
+<p data-l="en" style="margin:0;font-size:var(--size-lead);line-height:1.55;color:var(--text-body);max-width:58ch">dndmode watches the tail of everything typed and ends the session once the tail equals the code. No prompt, no progress indicator and no "wrong code"; a half-typed attempt cannot be reset. Keep typing until it matches.</p>
+</div>
+
+<div style="max-width:840px;margin:var(--section-lead-gap) auto 0;display:flex;flex-direction:column;gap:16px">
+<div class="ds-term">
+<div class="ds-term-bar"><span class="ds-term-dot" style="background:#ff5f57"></span><span class="ds-term-dot" style="background:#febc2e"></span><span class="ds-term-dot" style="background:#28c840"></span><span class="ds-term-title">~/.config/dndmode/config.yml</span></div>
+<div class="ds-term-body">
+<div style="white-space:nowrap"><span style="color:var(--syntax-key)">unlock_code</span>: s w o r d f i s h<span style="color:var(--syntax-comment)">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;# <span data-l="ru">рекомендуемая форма</span><span data-l="en">the recommended form</span></span></div>
+<div style="white-space:nowrap"><span style="color:var(--syntax-key)">unlock_code</span>: ctrl+s w o r d cmd+z<span style="color:var(--syntax-comment)">&nbsp;&nbsp;# <span data-l="ru">модификаторы на части шагов</span><span data-l="en">modifiers on some steps</span></span></div>
+<div style="white-space:nowrap"><span style="color:var(--syntax-key)">unlock_code</span>: Ctrl+Option+Cmd+X<span style="color:var(--syntax-comment)">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;# <span data-l="ru">одна комбинация = код длиной 1</span><span data-l="en">one combination = a 1-step code</span></span></div>
+</div>
+</div>
+<p data-l="ru" style="margin:0;font-size:15px;line-height:1.6;color:var(--text-body)">Пробел разделяет шаги, каждый шаг записывается как <code style="font-size:12px">(&lt;модификатор&gt;+)*&lt;клавиша&gt;</code>. Клавиши: буквы, цифры, <code style="font-size:12px">space</code>, <code style="font-size:12px">return</code>, <code style="font-size:12px">tab</code>, стрелки, пунктуация. Регистр не&nbsp;важен.</p>
+<p data-l="en" style="margin:0;font-size:15px;line-height:1.6;color:var(--text-body)">Spaces separate steps, and each step is written as <code style="font-size:12px">(&lt;modifier&gt;+)*&lt;key&gt;</code>. Keys: letters, digits, <code style="font-size:12px">space</code>, <code style="font-size:12px">return</code>, <code style="font-size:12px">tab</code>, arrows, punctuation. Case does not matter.</p>
+</div>
+
+<div style="max-width:840px;margin:var(--section-lead-gap) auto 0;display:flex;flex-direction:column">
+<div style="display:flex;flex-wrap:wrap;gap:4px 0">
+<div style="flex:0 0 132px;padding-right:20px;text-align:right"><span style="font-family:var(--font-mono);font-size:11.5px;letter-spacing:.08em;text-transform:uppercase;color:var(--text-muted)">layout</span></div>
+<div style="position:relative;flex:1 1 320px;min-width:0;padding:0 0 40px 26px;border-left:1px solid var(--border-soft);display:flex;flex-direction:column;gap:8px">
+<span style="position:absolute;left:-4px;top:9px;width:7px;height:7px;border-radius:50%;background:var(--border-strong)"></span>
+<h3 style="margin:0;font-size:16.5px;line-height:1.3;font-weight:600;color:var(--text-strong)"><span data-l="ru">Физические позиции, а&nbsp;не&nbsp;символы</span><span data-l="en">Physical positions, not characters</span></h3>
+<p data-l="ru" style="margin:0;font-size:14.5px;line-height:1.6;color:var(--text-body)">Шаги сравниваются по&nbsp;позиции физической клавиши, поэтому на US, русской и&nbsp;AZERTY код работает одинаково. Но <code style="font-size:12px">s w o r d</code> на русской раскладке набирается клавишами ы ц о&nbsp;р в.</p>
+<p data-l="en" style="margin:0;font-size:14.5px;line-height:1.6;color:var(--text-body)">Steps are compared by physical key position, so the code works the same on US, Russian and AZERTY layouts. But <code style="font-size:12px">s w o r d</code> on a Russian layout is typed with the keys ы ц о р в.</p>
+</div>
+</div>
+<div style="display:flex;flex-wrap:wrap;gap:4px 0">
+<div style="flex:0 0 132px;padding-right:20px;text-align:right"><span style="font-family:var(--font-mono);font-size:11.5px;letter-spacing:.08em;text-transform:uppercase;color:var(--text-muted)">modifiers</span></div>
+<div style="position:relative;flex:1 1 320px;min-width:0;padding:0 0 40px 26px;border-left:1px solid var(--border-soft);display:flex;flex-direction:column;gap:8px">
+<span style="position:absolute;left:-4px;top:9px;width:7px;height:7px;border-radius:50%;background:var(--border-strong)"></span>
+<h3 style="margin:0;font-size:16.5px;line-height:1.3;font-weight:600;color:var(--text-strong)"><span data-l="ru">Лишний модификатор ломает шаг</span><span data-l="en">An extra modifier breaks the step</span></h3>
+<p data-l="ru" style="margin:0;font-size:14.5px;line-height:1.6;color:var(--text-body)">Шаг без&nbsp;модификаторов совпадает только с&nbsp;нажатием без&nbsp;них. Прижатый Cmd или&nbsp;Shift его ломает. Нужный модификатор впиши в&nbsp;шаг: <code style="font-size:12px">cmd+s</code>.</p>
+<p data-l="en" style="margin:0;font-size:14.5px;line-height:1.6;color:var(--text-body)">A step without modifiers matches only a press with none held. Resting on Cmd or Shift breaks it. Write the modifier into the step: <code style="font-size:12px">cmd+s</code>.</p>
+</div>
+</div>
+<div style="display:flex;flex-wrap:wrap;gap:4px 0">
+<div style="flex:0 0 132px;padding-right:20px;text-align:right"><span style="font-family:var(--font-mono);font-size:11.5px;letter-spacing:.08em;text-transform:uppercase;color:var(--text-muted)">auto-repeat</span></div>
+<div style="position:relative;flex:1 1 320px;min-width:0;padding:0 0 0 26px;display:flex;flex-direction:column;gap:8px">
+<span style="position:absolute;left:-4px;top:9px;width:7px;height:7px;border-radius:50%;background:var(--border-strong)"></span>
+<h3 style="margin:0;font-size:16.5px;line-height:1.3;font-weight:600;color:var(--text-strong)"><span data-l="ru">Зажатая клавиша даёт один шаг</span><span data-l="en">A held key counts as one step</span></h3>
+<p data-l="ru" style="margin:0;font-size:14.5px;line-height:1.6;color:var(--text-body)">Автоповтор отбрасывается до&nbsp;сравнения с&nbsp;кодом. Настоящие двойные буквы не&nbsp;страдают: второе нажатие приходит раньше автоповтора.</p>
+<p data-l="en" style="margin:0;font-size:14.5px;line-height:1.6;color:var(--text-body)">Auto-repeat is dropped before matching. Genuine double letters are unaffected: a real second press lands before auto-repeat starts.</p>
+</div>
+</div>
+</div>
+
+<div style="max-width:840px;margin:var(--section-lead-gap) auto 0">
+<div style="display:flex;align-items:center;gap:16px;padding-bottom:10px;border-bottom:1px solid var(--border-default)">
+<span style="flex:0 0 64px;font-family:var(--font-mono);font-size:11px;letter-spacing:.08em;text-transform:uppercase;color:var(--text-muted)"><span data-l="ru">шагов</span><span data-l="en">steps</span></span>
+<span style="flex:2;font-family:var(--font-mono);font-size:11px;letter-spacing:.08em;text-transform:uppercase;color:var(--text-muted)"><span data-l="ru">статус</span><span data-l="en">status</span></span>
+<span style="flex:2;font-family:var(--font-mono);font-size:11px;letter-spacing:.08em;text-transform:uppercase;color:var(--c-accent)"><span data-l="ru">время перебора</span><span data-l="en">crack time</span></span>
+</div>
+<div style="display:flex;align-items:center;gap:16px;padding:13px 0;border-bottom:1px solid var(--border-soft)">
+<span style="flex:0 0 64px;font-family:var(--font-mono);font-size:14px;color:var(--text-strong)">1</span>
+<span style="flex:2;font-size:13.5px;color:var(--text-body)"><span data-l="ru">только с&nbsp;модификатором</span><span data-l="en">only with a modifier</span></span>
+<span style="flex:2;font-family:var(--font-mono);font-size:12.5px;color:var(--status-warn)"><span data-l="ru">минуты</span><span data-l="en">minutes</span></span>
+</div>
+<div style="display:flex;align-items:center;gap:16px;padding:13px 0;border-bottom:1px solid var(--border-soft)">
+<span style="flex:0 0 64px;font-family:var(--font-mono);font-size:14px;color:var(--text-strong)">2-3</span>
+<span style="flex:2;font-size:13.5px;color:var(--status-bad)"><span data-l="ru">отвергается, exit 1</span><span data-l="en">refused, exit 1</span></span>
+<span style="flex:2;font-family:var(--font-mono);font-size:12.5px;color:var(--status-bad)">~8 min</span>
+</div>
+<div style="display:flex;align-items:center;gap:16px;padding:13px 0;border-bottom:1px solid var(--border-soft)">
+<span style="flex:0 0 64px;font-family:var(--font-mono);font-size:14px;color:var(--text-strong)">4-5</span>
+<span style="flex:2;font-size:13.5px;color:var(--text-body)"><span data-l="ru">принимается, слабый</span><span data-l="en">accepted, weak</span></span>
+<span style="flex:2;font-family:var(--font-mono);font-size:12.5px;color:var(--status-warn)">~5 h · ~7 <span data-l="ru">дней</span><span data-l="en">days</span></span>
+</div>
+<div style="display:flex;align-items:center;gap:16px;padding:13px 0;">
+<span style="flex:0 0 64px;font-family:var(--font-mono);font-size:14px;color:var(--text-strong)">6-32</span>
+<span style="flex:2;font-size:13.5px;color:var(--status-ok)"><span data-l="ru">рекомендуется</span><span data-l="en">recommended</span></span>
+<span style="flex:2;font-family:var(--font-mono);font-size:12.5px;color:var(--status-ok)">~250 <span data-l="ru">дней</span><span data-l="en">days</span> → <span data-l="ru">века</span><span data-l="en">centuries</span></span>
+</div>
+<p data-l="ru" style="margin:14px 0 0;font-size:12.5px;line-height:1.55;color:var(--text-muted)">Сравнивается хвост набранного, поэтому каждое нажатие даёт новую попытку: блокировок и&nbsp;ограничений частоты нет. Расчёт исходит из&nbsp;алфавита ~36&nbsp;символов и&nbsp;автомата, печатающего 100&nbsp;нажатий/с.</p>
+<p data-l="en" style="margin:14px 0 0;font-size:12.5px;line-height:1.55;color:var(--text-muted)">Tail matching makes every keypress a fresh attempt: no lockout, no rate limiting. The table assumes an alphabet of ~36&nbsp;characters and an automated typist at 100&nbsp;keys/s.</p>
+</div>
+
+<div style="max-width:840px;margin:var(--section-lead-gap) auto 0;display:flex;flex-direction:column;gap:24px">
+<div style="display:flex;flex-direction:column;gap:8px">
+<h4 style="margin:0;font-size:15px;font-weight:600;color:var(--status-warn)"><span data-l="ru">Не&nbsp;ставь <code style="font-size:13px">f1</code>-<code style="font-size:13px">f12</code> в&nbsp;unlock code</span><span data-l="en">Do not put <code style="font-size:13px">f1</code>-<code style="font-size:13px">f12</code> in the unlock code</span></h4>
+<p data-l="ru" style="margin:0;font-size:14px;line-height:1.6;color:var(--text-body)">При&nbsp;настройке macOS по&nbsp;умолчанию F-ряд приходит как&nbsp;системное медиа-событие, а&nbsp;не&nbsp;как&nbsp;нажатие клавиши: dndmode его блокирует, но&nbsp;никогда не&nbsp;записывает. Код с <code style="font-size:12px">f1</code> разбирается, проверяется и&nbsp;стартует без&nbsp;единого предупреждения, а&nbsp;потом его не&nbsp;набрать: экран заперт, без&nbsp;клавиатуры и&nbsp;без&nbsp;Ctrl-C. Спасает только Fn на каждом F-шаге или&nbsp;заранее включённый «Use F1, F2, etc. keys as standard function keys». Иначе остаётся SSH с&nbsp;другой машины или&nbsp;жёсткое выключение.</p>
+<p data-l="en" style="margin:0;font-size:14px;line-height:1.6;color:var(--text-body)">With the macOS default, the F row arrives as a system media event, not a keypress: dndmode blocks it but never records it. A code with <code style="font-size:12px">f1</code> parses, validates and starts without a single warning, and then cannot be typed: the screen stays locked, no keyboard, no Ctrl-C. The only way in is to hold Fn on every F step or to turn on "Use F1, F2, etc. keys as standard function keys" beforehand. Otherwise the way out is SSH from another machine or a hard power-off.</p>
+</div>
+<div style="display:flex;flex-direction:column;gap:8px">
+<h4 style="margin:0;font-size:15px;font-weight:600;color:var(--status-warn)"><span data-l="ru">Смени код по&nbsp;умолчанию, прежде чем на него полагаться</span><span data-l="en">Change the default code before relying on it</span></h4>
+<p data-l="ru" style="margin:0;font-size:14px;line-height:1.6;color:var(--text-body)">Поставляемый <code style="font-size:12px">Ctrl+Option+Cmd+X</code> одинаков на всех машинах и&nbsp;заведомо слабый: код длиной в&nbsp;один шаг, и&nbsp;любой, кто его знает, опустит щит. С&nbsp;ним dndmode запускается, а <code style="font-size:12px">--debug</code> предупреждает о&nbsp;нём на каждом старте. Замени его фразой из&nbsp;шести шагов и&nbsp;больше. Впиши её в&nbsp;файл, а&nbsp;чтобы секрета в&nbsp;файле не&nbsp;было вообще, задай через <code style="font-size:12px">dndmode --set-password</code>.</p>
+<p data-l="en" style="margin:0;font-size:14px;line-height:1.6;color:var(--text-body)">The shipped <code style="font-size:12px">Ctrl+Option+Cmd+X</code> is identical on every machine and deliberately weak: a one-step code, and anyone who knows it lowers the shield. dndmode still starts with it, and <code style="font-size:12px">--debug</code> warns about it on every start. Replace it with a phrase of six steps or more. Edit the file, or run <code style="font-size:12px">dndmode --set-password</code> so the secret never sits in the file at all.</p>
+</div>
+</div>
+
+<div style="max-width:840px;margin:var(--section-lead-gap) auto 0;padding-top:var(--grid-gap);border-top:1px solid var(--border-soft);display:flex;flex-direction:column;gap:16px">
+<div style="display:flex;flex-wrap:wrap;align-items:baseline;gap:12px">
+<h3 style="margin:0;font-size:var(--size-h3);line-height:1.25;letter-spacing:-0.02em;font-weight:600;color:var(--text-strong)"><span data-l="ru">Код уходит из&nbsp;конфига</span><span data-l="en">The unlock code leaves the config file</span></h3>
+<code style="font-size:12.5px">dndmode --set-password</code>
+</div>
+<p data-l="ru" style="margin:0;font-size:15px;line-height:1.6;color:var(--text-body)">По&nbsp;умолчанию код лежит в <code style="font-size:12px">config.yml</code> открытым текстом. Файл 0600&nbsp;в&nbsp;каталоге 0700&nbsp;отсекает только другие учётные записи на этой машине. Секрет остаётся на виду: <code style="font-size:12px">cat config.yml</code> на демонстрации экрана, коллега за&nbsp;плечом, dotfiles-репозиторий, снимок Time Machine. Команда захватывает новую последовательность с&nbsp;реальных нажатий, просит повторить и&nbsp;заменяет строку парой соль + SHA-256. Сохранённая пара не&nbsp;выдаёт ни&nbsp;последовательность, ни&nbsp;её длину.</p>
+<p data-l="en" style="margin:0;font-size:15px;line-height:1.6;color:var(--text-body)">By default the code sits in <code style="font-size:12px">config.yml</code> in plain text. A 0600&nbsp;file in a 0700&nbsp;directory stops only other accounts on the machine. The secret stays in plain view: a <code style="font-size:12px">cat config.yml</code> on a shared screen, a colleague behind you, a dotfiles repository, a Time Machine snapshot. The command captures a new sequence from real keypresses, asks for it twice and replaces the line with a salt + SHA-256&nbsp;pair. Neither stored value reveals the sequence or its length.</p>
+<div class="ds-grid-2">
+<div class="ds-term">
+<div class="ds-term-body">
+<div style="white-space:nowrap;color:var(--syntax-comment)"># before</div>
+<div style="white-space:nowrap"><span style="color:var(--syntax-key)">unlock_code</span>: s w o r d f i s h</div>
+<div style="height:25px"></div>
+<div style="white-space:nowrap;color:var(--syntax-comment)"># <span data-l="ru">строка удаляется, не&nbsp;комментируется</span><span data-l="en">the line is deleted, not commented out</span></div>
+</div>
+</div>
+<div class="ds-term">
+<div class="ds-term-body">
+<div style="white-space:nowrap;color:var(--syntax-comment)"># after</div>
+<div style="white-space:nowrap"><span style="color:var(--syntax-key)">unlock_salt</span>: 3Qk2u9Yy1S6oZb0pP7fWzg==</div>
+<div style="white-space:nowrap"><span style="color:var(--syntax-key)">unlock_hash</span>: 1n5m1p4dTn7B0k4kQd0cGqk4Y1lXNhE5nOo6yS2mQzE=</div>
+<div style="white-space:nowrap;color:var(--syntax-comment)"># <span data-l="ru">остальные ключи и&nbsp;комментарии, байт в&nbsp;байт</span><span data-l="en">every other key and comment, byte for byte</span></div>
+</div>
+</div>
+</div>
+<div class="ds-term">
+<div class="ds-term-bar"><span class="ds-term-dot" style="background:#ff5f57"></span><span class="ds-term-dot" style="background:#febc2e"></span><span class="ds-term-dot" style="background:#28c840"></span><span class="ds-term-title">~ — zsh</span></div>
+<div class="ds-term-body">
+<div style="white-space:nowrap"><span style="color:var(--syntax-prompt)">$ </span>dndmode --set-password</div>
+<div style="white-space:pre-wrap;color:var(--text-body)">Type your unlock sequence, then press Return. Esc cancels. Nothing is echoed. 6 or more steps recommended.</div>
+<div style="white-space:nowrap;color:var(--text-body)">Type it again to confirm.</div>
+<div style="white-space:pre-wrap;color:var(--text-strong)">dndmode: unlock code updated in /Users/you/.config/dndmode/config.yml</div>
+</div>
+</div>
+<div style="display:flex;flex-direction:column;gap:8px">
+<h4 style="margin:0;font-size:15px;font-weight:600;color:var(--text-strong)"><span data-l="ru">Солёный SHA-256, а&nbsp;не&nbsp;KDF</span><span data-l="en">A salted SHA-256, not a KDF</span></h4>
+<p data-l="ru" style="margin:0;font-size:14px;line-height:1.6;color:var(--text-body)">Хэш защищает от&nbsp;случайной засветки вроде взгляда, <code style="font-size:12px">cat</code> или&nbsp;синхронизированного бэкапа. От&nbsp;offline-перебора он не&nbsp;защищает: обладатель файла переберёт короткие последовательности. Таблица длин действует без&nbsp;изменений. И&nbsp;старые байты остаются на диске. Если код уже попал в&nbsp;бэкап открытым текстом, считай его раскрытым и&nbsp;выбери новый, а&nbsp;не&nbsp;хэшируй старый.</p>
+<p data-l="en" style="margin:0;font-size:14px;line-height:1.6;color:var(--text-body)">The hash guards against accidental exposure such as a glance, a <code style="font-size:12px">cat</code> or a synced backup. It does not resist an offline brute force: whoever holds the file can grind through short sequences. The length table applies unchanged. And the old bytes stay on disk. If the plaintext is already backed up somewhere, treat it as disclosed and pick a new code instead of hashing the old one.</p>
+</div>
+</div>
+
+</div>
+</section>
+
+<section id="compare" style="padding:var(--section-y) 0;border-top:1px solid var(--border-soft)">
+<div class="ds-wrap">
+<div style="display:flex;flex-direction:column;align-items:center;text-align:center;gap:var(--intro-gap);max-width:720px;margin:0 auto">
+<p style="margin:0;font-family:var(--font-mono);font-size:12px;font-weight:500;letter-spacing:.08em;text-transform:uppercase;color:var(--c-accent)"><span data-l="ru">С&nbsp;чем не&nbsp;путать</span><span data-l="en">What this is not</span></p>
+<h2 style="margin:0;font-size:var(--size-h2);line-height:1.07;letter-spacing:-0.03em;font-weight:600;color:var(--text-strong)"><span data-l="ru">Два плохих варианта. И&nbsp;третий</span><span data-l="en">Two bad options. And a third</span></h2>
+<p data-l="ru" style="margin:0;font-size:var(--size-lead);line-height:1.55;color:var(--text-body);max-width:58ch">Запрёшь экран, и&nbsp;macOS может приостановить или&nbsp;придушить работу. Оставишь открытым: работа идёт, но&nbsp;кто угодно рядом нажмёт клавишу, кликнет диалог и&nbsp;прочитает, что&nbsp;на экране.</p>
+<p data-l="en" style="margin:0;font-size:var(--size-lead);line-height:1.55;color:var(--text-body);max-width:58ch">Lock the screen and macOS may suspend or throttle the job. Leave it open and the job keeps running, but anyone passing by can touch the keyboard, click a dialog, or read what is on screen.</p>
+</div>
+
+<div class="ds-scroll-x" style="max-width:900px;margin:var(--section-lead-gap) auto 0">
+<table style="width:100%;min-width:520px;border-collapse:collapse">
+<thead>
+<tr>
+<th style="padding:0 16px 10px 0;text-align:left;font-family:var(--font-mono);font-size:11px;font-weight:500;letter-spacing:.08em;text-transform:uppercase;color:var(--text-muted);border-bottom:1px solid var(--border-default)"><span data-l="ru">способ</span><span data-l="en">approach</span></th>
+<th style="padding:0 8px 10px;text-align:center;font-family:var(--font-mono);font-size:11px;font-weight:500;letter-spacing:.08em;text-transform:uppercase;color:var(--c-accent);border-bottom:1px solid var(--border-default)"><span data-l="ru">работа идёт</span><span data-l="en">job runs</span></th>
+<th style="padding:0 8px 10px;text-align:center;font-family:var(--font-mono);font-size:11px;font-weight:500;letter-spacing:.08em;text-transform:uppercase;color:var(--text-muted);border-bottom:1px solid var(--border-default)"><span data-l="ru">ввод заперт</span><span data-l="en">input locked</span></th>
+<th style="padding:0 8px 10px;text-align:center;font-family:var(--font-mono);font-size:11px;font-weight:500;letter-spacing:.08em;text-transform:uppercase;color:var(--text-muted);border-bottom:1px solid var(--border-default)"><span data-l="ru">экран скрыт</span><span data-l="en">screen hidden</span></th>
+<th style="padding:0 8px 10px;text-align:center;font-family:var(--font-mono);font-size:11px;font-weight:500;letter-spacing:.08em;text-transform:uppercase;color:var(--text-muted);border-bottom:1px solid var(--border-default)"><span data-l="ru">не&nbsp;уснёт</span><span data-l="en">stays awake</span></th>
+<th style="padding:0 8px 10px;text-align:center;font-family:var(--font-mono);font-size:11px;font-weight:500;letter-spacing:.08em;text-transform:uppercase;color:var(--text-muted);border-bottom:1px solid var(--border-default)"><span data-l="ru">тишина</span><span data-l="en">silence</span></th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<th scope="row" style="padding:14px 16px 14px 0;text-align:left;font-weight:500;font-size:14px;color:var(--text-body);border-bottom:1px solid var(--border-soft);">
+<code style="font-size:12.5px">Ctrl+Cmd+Q</code>
+<span style="display:block;margin-top:4px;font-size:12.5px;font-weight:400;color:var(--text-muted)"><span data-l="ru">запертый экран</span><span data-l="en">lock screen</span></span>
+</th>
+<td style="padding:14px 8px;text-align:center;border-bottom:1px solid var(--border-soft);"><span style="font-family:var(--font-mono);font-size:13px;color:var(--status-warn)">~</span></td><td style="padding:14px 8px;text-align:center;border-bottom:1px solid var(--border-soft);"><span style="font-family:var(--font-mono);font-size:13px;color:var(--status-ok)">✓</span></td><td style="padding:14px 8px;text-align:center;border-bottom:1px solid var(--border-soft);"><span style="font-family:var(--font-mono);font-size:13px;color:var(--status-ok)">✓</span></td><td style="padding:14px 8px;text-align:center;border-bottom:1px solid var(--border-soft);"><span style="font-family:var(--font-mono);font-size:13px;color:var(--status-bad)">✗</span></td><td style="padding:14px 8px;text-align:center;border-bottom:1px solid var(--border-soft);"><span style="font-family:var(--font-mono);font-size:13px;color:var(--status-bad)">✗</span></td>
+</tr>
+<tr>
+<th scope="row" style="padding:14px 16px 14px 0;text-align:left;font-weight:500;font-size:14px;color:var(--text-body);border-bottom:1px solid var(--border-soft);">
+<span data-l="ru">оставить открытым</span><span data-l="en">leave it open</span>
+<span style="display:block;margin-top:4px;font-size:12.5px;font-weight:400;color:var(--text-muted)"><span data-l="ru">ничего не&nbsp;делать</span><span data-l="en">do nothing</span></span>
+</th>
+<td style="padding:14px 8px;text-align:center;border-bottom:1px solid var(--border-soft);"><span style="font-family:var(--font-mono);font-size:13px;color:var(--status-ok)">✓</span></td><td style="padding:14px 8px;text-align:center;border-bottom:1px solid var(--border-soft);"><span style="font-family:var(--font-mono);font-size:13px;color:var(--status-bad)">✗</span></td><td style="padding:14px 8px;text-align:center;border-bottom:1px solid var(--border-soft);"><span style="font-family:var(--font-mono);font-size:13px;color:var(--status-bad)">✗</span></td><td style="padding:14px 8px;text-align:center;border-bottom:1px solid var(--border-soft);"><span style="font-family:var(--font-mono);font-size:13px;color:var(--status-warn)">~</span></td><td style="padding:14px 8px;text-align:center;border-bottom:1px solid var(--border-soft);"><span style="font-family:var(--font-mono);font-size:13px;color:var(--status-bad)">✗</span></td>
+</tr>
+<tr>
+<th scope="row" style="padding:14px 16px 14px 0;text-align:left;font-weight:500;font-size:14px;color:var(--text-body);border-bottom:1px solid var(--border-soft);">
+<code style="font-size:12.5px">caffeinate</code>
+<span style="display:block;margin-top:4px;font-size:12.5px;font-weight:400;color:var(--text-muted)"><span data-l="ru">только awake</span><span data-l="en">awake only</span></span>
+</th>
+<td style="padding:14px 8px;text-align:center;border-bottom:1px solid var(--border-soft);"><span style="font-family:var(--font-mono);font-size:13px;color:var(--status-ok)">✓</span></td><td style="padding:14px 8px;text-align:center;border-bottom:1px solid var(--border-soft);"><span style="font-family:var(--font-mono);font-size:13px;color:var(--status-bad)">✗</span></td><td style="padding:14px 8px;text-align:center;border-bottom:1px solid var(--border-soft);"><span style="font-family:var(--font-mono);font-size:13px;color:var(--status-bad)">✗</span></td><td style="padding:14px 8px;text-align:center;border-bottom:1px solid var(--border-soft);"><span style="font-family:var(--font-mono);font-size:13px;color:var(--status-ok)">✓</span></td><td style="padding:14px 8px;text-align:center;border-bottom:1px solid var(--border-soft);"><span style="font-family:var(--font-mono);font-size:13px;color:var(--status-bad)">✗</span></td>
+</tr>
+<tr>
+<th scope="row" style="padding:14px 16px 14px 0;text-align:left;font-weight:600;font-size:14px;color:var(--text-strong);">
+<code style="font-size:12.5px">dndmode</code>
+<span style="display:block;margin-top:4px;font-size:12.5px;font-weight:400;color:var(--text-muted)"><span data-l="ru">щит, HID-замок, assertion, мьют</span><span data-l="en">shield, HID lock, assertion, mute</span></span>
+</th>
+<td style="padding:14px 8px;text-align:center;"><span style="font-family:var(--font-mono);font-size:13px;color:var(--status-ok)">✓</span></td><td style="padding:14px 8px;text-align:center;"><span style="font-family:var(--font-mono);font-size:13px;color:var(--status-ok)">✓</span></td><td style="padding:14px 8px;text-align:center;"><span style="font-family:var(--font-mono);font-size:13px;color:var(--status-ok)">✓</span></td><td style="padding:14px 8px;text-align:center;"><span style="font-family:var(--font-mono);font-size:13px;color:var(--status-ok)">✓</span></td><td style="padding:14px 8px;text-align:center;"><span style="font-family:var(--font-mono);font-size:13px;color:var(--status-ok)">✓</span></td>
+</tr>
+</tbody>
+</table>
+</div>
+<p style="margin:18px auto 0;font-size:13.5px;line-height:1.6;color:var(--text-muted);max-width:78ch;text-align:center"><span data-l="ru"><code style="font-size:12px">dndmode --style none</code>&nbsp;- это тонкая обёртка над&nbsp;caffeinate: ни&nbsp;щита, ни&nbsp;HID-замка. Да и&nbsp;сам dndmode остаётся софт-локом для&nbsp;дома, офиса и&nbsp;коворкинга. Защиты уровня железа не&nbsp;даёт.</span><span data-l="en"><code style="font-size:12px">dndmode --style none</code> is a thin caffeinate wrapper: no shield, no HID lock. And dndmode itself is a soft lock for home, office or a coworking desk, not hardware-grade protection.</span></p>
+</div>
+</section>
+
+<section id="install" style="position:relative;overflow:hidden;padding:var(--section-y) 0;border-top:1px solid var(--border-soft)">
+<div aria-hidden="true" style="position:absolute;inset:-180px 0 auto 0;height:760px;background:var(--glow-hero);filter:blur(10px);pointer-events:none"></div>
+<div class="ds-wrap" style="position:relative">
+<div style="display:flex;flex-direction:column;align-items:center;text-align:center;gap:var(--intro-gap);max-width:720px;margin:0 auto">
+<h2 style="margin:0;font-size:var(--size-h2);line-height:1.07;letter-spacing:-0.03em;font-weight:600;color:var(--text-strong)"><span data-l="ru">Выбери один путь и&nbsp;держись&nbsp;его</span><span data-l="en">Pick one install path and stay&nbsp;on&nbsp;it</span></h2>
+<p data-l="ru" style="margin:0;font-size:var(--size-lead);line-height:1.55;color:var(--text-body);max-width:58ch">Все три пути собирают dndmode из&nbsp;исходников и&nbsp;подписывают бинарник ad-hoc локально. Подписи получаются разные, поэтому каждому бинарнику нужен свой набор разрешений.</p>
+<p data-l="en" style="margin:0;font-size:var(--size-lead);line-height:1.55;color:var(--text-body);max-width:58ch">All three paths build dndmode from source and sign the binary ad-hoc locally. The signatures differ, so each binary needs its own grants.</p>
+</div>
+
+<div style="max-width:840px;margin:var(--section-lead-gap) auto 0;display:flex;flex-direction:column">
+<div style="display:flex;flex-wrap:wrap;gap:4px 0">
+<div style="position:relative;flex:1 1 320px;min-width:0;padding:0 0 40px 26px;border-left:1px solid var(--border-soft);display:flex;flex-direction:column;gap:10px">
+<span style="position:absolute;left:-5px;top:8px;width:9px;height:9px;border-radius:50%;background:var(--c-accent)"></span>
+<div style="display:flex;flex-wrap:wrap;align-items:center;gap:10px">
+<h3 style="margin:0;font-size:16.5px;font-weight:600;color:var(--text-strong)">Homebrew</h3>
+<span style="font-family:var(--font-mono);font-size:11px;letter-spacing:.08em;text-transform:uppercase;color:var(--c-accent)"><span data-l="ru">рекомендуется</span><span data-l="en">recommended</span></span>
+</div>
+<div class="ds-term">
+<div class="ds-term-body has-copy">
+<div style="white-space:nowrap"><span style="color:var(--syntax-prompt)">$ </span>brew install dsbasko/tap/dndmode</div>
+</div>
+<button type="button" class="ds-term-copy" aria-label="Copy to clipboard" data-copy="brew install dsbasko/tap/dndmode">Copy</button>
+</div>
+<p data-l="ru" style="margin:0;font-size:14.5px;line-height:1.6;color:var(--text-body)">Попадает в <code style="font-size:12px">/opt/homebrew/bin</code>. Каждый <code style="font-size:12px">brew upgrade</code> пересобирает бинарник с&nbsp;новым cdhash, и&nbsp;macOS переспрашивает оба разрешения.</p>
+<p data-l="en" style="margin:0;font-size:14.5px;line-height:1.6;color:var(--text-body)">Lands in <code style="font-size:12px">/opt/homebrew/bin</code>. Every <code style="font-size:12px">brew upgrade</code> rebuilds with a new cdhash, so macOS asks for both grants again.</p>
+</div>
+</div>
+<div style="display:flex;flex-wrap:wrap;gap:4px 0">
+<div style="position:relative;flex:1 1 320px;min-width:0;padding:0 0 40px 26px;border-left:1px solid var(--border-soft);display:flex;flex-direction:column;gap:10px">
+<span style="position:absolute;left:-4px;top:9px;width:7px;height:7px;border-radius:50%;background:var(--border-strong)"></span>
+<div style="display:flex;flex-wrap:wrap;align-items:center;gap:10px">
+<h3 style="margin:0;font-size:16.5px;font-weight:600;color:var(--text-strong)"><span data-l="ru">Из&nbsp;исходников</span><span data-l="en">From source</span></h3>
+<span style="font-family:var(--font-mono);font-size:11px;letter-spacing:.08em;text-transform:uppercase;color:var(--text-muted)"><span data-l="ru">стабильные разрешения</span><span data-l="en">stable grants</span></span>
+</div>
+<div class="ds-term">
+<div class="ds-term-body has-copy">
+<div style="white-space:nowrap"><span style="color:var(--syntax-prompt)">$ </span>git clone https://github.com/dsbasko/dndmode</div>
+<div style="white-space:nowrap"><span style="color:var(--syntax-prompt)">$ </span>cd dndmode &amp;&amp; make install</div>
+</div>
+<button type="button" class="ds-term-copy" aria-label="Copy to clipboard" data-copy="git clone https://github.com/dsbasko/dndmode &amp;&amp; cd dndmode &amp;&amp; make install">Copy</button>
+</div>
+<p data-l="ru" style="margin:0;font-size:14.5px;line-height:1.6;color:var(--text-body)">Попадает в <code style="font-size:12px">/usr/local/bin</code>. Идентификатор и&nbsp;cdhash стабильны, поэтому <code style="font-size:12px">git pull &amp;&amp; make install</code> сохраняет разрешения.</p>
+<p data-l="en" style="margin:0;font-size:14.5px;line-height:1.6;color:var(--text-body)">Lands in <code style="font-size:12px">/usr/local/bin</code>. The identifier and cdhash stay stable, so <code style="font-size:12px">git pull &amp;&amp; make install</code> keeps the grants.</p>
+</div>
+</div>
+<div style="display:flex;flex-wrap:wrap;gap:4px 0">
+<div style="position:relative;flex:1 1 320px;min-width:0;padding:0 0 0 26px;display:flex;flex-direction:column;gap:10px">
+<span style="position:absolute;left:-4px;top:9px;width:7px;height:7px;border-radius:50%;background:var(--border-strong)"></span>
+<div style="display:flex;flex-wrap:wrap;align-items:center;gap:10px">
+<h3 style="margin:0;font-size:16.5px;font-weight:600;color:var(--text-strong)">go install</h3>
+<span style="font-family:var(--font-mono);font-size:11px;letter-spacing:.08em;text-transform:uppercase;color:var(--text-muted)"><span data-l="ru">быстро</span><span data-l="en">quick</span></span>
+</div>
+<div class="ds-term">
+<div class="ds-term-body has-copy">
+<div style="white-space:nowrap"><span style="color:var(--syntax-prompt)">$ </span>go install github.com/dsbasko/dndmode@latest</div>
+</div>
+<button type="button" class="ds-term-copy" aria-label="Copy to clipboard" data-copy="go install github.com/dsbasko/dndmode@latest">Copy</button>
+</div>
+<p data-l="ru" style="margin:0;font-size:14.5px;line-height:1.6;color:var(--text-body)">Попадает в <code style="font-size:12px">$(go env GOPATH)/bin</code>. Нужен Go 1.26+. Каждая пересборка <code style="font-size:12px">@latest</code> меняет cdhash: TCC отзывает оба разрешения.</p>
+<p data-l="en" style="margin:0;font-size:14.5px;line-height:1.6;color:var(--text-body)">Lands in <code style="font-size:12px">$(go env GOPATH)/bin</code>. Needs Go 1.26+. Every <code style="font-size:12px">@latest</code> rebuild changes the cdhash, and TCC revokes both grants.</p>
+</div>
+</div>
+</div>
+
+<div style="max-width:840px;margin:var(--section-lead-gap) auto 0;display:flex;flex-direction:column;gap:8px">
+<h4 style="margin:0;font-size:15px;font-weight:600;color:var(--status-warn)"><span data-l="ru">После обновления придётся выдать разрешения заново</span><span data-l="en">After an update you have to grant permissions again</span></h4>
+<p data-l="ru" style="margin:0;font-size:14px;line-height:1.6;color:var(--text-body)">macOS привязывает выданные разрешения к&nbsp;подписи бинарника. dndmode подписан ad-hoc с&nbsp;идентификатором <code style="font-size:12px">com.dsbasko.dndmode</code>, а <code style="font-size:12px">brew upgrade</code> и <code style="font-size:12px">go install …@latest</code> пересобирают его с&nbsp;новым cdhash. Для&nbsp;TCC это новое приложение. Об&nbsp;этом&nbsp;же предупреждают caveats формулы Homebrew и&nbsp;страницы релизов. <code style="font-size:12px">make install</code> из&nbsp;клона держит подпись стабильной.</p>
+<p data-l="en" style="margin:0;font-size:14px;line-height:1.6;color:var(--text-body)">macOS ties each grant to the binary's signature. dndmode is ad-hoc signed as <code style="font-size:12px">com.dsbasko.dndmode</code>, and <code style="font-size:12px">brew upgrade</code> or <code style="font-size:12px">go install …@latest</code> rebuild it with a new cdhash. To TCC that is a new application. The Homebrew formula's caveats and the release pages say the same. <code style="font-size:12px">make install</code> from a clone keeps the signature stable.</p>
+</div>
+
+
+
+<p style="margin:var(--section-lead-gap) auto 0;max-width:80ch;font-size:13px;line-height:1.6;color:var(--text-muted);text-align:center"><span data-l="ru">Требования: macOS 14&nbsp;Sonoma и&nbsp;новее, только Apple Silicon (arm64). Intel не&nbsp;поддерживается. К&nbsp;каждому релизу приложен архив <code style="font-size:11.5px">dndmode_vX.Y.Z_darwin_arm64.tar.gz</code> с&nbsp;контрольной суммой. Скачанный браузером бинарник получает <code style="font-size:11.5px">com.apple.quarantine</code>. Атрибут снимается командой <code style="font-size:11.5px">xattr -d com.apple.quarantine dndmode</code>.</span><span data-l="en">Requirements: macOS 14&nbsp;Sonoma or newer, Apple Silicon (arm64) only. Intel is not supported. Every release ships a <code style="font-size:11.5px">dndmode_vX.Y.Z_darwin_arm64.tar.gz</code> archive with a checksum. A binary downloaded by a browser gets <code style="font-size:11.5px">com.apple.quarantine</code>. The attribute is cleared with <code style="font-size:11.5px">xattr -d com.apple.quarantine dndmode</code>.</span></p>
+</div>
+</section></main></div>
+<script src="app.js" defer></script>
+</body>
+</html>

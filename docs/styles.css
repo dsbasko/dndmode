@@ -1,0 +1,549 @@
+/* dndmode site — the dsbasko design system (tokens + base), concatenated in
+   the order its styles.css imports them, followed by the page components.
+   Instrument Sans comes from Google Fonts; JetBrains Mono is self-hosted. */
+
+/* ══ tokens/fonts.css ══ */
+/* Display + text: Instrument Sans. A tight, slightly condensed grotesque —
+   the register the reference sites are set in. Google Fonts, no build step.
+   Mono is JetBrains Mono, self-hosted below, so no label or code block can
+   ever fall back to a system face. */
+@import url("https://fonts.googleapis.com/css2?family=Instrument+Sans:wght@400;500;600;700&display=swap");
+
+/* Self-hosted woff2, copied verbatim from dsbasko/rmd (internal/page/assets/fonts).
+   JetBrains Mono is the system-wide mono; Roboto Slab is the reader prose face. */
+@font-face{font-family:'JetBrains Mono';font-style:normal;font-weight:400;font-display:swap;src:url("assets/fonts/jetbrains-mono-regular.woff2") format("woff2")}
+@font-face{font-family:'JetBrains Mono';font-style:normal;font-weight:700;font-display:swap;src:url("assets/fonts/jetbrains-mono-bold.woff2") format("woff2")}
+
+/* ══ tokens/color.css ══ */
+/* Near-black canvas, translucent white surfaces, one cyan accent that also
+   carries the ambient glow. Dark is the only site theme — this genre has no
+   light mode, and neither do the reference sites. */
+:root{
+  /* base — canvas */
+  --c-bg:#08090b;
+  --c-bg-2:#0d0f13;
+  --c-void:#050608;
+
+  /* base — translucent surfaces stacked on the canvas */
+  --c-surface:rgba(255,255,255,0.026);
+  --c-surface-2:rgba(255,255,255,0.05);
+  --c-surface-3:rgba(255,255,255,0.08);
+
+  /* base — hairlines */
+  --c-line:rgba(255,255,255,0.08);
+  --c-line-soft:rgba(255,255,255,0.05);
+  --c-line-strong:rgba(255,255,255,0.14);
+  --c-sheen:rgba(255,255,255,0.07);
+
+  /* base — ink */
+  --c-ink:#f5f6f8;
+  --c-ink-2:#9ba1ad;
+  --c-ink-3:#6a707c;
+
+  /* base — signals */
+  --c-accent:#4ccbf0;
+  --c-accent-deep:#1d9fc8;
+  --c-yes:#4ade9b;
+  --c-no:#f4715f;
+  --c-warn:#f0b45c;
+  --c-kw:#b28cf5;
+
+  /* semantic — surfaces */
+  --surface-page:var(--c-bg);
+  --surface-card:var(--c-surface);
+  --surface-card-hover:var(--c-surface-2);
+  --surface-sunken:var(--c-void);
+  --surface-header:rgba(10,11,14,0.72);
+  --surface-inset:var(--c-bg-2);
+
+  /* semantic — borders */
+  --border-default:var(--c-line);
+  --border-soft:var(--c-line-soft);
+  --border-strong:var(--c-line-strong);
+  --border-accent:color-mix(in srgb,var(--c-accent) 45%,transparent);
+
+  /* semantic — text */
+  --text-strong:var(--c-ink);
+  --text-body:var(--c-ink-2);
+  --text-muted:var(--c-ink-3);
+  --text-link:var(--c-accent);
+  --text-link-hover:var(--c-ink);
+  --text-on-accent:#04141b;
+  --text-on-light:#08090b;
+
+  /* semantic — controls (flip with the theme so a filled button always contrasts) */
+  --control-solid-bg:#eceef2;
+  --control-solid-bg-hover:#ffffff;
+  --control-solid-fg:#08090b;
+
+  /* semantic — status */
+  --status-ok:var(--c-yes);
+  --status-bad:var(--c-no);
+  --status-warn:var(--c-warn);
+  --status-info:var(--c-accent);
+  --fill-warn:color-mix(in srgb,var(--c-warn) 10%,transparent);
+  --fill-ok:color-mix(in srgb,var(--c-yes) 10%,transparent);
+  --fill-bad:color-mix(in srgb,var(--c-no) 10%,transparent);
+  --fill-accent:color-mix(in srgb,var(--c-accent) 12%,transparent);
+
+  /* semantic — ambient glow, the one atmospheric effect in the system */
+  --glow-accent:color-mix(in srgb,var(--c-accent) 34%,transparent);
+  --glow-hero:radial-gradient(58% 50% at 50% -4%,var(--glow-accent),transparent 66%);
+  --glow-section:radial-gradient(46% 58% at 50% 0%,color-mix(in srgb,var(--c-accent) 16%,transparent),transparent 68%);
+
+  /* semantic — terminal syntax */
+  --syntax-key:var(--c-accent);
+  --syntax-str:var(--c-yes);
+  --syntax-num:var(--c-warn);
+  --syntax-kw:var(--c-kw);
+  --syntax-comment:var(--c-ink-3);
+  --syntax-prompt:var(--c-ink-3);
+
+  color-scheme:dark;
+}
+
+/* ── Light ────────────────────────────────────────────────────────────────
+   The same construction inverted: a near-white canvas, white surfaces held
+   apart by black hairlines, and a deeper accent that survives on white.
+   The glow drops to a third of its strength — on light it is a tint, not a
+   light source. */
+[data-theme='light']{
+    --c-bg:#fbfbfc;
+    --c-bg-2:#f4f5f7;
+    --c-void:#f2f3f5;
+    --c-surface:rgba(255,255,255,0.78);
+    --c-surface-2:rgba(255,255,255,1);
+    --c-surface-3:rgba(9,10,13,0.05);
+    --c-line:rgba(9,10,13,0.10);
+    --c-line-soft:rgba(9,10,13,0.06);
+    --c-line-strong:rgba(9,10,13,0.18);
+    --c-sheen:rgba(255,255,255,0.9);
+    --c-ink:#0c0e12;
+    --c-ink-2:#4d5561;
+    --c-ink-3:#767e8b;
+    --c-accent:#0b8fb8;
+    --c-accent-deep:#0a7ea3;
+    --c-yes:#16a06a;
+    --c-no:#cf3f2b;
+    --c-warn:#a9740c;
+    --c-kw:#7c4ddb;
+    --surface-header:rgba(251,251,252,0.76);
+    --control-solid-bg:#15181d;
+    --control-solid-bg-hover:#000000;
+    --control-solid-fg:#f7f8fa;
+    --text-on-accent:#ffffff;
+    --text-on-light:#0c0e12;
+    --glow-accent:color-mix(in srgb,var(--c-accent) 13%,transparent);
+    --shadow-sm:0 1px 2px rgba(9,10,13,0.07);
+    --shadow-md:0 8px 30px -8px rgba(9,10,13,0.16);
+    --shadow-lg:0 30px 80px -24px rgba(9,10,13,0.22);
+    color-scheme:light;
+}
+
+/* ── System ───────────────────────────────────────────────────────────────
+   No `data-theme` attribute means "follow the OS". An explicit [data-theme]
+   below outranks this on specificity, so a stated choice always wins. */
+@media (prefers-color-scheme:light){
+  :root{
+    --c-bg:#fbfbfc;
+    --c-bg-2:#f4f5f7;
+    --c-void:#f2f3f5;
+    --c-surface:rgba(255,255,255,0.78);
+    --c-surface-2:rgba(255,255,255,1);
+    --c-surface-3:rgba(9,10,13,0.05);
+    --c-line:rgba(9,10,13,0.10);
+    --c-line-soft:rgba(9,10,13,0.06);
+    --c-line-strong:rgba(9,10,13,0.18);
+    --c-sheen:rgba(255,255,255,0.9);
+    --c-ink:#0c0e12;
+    --c-ink-2:#4d5561;
+    --c-ink-3:#767e8b;
+    --c-accent:#0b8fb8;
+    --c-accent-deep:#0a7ea3;
+    --c-yes:#16a06a;
+    --c-no:#cf3f2b;
+    --c-warn:#a9740c;
+    --c-kw:#7c4ddb;
+    --surface-header:rgba(251,251,252,0.76);
+    --control-solid-bg:#15181d;
+    --control-solid-bg-hover:#000000;
+    --control-solid-fg:#f7f8fa;
+    --text-on-accent:#ffffff;
+    --text-on-light:#0c0e12;
+    --glow-accent:color-mix(in srgb,var(--c-accent) 13%,transparent);
+    --shadow-sm:0 1px 2px rgba(9,10,13,0.07);
+    --shadow-md:0 8px 30px -8px rgba(9,10,13,0.16);
+    --shadow-lg:0 30px 80px -24px rgba(9,10,13,0.22);
+    color-scheme:light;
+  }
+}
+
+/* ── Explicit dark ────────────────────────────────────────────────────────
+   Restated so a page can opt out of a light OS preference. */
+[data-theme='dark']{
+    --c-bg:#08090b;
+    --c-bg-2:#0d0f13;
+    --c-void:#050608;
+    --c-surface:rgba(255,255,255,0.026);
+    --c-surface-2:rgba(255,255,255,0.05);
+    --c-surface-3:rgba(255,255,255,0.08);
+    --c-line:rgba(255,255,255,0.08);
+    --c-line-soft:rgba(255,255,255,0.05);
+    --c-line-strong:rgba(255,255,255,0.14);
+    --c-sheen:rgba(255,255,255,0.07);
+    --c-ink:#f5f6f8;
+    --c-ink-2:#9ba1ad;
+    --c-ink-3:#6a707c;
+    --c-accent:#4ccbf0;
+    --c-accent-deep:#1d9fc8;
+    --c-yes:#4ade9b;
+    --c-no:#f4715f;
+    --c-warn:#f0b45c;
+    --c-kw:#b28cf5;
+    --surface-header:rgba(10,11,14,0.72);
+    --control-solid-bg:#eceef2;
+    --control-solid-bg-hover:#ffffff;
+    --control-solid-fg:#08090b;
+    --text-on-accent:#04141b;
+    --text-on-light:#08090b;
+    --glow-accent:color-mix(in srgb,var(--c-accent) 34%,transparent);
+    --shadow-sm:0 1px 2px rgba(0,0,0,0.45);
+    --shadow-md:0 8px 30px -8px rgba(0,0,0,0.6);
+    --shadow-lg:0 30px 80px -24px rgba(0,0,0,0.85);
+    color-scheme:dark;
+}
+
+/* ══ tokens/typography.css ══ */
+/* Instrument Sans for everything text, JetBrains Mono for anything machine-shaped.
+   Display sizes are large, weight 600, tracking negative. */
+:root{
+  --font-sans:'Instrument Sans',-apple-system,BlinkMacSystemFont,'Segoe UI',system-ui,sans-serif;
+  --font-mono:'JetBrains Mono',ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
+  --font-display:var(--font-sans);
+  /* reader surface only */
+  --font-prose:'Roboto Slab',Georgia,serif;
+  --font-code:'JetBrains Mono',ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
+
+  /* display scale */
+  --size-h1:clamp(40px,6.6vw,82px);
+  --size-h2:clamp(30px,4.2vw,52px);
+  --size-h3:clamp(20px,2.1vw,26px);
+  --size-h4:clamp(16px,1.5vw,18px);
+  --lh-h1:1.03; /* @kind other */
+  --lh-h2:1.07; /* @kind other */
+  --lh-h3:1.25; /* @kind other */
+  --lh-h4:1.35; /* @kind other */
+
+  /* text scale */
+  --size-lead:clamp(16px,1.7vw,20px);
+  --size-body:16px;
+  --size-body-sm:14.5px;
+  --size-small:13.5px;
+  --size-nav:14px;
+  --lh-lead:1.55; /* @kind other */
+  --lh-body:1.6; /* @kind other */
+  --lh-small:1.55; /* @kind other */
+
+  /* mono scale */
+  --size-mono:14px;
+  --size-mono-sm:13px;
+  --size-mono-xs:11.5px;
+  --size-mono-2xs:11px;
+  --size-eyebrow:12px;
+  --size-term:13.5px;
+  --lh-term:1.85; /* @kind other */
+
+  /* weights */
+  --weight-regular:400; /* @kind other */
+  --weight-medium:500; /* @kind other */
+  --weight-semibold:600; /* @kind other */
+  --weight-bold:700; /* @kind other */
+
+  /* tracking — display is tight, mono labels are wide */
+  --track-display:-0.035em; /* @kind other */
+  --track-h2:-0.03em; /* @kind other */
+  --track-h3:-0.02em; /* @kind other */
+  --track-lead:-0.01em; /* @kind other */
+  --track-eyebrow:0.02em; /* @kind other */
+  --track-th:0.08em; /* @kind other */
+  --track-wordmark:-0.03em; /* @kind other */
+
+  /* measure */
+  --measure-prose:68ch; /* @kind other */
+  --measure-lead:56ch; /* @kind other */
+  --measure-center:34ch; /* @kind other */
+}
+
+/* ══ tokens/space.css ══ */
+/* 4px step for component internals; fluid clamps for page rhythm.
+   Sections are tall — this genre gives every idea a full screen. */
+:root{
+  --space-1:4px;
+  --space-2:8px;
+  --space-3:12px;
+  --space-4:16px;
+  --space-5:20px;
+  --space-6:24px;
+  --space-8:32px;
+  --space-10:40px;
+  --space-12:48px;
+  --space-16:64px;
+  --space-20:80px;
+  --space-24:96px;
+
+  /* page rhythm */
+  --section-y:clamp(72px,10vw,140px); /* @kind spacing */
+  --section-lead-gap:clamp(36px,5vw,64px); /* @kind spacing */
+  --intro-gap:clamp(16px,2vw,24px); /* @kind spacing */
+  --hero-y:clamp(56px,9vw,120px); /* @kind spacing */
+  --hero-gap:clamp(28px,3.4vw,40px); /* @kind spacing */
+  --split-gap:clamp(32px,5vw,72px); /* @kind spacing */
+  --grid-gap:16px; /* @kind spacing */
+
+  /* container */
+  --wrap-max:1200px; /* @kind spacing */
+  --wrap-narrow:960px; /* @kind spacing */
+  --wrap-pad:clamp(20px,4vw,32px); /* @kind spacing */
+  --header-h:56px; /* @kind spacing */
+  --header-inset:14px; /* @kind spacing */
+  --scroll-pad:96px; /* @kind spacing */
+
+  /* component padding */
+  --pad-card:24px; /* @kind spacing */
+  --pad-card-lg:28px; /* @kind spacing */
+  --pad-callout:22px; /* @kind spacing */
+  --pad-term:18px; /* @kind spacing */
+  --pad-cell:14px 20px 14px 0; /* @kind spacing */
+}
+
+/* ══ tokens/breakpoints.css ══ */
+/* Five device classes, four breakpoints between them. Media queries cannot read
+   custom properties, so these are documentation — the real values are
+   hard-coded in base/layout.css and must match.
+
+   Desktop is the design. Below it each breakpoint REMOVES a column; above it
+   ultrawide adds measured width, never a new column count.
+
+   name        range          device            what the layout does
+   ─────────── ────────────── ───────────────── ──────────────────────────────
+   mobile      < 560          phone             one column, nav in a sheet
+   tablet-sm   560 – 767      large phone       still one column, denser
+   tablet      768 – 999      tablet portrait   2-up grids, splits stacked
+   desktop     1000 – 1599    laptop, monitor   full layout, 1200px wrap
+   ultrawide   ≥ 1600         21:9 and 27"+     1440px wrap, wider gaps
+*/
+:root{
+  --bp-sm:560px; /* @kind spacing */
+  --bp-md:768px; /* @kind spacing */
+  --bp-lg:1000px; /* @kind spacing */
+  --bp-uw:1600px; /* @kind spacing */
+
+  /* Wrap ceilings per class. The page never uses more than one of these at a
+     time — .ds-wrap reads --wrap-max, which layout.css re-points at 1600px. */
+  --wrap-max-uw:1440px; /* @kind spacing */
+  --wrap-narrow-uw:1080px; /* @kind spacing */
+
+  /* touch targets — every interactive element on a small screen */
+  --tap-min:44px; /* @kind spacing */
+}
+
+/* ══ tokens/border.css ══ */
+/* Rounded and layered. A card is a translucent fill, a hairline, an inset
+   sheen along the top edge, and a soft drop shadow — never a flat box. */
+:root{
+  --radius-xs:6px;
+  --radius-sm:10px;
+  --radius-md:14px;
+  --radius-lg:18px;
+  --radius-xl:24px;
+  --radius-2xl:32px;
+  --radius-pill:999px;
+
+  --hairline:1px; /* @kind spacing */
+  --border-hairline:1px solid var(--border-default); /* @kind other */
+  --border-hairline-soft:1px solid var(--border-soft); /* @kind other */
+  --border-hairline-strong:1px solid var(--border-strong); /* @kind other */
+
+  /* the sheen that makes a translucent card read as glass */
+  --sheen-top:inset 0 1px 0 var(--c-sheen); /* @kind other */
+
+  --shadow-none:none;
+  --shadow-sm:0 1px 2px rgba(0,0,0,0.45);
+  --shadow-md:0 8px 30px -8px rgba(0,0,0,0.6);
+  --shadow-lg:0 30px 80px -24px rgba(0,0,0,0.85);
+  --shadow-card:var(--sheen-top),0 1px 2px rgba(0,0,0,0.4);
+  --shadow-float:var(--sheen-top),0 40px 100px -30px rgba(0,0,0,0.9);
+  --shadow-accent:0 0 0 1px var(--border-accent),0 12px 40px -12px var(--glow-accent);
+
+  --focus-ring:2px solid var(--c-accent); /* @kind other */
+  --focus-offset:3px; /* @kind spacing */
+
+  --blur-header:saturate(1.6) blur(18px); /* @kind other */
+  --blur-glass:saturate(1.4) blur(24px); /* @kind other */
+}
+
+/* ══ tokens/motion.css ══ */
+/* Short, eased, and physical. Cards lift 2px, borders brighten, glows breathe.
+   Long-running motion exists only in the marquee and the product mocks. */
+:root{
+  --dur-instant:0.12s; /* @kind other */
+  --dur-fast:0.18s; /* @kind other */
+  --dur-base:0.24s; /* @kind other */
+  --dur-slow:0.4s; /* @kind other */
+  --ease-standard:cubic-bezier(0.2,0.8,0.2,1); /* @kind other */
+  --ease-out:cubic-bezier(0.16,1,0.3,1); /* @kind other */
+  --ease-drawer:cubic-bezier(0.3,0.9,0.3,1); /* @kind other */
+
+  --lift-card:-2px; /* @kind spacing */
+  --beat-caret:1.05s; /* @kind other */
+  --beat-pulse:2s; /* @kind other */
+  --beat-marquee:48s; /* @kind other */
+}
+@media (prefers-reduced-motion:reduce){
+  :root{--dur-instant:0.001ms; /* @kind other */--dur-fast:0.001ms; /* @kind other */--dur-base:0.001ms; /* @kind other */--dur-slow:0.001ms; /* @kind other */--lift-card:0px /* @kind spacing */}
+}
+
+/* ══ base/elements.css ══ */
+*{box-sizing:border-box}
+html{scroll-padding-top:var(--scroll-pad);-webkit-text-size-adjust:100%;scroll-behavior:smooth}
+body{margin:0;background:var(--surface-page);color:var(--text-body);font-family:var(--font-sans);font-size:var(--size-body);line-height:var(--lh-body);-webkit-font-smoothing:antialiased;text-wrap:pretty;transition:background-color var(--dur-slow) var(--ease-standard),color var(--dur-slow) var(--ease-standard)}
+img,svg{max-width:100%}
+p{margin:0}
+h1,h2,h3,h4{font-family:var(--font-display);color:var(--text-strong);margin:0;font-weight:var(--weight-semibold)}
+h1{font-size:var(--size-h1);line-height:var(--lh-h1);letter-spacing:var(--track-display)}
+h2{font-size:var(--size-h2);line-height:var(--lh-h2);letter-spacing:var(--track-h2)}
+h3{font-size:var(--size-h3);line-height:var(--lh-h3);letter-spacing:var(--track-h3)}
+h4{font-size:var(--size-h4);line-height:var(--lh-h4);letter-spacing:var(--track-lead)}
+a{color:var(--text-link);text-decoration:none}
+a:hover{color:var(--text-link-hover)}
+:focus-visible{outline:var(--focus-ring);outline-offset:var(--focus-offset)}
+code,kbd,samp{font-family:var(--font-mono);font-size:.9em;color:var(--text-strong);background:var(--c-surface-2);border:1px solid var(--border-soft);border-radius:var(--radius-xs);padding:2px 6px}
+pre code{border:0;background:none;padding:0}
+::selection{background:color-mix(in srgb,var(--c-accent) 32%,transparent)}
+::-webkit-scrollbar{width:10px;height:10px}
+::-webkit-scrollbar-thumb{background:var(--c-surface-3);border-radius:var(--radius-pill)}
+.ds-sr{position:absolute;width:1px;height:1px;padding:0;margin:-1px;overflow:hidden;clip:rect(0 0 0 0);white-space:nowrap;border:0}
+@media (prefers-reduced-motion:reduce){*,*::before,*::after{animation-duration:0.001ms !important;animation-iteration-count:1 !important;transition-duration:0.001ms !important}}
+
+/* ══ base/layout.css ══ */
+/* Layout utilities. Components carry their own inline styles, but a grid is
+   page-level composition, so every breakpoint in the system lives here.
+
+   Compose with these classes — never write grid-template-columns by hand, or
+   the page will not respond the way the rest of the system does. */
+
+/* ── Containers ─────────────────────────────────────────────────────────── */
+.ds-wrap{max-width:var(--wrap-max);margin:0 auto;padding:0 var(--wrap-pad)}
+.ds-wrap-narrow{max-width:var(--wrap-narrow);margin:0 auto;padding:0 var(--wrap-pad)}
+/* Full-bleed band that still aligns its contents to the wrap. */
+.ds-bleed{width:100%}
+.ds-bleed>*{max-width:var(--wrap-max);margin:0 auto;padding:0 var(--wrap-pad)}
+
+/* ── Grids ──────────────────────────────────────────────────────────────── */
+.ds-grid-2,.ds-grid-3,.ds-grid-4{display:grid;gap:var(--grid-gap)}
+.ds-grid-2{grid-template-columns:repeat(2,minmax(0,1fr))}
+.ds-grid-3{grid-template-columns:repeat(3,minmax(0,1fr))}
+.ds-grid-4{grid-template-columns:repeat(4,minmax(0,1fr))}
+
+/* Splits: prose beside a mock. Text always comes first when it stacks. */
+.ds-split{display:grid;gap:var(--split-gap);align-items:center;grid-template-columns:minmax(0,0.9fr) minmax(0,1.1fr)}
+.ds-split-even{grid-template-columns:minmax(0,1fr) minmax(0,1fr)}
+.ds-split-start{align-items:start}
+
+/* A table never squashes — it scrolls inside its container. */
+.ds-scroll-x{overflow-x:auto;-webkit-overflow-scrolling:touch}
+
+/* ── Visibility ─────────────────────────────────────────────────────────── */
+.ds-hide-sm{display:initial}
+.ds-only-sm{display:none}
+.ds-only-uw{display:none}
+
+/* ── Ultrawide · ≥1600 ──────────────────────────────────────────────────
+   A 21:9 monitor gets a wider wrap and more air, not more columns. A 4-up
+   grid stays 4-up: five cards in a row is a table, not a layout. The reading
+   measures are already capped in ch, so prose does not stretch. */
+@media (min-width:1600px){
+  :root{
+    --wrap-max:var(--wrap-max-uw);
+    --wrap-narrow:var(--wrap-narrow-uw);
+    --wrap-pad:48px;
+    --grid-gap:20px;
+    --split-gap:80px;
+    --section-y:160px;
+    --pad-card:28px;
+  }
+  .ds-only-uw{display:initial}
+}
+
+/* ── Tablet · <1000 ─────────────────────────────────────────────────────
+   Portrait tablet. Three and four columns fall to two; splits stack, because
+   a 50/50 split at 900px leaves neither half enough room. */
+@media (max-width:999px){
+  .ds-grid-4{grid-template-columns:repeat(2,minmax(0,1fr))}
+  .ds-grid-3{grid-template-columns:repeat(2,minmax(0,1fr))}
+  .ds-split{grid-template-columns:minmax(0,1fr)}
+}
+
+/* ── Large phone · <768 ─────────────────────────────────────────────────
+   Everything is one column from here down. */
+@media (max-width:767px){
+  .ds-grid-2,.ds-grid-3,.ds-grid-4{grid-template-columns:minmax(0,1fr)}
+}
+
+/* ── Mobile · <560 ──────────────────────────────────────────────────────
+   The clamps already shrink the page; these tighten what a clamp cannot say. */
+@media (max-width:559px){
+  :root{
+    --grid-gap:12px;
+    --pad-card:20px;
+    --pad-term:16px;
+    --header-inset:8px;
+  }
+  .ds-hide-sm{display:none !important}
+  .ds-only-sm{display:initial}
+  h1{letter-spacing:-0.028em}
+  h2{letter-spacing:-0.024em}
+  /* Never let a long mono string widen the page. */
+  code,kbd,samp{overflow-wrap:anywhere}
+}
+
+/* ── Component-level collapse ───────────────────────────────────────────
+   The only places a component reaches for a media query. Everything else is
+   fluid or a .ds-grid-* class. */
+@media (min-width:1600px){
+  .ds-footer-grid{gap:48px}
+}
+@media (max-width:999px){
+  .ds-footer-grid{grid-template-columns:minmax(200px,1.2fr) repeat(2,minmax(0,1fr)) !important}
+}
+@media (max-width:639px){
+  .ds-footer-grid{grid-template-columns:minmax(0,1fr) !important;gap:28px}
+}
+@media (max-width:559px){
+  .ds-frame{border-radius:var(--radius-md) !important}
+}
+
+/* ══ site components ══
+   Static ports of the design-system React components this page uses
+   (LangSwitch, ThemeToggle, Terminal) and the nav link's hover state. */
+.nav-github:hover{border-color:var(--border-strong) !important;background:var(--surface-card-hover) !important;color:var(--text-strong) !important}
+.ds-seg-group{display:inline-flex;align-items:center;gap:2px;padding:3px;border-radius:var(--radius-pill);border:1px solid var(--border-default);background:var(--surface-card);box-shadow:var(--sheen-top)}
+.ds-seg{display:inline-flex;align-items:center;justify-content:center;height:28px;border:0;border-radius:var(--radius-pill);cursor:pointer;font:inherit;font-weight:var(--weight-medium);color:var(--text-muted);background:transparent;box-shadow:none;transition:background-color var(--dur-fast) var(--ease-standard),color var(--dur-fast) var(--ease-standard)}
+.ds-seg:hover{color:var(--text-body)}
+.ds-seg.is-active,.ds-seg.is-active:hover{color:var(--text-strong);background:var(--c-surface-2);box-shadow:var(--sheen-top)}
+.ds-seg-lang{min-width:34px;padding:0 9px;font-family:var(--font-mono);font-size:12px;letter-spacing:0.04em}
+.ds-seg-theme{gap:7px;width:30px;padding:0;font-size:13px}
+.ds-seg-theme svg{display:block;flex:none}
+.ds-term{position:relative;background:var(--surface-sunken);border:1px solid var(--border-default);border-radius:var(--radius-xl);box-shadow:var(--shadow-card);overflow:hidden}
+.ds-term-bar{display:flex;align-items:center;gap:7px;height:38px;padding:0 14px;border-bottom:1px solid var(--border-soft);background:var(--c-surface)}
+.ds-term-dot{width:10px;height:10px;border-radius:50%;opacity:0.85}
+.ds-term-title{margin-left:10px;font-family:var(--font-mono);font-size:11.5px;color:var(--text-muted)}
+/* The React Terminal sets `padding` then `paddingRight: undefined`, and React drops
+   the right side of the shorthand — so a block without a Copy button renders with
+   no right padding. Mirrored here so long lines wrap at the same point. */
+.ds-term-body{padding:var(--pad-term);padding-right:0;font-family:var(--font-mono);font-size:var(--size-term);line-height:var(--lh-term);color:var(--text-strong);overflow-x:auto}
+.ds-term-body.has-copy{padding-right:84px}
+.ds-term-copy{position:absolute;top:12px;right:12px;height:28px;padding:0 13px;font-family:var(--font-sans);font-size:12.5px;font-weight:var(--weight-medium);cursor:pointer;border-radius:var(--radius-pill);color:var(--text-body);background:var(--surface-card);border:1px solid var(--border-default);box-shadow:var(--sheen-top);transition:all var(--dur-fast) var(--ease-standard)}
+.ds-term-copy.is-chrome{top:48px}
+.ds-term-copy:hover{color:var(--text-strong);background:var(--surface-card-hover);border-color:var(--border-strong)}
+.ds-term-copy.is-done,.ds-term-copy.is-done:hover{color:var(--status-ok);border-color:var(--status-ok)}
