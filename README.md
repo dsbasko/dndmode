@@ -2,6 +2,7 @@
 
 > Lock your unattended Apple Silicon MacBook without killing the work it is doing.
 
+[![Site](https://img.shields.io/badge/site-dsbasko.github.io%2Fdndmode-black)](https://dsbasko.github.io/dndmode/)
 [![Platform](https://img.shields.io/badge/platform-macOS%2014%2B%20%C2%B7%20arm64-black)](#requirements)
 [![Go](https://img.shields.io/badge/Go-1.26-00ADD8)](go.mod)
 [![Network](https://img.shields.io/badge/network-zero%20calls-success)](#no-network)
@@ -34,6 +35,10 @@ notes are under [Install](#install)):
 brew install dsbasko/tap/dndmode   # install
 brew upgrade dndmode               # update to the latest release
 ```
+
+The [project site](https://dsbasko.github.io/dndmode/) covers the same ground in a
+browser, in English and Russian: what the shield looks like, how watch mode works,
+and all six overlay styles.
 
 ---
 
