@@ -23,7 +23,8 @@
 @interface TerminalView : NSView
 // initWithFrame:language: selects the source language rendered (from the
 // --style terminal:<lang> suffix): "go" (default / NULL), "python", "typescript",
-// "rust" or "ys" (YoptaScript, the one Cyrillic corpus). Each picks its own
+// "rust", "ys" (YoptaScript, the one Cyrillic corpus), or one of the SQL
+// dialects "sql", "psql", "mysql", "oracle". Each picks its own
 // compiled-in corpus + syntax highlighting. Plain
 // initWithFrame: defaults to Go.
 - (instancetype)initWithFrame:(NSRect)frameRect language:(const char *)language;

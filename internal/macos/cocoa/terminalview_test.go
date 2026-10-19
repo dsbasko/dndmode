@@ -366,3 +366,145 @@ func TestTerminalView_RevealBytes_NeverSplitsAGlyph(t *testing.T) {
 		})
 	}
 }
+
+// TestTerminalView_Tokenize_SQL pins the syntax the four SQL dialects share and
+// the one place they differ. `--` opens a line comment in every dialect, while a
+// single `-` stays an operator; single quotes are strings; keywords come from
+// the shared ANSI table plus the dialect's own, so a vendor word lights up only
+// in its own dialect. `#` is a comment in MySQL alone: in Postgres it is the XOR
+// and JSON-path operator, and Python's '#' rule must not leak into either.
+func TestTerminalView_Tokenize_SQL(t *testing.T) {
+	tests := []struct {
+		name string
+		lang string
+		line string
+		want []termSegment
+	}{
+		{
+			name: "dash-dash comment swallows the rest",
+			lang: "sql",
+			line: "x -- note",
+			want: []termSegment{
+				{start: 0, length: 1, cls: termClassIdent},   // x
+				{start: 1, length: 1, cls: termClassPunct},   // space (stops before --)
+				{start: 2, length: 7, cls: termClassComment}, // -- note
+			},
+		},
+		{
+			name: "single dash is punctuation not a comment",
+			lang: "sql",
+			line: "n - 1",
+			want: []termSegment{
+				{start: 0, length: 1, cls: termClassIdent},  // n
+				{start: 1, length: 3, cls: termClassPunct},  // " - "
+				{start: 4, length: 1, cls: termClassNumber}, // 1
+			},
+		},
+		{
+			name: "single-quoted literal is a string",
+			lang: "sql",
+			line: "WHERE s = 'open'",
+			want: []termSegment{
+				{start: 0, length: 5, cls: termClassKeyword}, // WHERE
+				{start: 5, length: 1, cls: termClassPunct},
+				{start: 6, length: 1, cls: termClassIdent}, // s
+				{start: 7, length: 3, cls: termClassPunct}, // " = "
+				{start: 10, length: 6, cls: termClassString},
+			},
+		},
+		{
+			name: "lowercase keyword stays ident",
+			lang: "sql",
+			line: "select",
+			want: []termSegment{{start: 0, length: 6, cls: termClassIdent}},
+		},
+		{
+			name: "vendor word is not ANSI",
+			lang: "sql",
+			line: "JSONB",
+			want: []termSegment{{start: 0, length: 5, cls: termClassIdent}},
+		},
+		{
+			name: "postgres adds its words on top of ANSI",
+			lang: "psql",
+			line: "SELECT ::JSONB",
+			want: []termSegment{
+				{start: 0, length: 6, cls: termClassKeyword}, // SELECT (shared table)
+				{start: 6, length: 3, cls: termClassPunct},   // " ::"
+				{start: 9, length: 5, cls: termClassKeyword}, // JSONB (dialect table)
+			},
+		},
+		{
+			name: "hash is an operator in postgres",
+			lang: "psql",
+			line: "d #>> p",
+			want: []termSegment{
+				{start: 0, length: 1, cls: termClassIdent},
+				{start: 1, length: 5, cls: termClassPunct}, // " #>> "
+				{start: 6, length: 1, cls: termClassIdent},
+			},
+		},
+		{
+			name: "hash is a comment in mysql",
+			lang: "mysql",
+			line: "x # note",
+			want: []termSegment{
+				{start: 0, length: 1, cls: termClassIdent},
+				{start: 1, length: 1, cls: termClassPunct},
+				{start: 2, length: 6, cls: termClassComment},
+			},
+		},
+		{
+			name: "mysql keeps dash-dash too",
+			lang: "mysql",
+			line: "-- note",
+			want: []termSegment{{start: 0, length: 7, cls: termClassComment}},
+		},
+		{
+			name: "mysql delimiter slashes are not a comment",
+			lang: "mysql",
+			line: "END //",
+			want: []termSegment{
+				{start: 0, length: 3, cls: termClassKeyword}, // END
+				{start: 3, length: 3, cls: termClassPunct},   // " //"
+			},
+		},
+		{
+			name: "oracle word lights up in oracle",
+			lang: "oracle",
+			line: "NVL(x, 0)",
+			want: []termSegment{
+				{start: 0, length: 3, cls: termClassKeyword}, // NVL
+				{start: 3, length: 1, cls: termClassPunct},
+				{start: 4, length: 1, cls: termClassIdent},
+				{start: 5, length: 2, cls: termClassPunct},
+				{start: 7, length: 1, cls: termClassNumber},
+				{start: 8, length: 1, cls: termClassPunct},
+			},
+		},
+		{
+			name: "dash-dash is a decrement outside SQL",
+			lang: "typescript",
+			line: "i-- // x",
+			want: []termSegment{
+				{start: 0, length: 1, cls: termClassIdent},
+				{start: 1, length: 3, cls: termClassPunct}, // "-- "
+				{start: 4, length: 4, cls: termClassComment},
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cols := tokenizeLineColsForTest(tt.line, tt.lang)
+			got := make([]termSegment, len(cols))
+			for i, s := range cols {
+				got[i] = termSegment{start: s.start, length: s.length, cls: s.cls}
+			}
+			if !equalSegments(got, tt.want) {
+				t.Fatalf("tokenize(%q, %s):\n got  %s\n want %s",
+					tt.line, tt.lang, formatSegments(got), formatSegments(tt.want))
+			}
+		})
+	}
+}

@@ -382,13 +382,16 @@ func TestValidateTerminalLanguage(t *testing.T) {
 		"", config.TerminalLangGo, config.TerminalLangPython,
 		config.TerminalLangTypeScript, config.TerminalLangRust,
 		config.TerminalLangYopta,
+		config.TerminalLangSQL, config.TerminalLangPostgres,
+		config.TerminalLangMySQL, config.TerminalLangOracle,
 		"yc", // deprecated spelling of YoptaScript; see the doc comment
 	} {
 		if err := config.ValidateTerminalLanguage(s); err != nil {
 			t.Errorf("ValidateTerminalLanguage(%q) = %v, want nil", s, err)
 		}
 	}
-	for _, s := range []string{"ruby", "golang", "py", "ts", "Go", "PYTHON", "c++", "yopta", "YC", "YS"} {
+	for _, s := range []string{"ruby", "golang", "py", "ts", "Go", "PYTHON", "c++", "yopta", "YC", "YS",
+		"SQL", "postgres", "postgresql", "pg", "my", "ora", "plsql", "mssql"} {
 		if err := config.ValidateTerminalLanguage(s); err == nil {
 			t.Errorf("ValidateTerminalLanguage(%q) = nil, want error", s)
 		}
@@ -423,6 +426,8 @@ func TestNormalizeTerminalLanguage(t *testing.T) {
 	for _, s := range []string{
 		config.TerminalLangPython, config.TerminalLangRust, config.TerminalLangTypeScript,
 		config.TerminalLangYopta,
+		config.TerminalLangSQL, config.TerminalLangPostgres,
+		config.TerminalLangMySQL, config.TerminalLangOracle,
 	} {
 		if got := config.NormalizeTerminalLanguage(s); got != s {
 			t.Errorf("NormalizeTerminalLanguage(%q) = %q, want unchanged", s, got)
@@ -446,13 +451,18 @@ func TestNormalizeTerminalLanguage_NeverEmitsALegacySpelling(t *testing.T) {
 		config.TerminalLangGo, config.TerminalLangPython,
 		config.TerminalLangTypeScript, config.TerminalLangRust,
 		config.TerminalLangYopta,
+		config.TerminalLangSQL, config.TerminalLangPostgres,
+		config.TerminalLangMySQL, config.TerminalLangOracle,
 	}
 	// Every spelling the validator accepts, including the empty default and the
 	// deprecated ones — the exhaustive list, not a sample.
 	for _, s := range []string{
 		"", config.TerminalLangGo, config.TerminalLangPython,
 		config.TerminalLangTypeScript, config.TerminalLangRust,
-		config.TerminalLangYopta, "yc",
+		config.TerminalLangYopta,
+		config.TerminalLangSQL, config.TerminalLangPostgres,
+		config.TerminalLangMySQL, config.TerminalLangOracle,
+		"yc",
 	} {
 		if err := config.ValidateTerminalLanguage(s); err != nil {
 			t.Fatalf("ValidateTerminalLanguage(%q) = %v; the list above is stale", s, err)

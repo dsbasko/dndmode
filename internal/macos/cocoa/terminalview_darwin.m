@@ -167,14 +167,99 @@ static const char *const kYsKeywords[] = {
     "Помойка", "Кент", "Гопец", "СловоПацана",
 };
 
+// Line-comment markers a language accepts, as a bitmask: Go/TS/Rust '//',
+// Python '#', SQL '--'. MySQL is the one language with two (`--` and `#`), which
+// is why this is a mask and not a choice of one.
+enum {
+    TermCommentSlash = 1 << 0, // "//"
+    TermCommentHash  = 1 << 1, // "#"
+    TermCommentDash  = 1 << 2, // "--"
+};
+
+// The four SQL dialects share one ANSI keyword table (kSqlKeywords, which is all
+// that `terminal:sql` gets) and each adds its own vendor words on top, via
+// TermSyntax.extraKeywords. SQL is case-insensitive but the matcher is byte-exact,
+// so every corpus writes keywords in UPPERCASE and only that spelling is listed;
+// a lowercase `select` in a corpus would simply stay an ident. The one exception
+// is `plpgsql`, which Postgres code conventionally writes in lowercase.
+static const char *const kSqlKeywords[] = {
+    "SELECT", "FROM", "WHERE", "AND", "OR", "NOT", "IN", "IS", "NULL", "AS",
+    "ON", "JOIN", "INNER", "LEFT", "RIGHT", "FULL", "OUTER", "CROSS",
+    "NATURAL", "USING", "GROUP", "BY", "ORDER", "HAVING", "ASC", "DESC",
+    "DISTINCT", "ALL", "ANY", "SOME", "EXISTS", "BETWEEN", "LIKE", "CASE",
+    "WHEN", "THEN", "ELSE", "END", "UNION", "INTERSECT", "EXCEPT", "WITH",
+    "RECURSIVE", "INSERT", "INTO", "VALUES", "UPDATE", "SET", "DELETE",
+    "MERGE", "MATCHED", "CREATE", "ALTER", "DROP", "TABLE", "VIEW", "INDEX",
+    "UNIQUE", "PRIMARY", "KEY", "FOREIGN", "REFERENCES", "CONSTRAINT",
+    "CHECK", "DEFAULT", "ADD", "COLUMN", "CASCADE", "RESTRICT", "REPLACE",
+    "TRIGGER", "BEFORE", "AFTER", "INSTEAD", "EACH", "ROW", "ROWS", "RANGE",
+    "PRECEDING", "FOLLOWING", "UNBOUNDED", "CURRENT", "OVER", "PARTITION",
+    "WINDOW", "FETCH", "FIRST", "NEXT", "ONLY", "OFFSET", "FILTER",
+    "LATERAL", "BEGIN", "COMMIT", "ROLLBACK", "SAVEPOINT", "TRANSACTION",
+    "START", "WORK", "GRANT", "REVOKE", "TO", "TRUE", "FALSE", "UNKNOWN",
+    "GENERATED", "ALWAYS", "IDENTITY", "FOR", "OF", "CAST", "EXTRACT",
+    "INTERVAL", "CURRENT_DATE", "CURRENT_TIME", "CURRENT_TIMESTAMP",
+    "COALESCE", "NULLIF", "COUNT", "SUM", "AVG", "MIN", "MAX", "ROW_NUMBER",
+    "RANK", "DENSE_RANK", "PERCENT_RANK", "CUME_DIST", "NTILE", "LAG",
+    "LEAD", "FIRST_VALUE", "LAST_VALUE", "UPPER", "LOWER", "TRIM",
+    "SUBSTRING", "POSITION", "CHAR_LENGTH", "ROUND", "ABS", "FLOOR",
+    "CEILING", "MOD", "NULLS", "INTEGER", "INT", "SMALLINT", "BIGINT",
+    "DECIMAL", "NUMERIC", "REAL", "FLOAT", "DOUBLE", "PRECISION", "CHAR",
+    "CHARACTER", "VARCHAR", "VARYING", "TEXT", "BOOLEAN", "DATE", "TIME",
+    "TIMESTAMP", "ZONE", "YEAR", "MONTH", "DAY", "HOUR", "MINUTE", "SECOND",
+    "FUNCTION", "PROCEDURE", "RETURNS", "RETURN", "DECLARE", "EXECUTE",
+    "CALL", "IF", "LOOP", "WHILE", "TEMPORARY",
+};
+static const char *const kPgKeywords[] = {
+    "RETURNING", "CONFLICT", "DO", "NOTHING", "EXCLUDED", "ILIKE", "LIMIT",
+    "SERIAL", "BIGSERIAL", "TIMESTAMPTZ", "JSONB", "JSON", "UUID", "BYTEA",
+    "INET", "TSVECTOR", "ARRAY", "MATERIALIZED", "REFRESH", "CONCURRENTLY",
+    "LANGUAGE", "plpgsql", "VOLATILE", "STABLE", "IMMUTABLE", "STRICT",
+    "RAISE", "EXCEPTION", "NOTICE", "PERFORM", "NEW", "OLD", "FOUND",
+    "ELSIF", "VACUUM", "ANALYZE", "EXPLAIN", "BUFFERS", "TYPE", "ENUM",
+    "DOMAIN", "EXCLUDE", "GIST", "GIN", "INCLUDE", "SETOF", "RECORD",
+    "TABLESAMPLE",
+};
+static const char *const kMyKeywords[] = {
+    "AUTO_INCREMENT", "UNSIGNED", "TINYINT", "MEDIUMINT", "DATETIME",
+    "MEDIUMTEXT", "LONGTEXT", "ENUM", "JSON", "ENGINE", "CHARSET",
+    "COLLATE", "DUPLICATE", "IGNORE", "LIMIT", "IFNULL", "GROUP_CONCAT",
+    "SEPARATOR", "CONCAT", "DATE_FORMAT", "DATE_SUB", "DATE_ADD", "NOW",
+    "TIMESTAMPDIFF", "STR_TO_DATE", "UNIX_TIMESTAMP", "JSON_EXTRACT",
+    "JSON_OBJECT", "JSON_ARRAYAGG", "JSON_TABLE", "STORED", "VIRTUAL",
+    "FULLTEXT", "MATCH", "AGAINST", "MODE", "STRAIGHT_JOIN", "FORCE",
+    "ALGORITHM", "INPLACE", "SHOW", "EXPLAIN", "FORMAT", "DELIMITER",
+    "HANDLER", "CONTINUE", "EXIT", "CURSOR", "OPEN", "CLOSE", "DO", "LEAVE",
+    "ITERATE", "ELSEIF", "SIGNAL", "SQLSTATE", "MESSAGE_TEXT", "EVENT",
+    "SCHEDULE", "EVERY",
+};
+static const char *const kOraKeywords[] = {
+    "VARCHAR2", "NVARCHAR2", "NUMBER", "RAW", "CLOB", "BLOB", "SYSDATE",
+    "SYSTIMESTAMP", "DUAL", "ROWNUM", "ROWID", "LEVEL", "PRIOR", "CONNECT",
+    "NOCYCLE", "SIBLINGS", "NVL", "NVL2", "DECODE", "TO_CHAR", "TO_DATE",
+    "TO_NUMBER", "TRUNC", "ADD_MONTHS", "MONTHS_BETWEEN", "LAST_DAY",
+    "LISTAGG", "WITHIN", "KEEP", "PIVOT", "UNPIVOT", "MINUS", "SEQUENCE",
+    "NEXTVAL", "CURRVAL", "INCREMENT", "CACHE", "NOCACHE", "EXCEPTION",
+    "OTHERS", "NO_DATA_FOUND", "TOO_MANY_ROWS", "DUP_VAL_ON_INDEX", "RAISE",
+    "RAISE_APPLICATION_ERROR", "PRAGMA", "AUTONOMOUS_TRANSACTION", "BULK",
+    "COLLECT", "FORALL", "EXIT", "ELSIF", "CURSOR", "TYPE", "RECORD",
+    "ROWTYPE", "VARRAY", "PLS_INTEGER", "NEW", "OLD", "OUT", "NOCOPY",
+    "IMMEDIATE", "DBMS_OUTPUT", "PUT_LINE", "SQL", "ROWCOUNT",
+    "REGEXP_SUBSTR", "REGEXP_LIKE", "REGEXP_REPLACE", "GLOBAL", "PRESERVE",
+    "ONLINE", "COMMENT",
+};
+
 // TermSyntax parameterizes the tokenizer per language: which keyword set to
-// promote idents against, whether '#' (Python) or '//' (Go/TS/Rust) starts a line
-// comment, and whether single-quoted runs are strings (Python/TS) or just
+// promote idents against (plus an optional second one, for the SQL dialects
+// layered over kSqlKeywords), which markers start a line comment (TermComment*),
+// and whether single-quoted runs are strings (Python/TS/SQL) or just
 // punctuation (Go/Rust, where ' is a rune/char/lifetime sigil).
 typedef struct {
     const char *const *keywords;
     NSInteger          keywordCount;
-    BOOL               hashComment;       // YES: '#' line comment; NO: '//'
+    const char *const *extraKeywords;     // NULL unless a second table applies
+    NSInteger          extraKeywordCount;
+    unsigned           lineComments;      // TermComment* mask
     BOOL               singleQuoteString; // YES: '...' is a string literal
 } TermSyntax;
 
@@ -251,14 +336,13 @@ static BOOL term_is_ident_char(char c) {
     return term_is_ident_start(c) || term_is_digit(c);
 }
 
-// term_is_keyword reports whether the run text[start .. start+len) equals one of
-// the language's keywords (syn->keywords) — exact length match, so no null
-// terminator at the run boundary is needed (the run is a substring of a longer C
-// string).
-static BOOL term_is_keyword(const char *text, NSInteger start, NSInteger len,
-                            const TermSyntax *syn) {
-    for (NSInteger i = 0; i < syn->keywordCount; i++) {
-        const char *kw = syn->keywords[i];
+// term_in_table reports whether the run text[start .. start+len) equals one of
+// the n words in kws — exact length match, so no null terminator at the run
+// boundary is needed (the run is a substring of a longer C string).
+static BOOL term_in_table(const char *text, NSInteger start, NSInteger len,
+                          const char *const *kws, NSInteger n) {
+    for (NSInteger i = 0; i < n; i++) {
+        const char *kw = kws[i];
         if ((NSInteger)strlen(kw) == len &&
             strncmp(text + start, kw, (size_t)len) == 0) {
             return YES;
@@ -267,13 +351,21 @@ static BOOL term_is_keyword(const char *text, NSInteger start, NSInteger len,
     return NO;
 }
 
+// term_is_keyword reports whether the run is one of the language's keywords
+// (syn->keywords, then syn->extraKeywords if the language has a second table).
+static BOOL term_is_keyword(const char *text, NSInteger start, NSInteger len,
+                            const TermSyntax *syn) {
+    return term_in_table(text, start, len, syn->keywords, syn->keywordCount) ||
+           term_in_table(text, start, len, syn->extraKeywords, syn->extraKeywordCount);
+}
+
 // term_tokenize splits a source line into colored segments. Called ONCE per line
 // as it enters the visible buffer (never per frame). Returns a malloc'd TermSeg
 // array (caller owns; free when the line scrolls off) and writes the segment
 // count to *outCount. len<=0 -> (NULL, 0). It allocates `len` segments up front:
 // every branch consumes >=1 byte and emits <=1 segment, so count <= len.
 //
-// Rules (per syn): a line comment ('#' or '//') -> the rest of the line is
+// Rules (per syn): a line comment ('//', '#' or '--') -> the rest of the line is
 // comment; a `"` (and, if syn->singleQuoteString, a `'`) -> up to the matching
 // quote is string (backslash escapes skipped); a leading digit -> number; an
 // ident run is promoted to keyword if in syn->keywords, else ident; any other run
@@ -285,8 +377,10 @@ static BOOL term_is_keyword(const char *text, NSInteger start, NSInteger len,
 // it. Emitting a segment by hand would silently desynchronize the grid.
 static BOOL term_is_line_comment(const char *text, NSInteger i, NSInteger len,
                                  const TermSyntax *syn) {
-    if (syn->hashComment) { return text[i] == '#'; }
-    return text[i] == '/' && i + 1 < len && text[i + 1] == '/';
+    if ((syn->lineComments & TermCommentHash) && text[i] == '#') { return YES; }
+    if (i + 1 >= len || text[i + 1] != text[i]) { return NO; }
+    return ((syn->lineComments & TermCommentSlash) && text[i] == '/') ||
+           ((syn->lineComments & TermCommentDash) && text[i] == '-');
 }
 
 static TermSeg *term_tokenize(const char *text, NSInteger len, NSInteger *outCount,
@@ -369,6 +463,10 @@ typedef enum {
     TermLangTypeScript,
     TermLangRust,
     TermLangYopta,
+    TermLangSQL,
+    TermLangPostgres,
+    TermLangMySQL,
+    TermLangOracle,
 } TermLang;
 
 // TermLangSpec bundles everything language-specific: the corpus block table (from
@@ -397,6 +495,10 @@ static TermLang term_lang_from_string(const char *s) {
     if (strcmp(s, "typescript") == 0) { return TermLangTypeScript; }
     if (strcmp(s, "rust") == 0)       { return TermLangRust; }
     if (strcmp(s, "ys") == 0)         { return TermLangYopta; }
+    if (strcmp(s, "sql") == 0)        { return TermLangSQL; }
+    if (strcmp(s, "psql") == 0)       { return TermLangPostgres; }
+    if (strcmp(s, "mysql") == 0)      { return TermLangMySQL; }
+    if (strcmp(s, "oracle") == 0)     { return TermLangOracle; }
     return TermLangGo;
 }
 
@@ -405,26 +507,52 @@ static TermLang term_lang_from_string(const char *s) {
 // both quote styles. Go/Rust: '//' comments, only double-quoted strings ('
 // is a rune/char/lifetime sigil, left as punctuation). Yopta transpiles to JS and
 // keeps its operators and literals verbatim, so it takes the TypeScript syntax —
-// only the keyword table and the corpus are Cyrillic.
+// only the keyword table and the corpus are Cyrillic. SQL: '--' comments ('#' too
+// for MySQL) and single-quoted strings; a double quote is an identifier quote
+// there, which the tokenizer would color as a string, so the SQL corpora simply
+// never use one.
 static TermLangSpec term_lang_spec(TermLang lang) {
+#define TERM_SQL_SYNTAX(extra, comments)                                       \
+    { .keywords = kSqlKeywords, .keywordCount = TERM_KWCOUNT(kSqlKeywords),   \
+      .extraKeywords = (extra), .extraKeywordCount = TERM_KWCOUNT(extra),     \
+      .lineComments = (comments), .singleQuoteString = YES }
     switch (lang) {
         case TermLangPython:
             return (TermLangSpec){ kPyBlocks, kPyBlocksCount,
-                { kPyKeywords, TERM_KWCOUNT(kPyKeywords), YES, YES } };
+                { .keywords = kPyKeywords, .keywordCount = TERM_KWCOUNT(kPyKeywords),
+                  .lineComments = TermCommentHash, .singleQuoteString = YES } };
         case TermLangTypeScript:
             return (TermLangSpec){ kTsBlocks, kTsBlocksCount,
-                { kTsKeywords, TERM_KWCOUNT(kTsKeywords), NO, YES } };
+                { .keywords = kTsKeywords, .keywordCount = TERM_KWCOUNT(kTsKeywords),
+                  .lineComments = TermCommentSlash, .singleQuoteString = YES } };
         case TermLangRust:
             return (TermLangSpec){ kRsBlocks, kRsBlocksCount,
-                { kRsKeywords, TERM_KWCOUNT(kRsKeywords), NO, NO } };
+                { .keywords = kRsKeywords, .keywordCount = TERM_KWCOUNT(kRsKeywords),
+                  .lineComments = TermCommentSlash, .singleQuoteString = NO } };
         case TermLangYopta:
             return (TermLangSpec){ kYsBlocks, kYsBlocksCount,
-                { kYsKeywords, TERM_KWCOUNT(kYsKeywords), NO, YES } };
+                { .keywords = kYsKeywords, .keywordCount = TERM_KWCOUNT(kYsKeywords),
+                  .lineComments = TermCommentSlash, .singleQuoteString = YES } };
+        case TermLangSQL:
+            return (TermLangSpec){ kSqlBlocks, kSqlBlocksCount,
+                { .keywords = kSqlKeywords, .keywordCount = TERM_KWCOUNT(kSqlKeywords),
+                  .lineComments = TermCommentDash, .singleQuoteString = YES } };
+        case TermLangPostgres:
+            return (TermLangSpec){ kPgBlocks, kPgBlocksCount,
+                TERM_SQL_SYNTAX(kPgKeywords, TermCommentDash) };
+        case TermLangMySQL:
+            return (TermLangSpec){ kMyBlocks, kMyBlocksCount,
+                TERM_SQL_SYNTAX(kMyKeywords, TermCommentDash | TermCommentHash) };
+        case TermLangOracle:
+            return (TermLangSpec){ kOraBlocks, kOraBlocksCount,
+                TERM_SQL_SYNTAX(kOraKeywords, TermCommentDash) };
         case TermLangGo:
         default:
             return (TermLangSpec){ kGoBlocks, kGoBlocksCount,
-                { kGoKeywords, TERM_KWCOUNT(kGoKeywords), NO, NO } };
+                { .keywords = kGoKeywords, .keywordCount = TERM_KWCOUNT(kGoKeywords),
+                  .lineComments = TermCommentSlash, .singleQuoteString = NO } };
     }
+#undef TERM_SQL_SYNTAX
 }
 
 // One visible line: a RAW pointer into the static corpus (no ownership) plus its

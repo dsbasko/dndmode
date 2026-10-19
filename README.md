@@ -327,7 +327,7 @@ when omitted.
 
 | Flag | Values | Default | Effect |
 | --- | --- | --- | --- |
-| `--style` | `black` \| `matrix` \| `terminal`[`:go`\|`python`\|`typescript`\|`rust`\|`ys`] \| `dvd` \| `glass`[`:radius`] \| `none` | config | Overlay look for this run; wins over `overlay_style`. `terminal:<lang>` picks the source language (default `go`). |
+| `--style` | `black` \| `matrix` \| `terminal`[`:go`\|`python`\|`typescript`\|`rust`\|`ys`\|`sql`\|`psql`\|`mysql`\|`oracle`] \| `dvd` \| `glass`[`:radius`] \| `none` | config | Overlay look for this run; wins over `overlay_style`. `terminal:<lang>` picks the source language (default `go`). |
 | `--mute` | `true` \| `false` | config | Mute system audio for this run. |
 | `--focus` | `true` \| `false` | config | Toggle Do Not Disturb for this run. |
 | `--timer` | Go duration (`30m`, `1h30m`, `90s`) | off | Auto-unlock after the duration, then exit `0`. |
@@ -586,12 +586,17 @@ unlock_code: Ctrl+Option+Cmd+X
 
 # --- terminal_language -------------------------------------------------------
 # Source language rendered by overlay_style 'terminal': go (default), python,
-# typescript, rust or ys. Each has its own compiled-in corpus + syntax
-# highlighting. Only used by 'terminal'; ignored otherwise.
-#   ys : YoptaScript (yopta.space) - JavaScript as spoken by the gopniks of the
-#        Russian courtyard. Same scrolling terminal, entirely in Cyrillic, and
-#        entirely unprintable. Whoever wanders up to your unattended MacBook gets
-#        to read that instead of your work.
+# typescript, rust, ys, sql, psql, mysql or oracle. Each has its own
+# compiled-in corpus + syntax highlighting. Only used by 'terminal'; ignored
+# otherwise.
+#   ys     : YoptaScript (yopta.space) - JavaScript as spoken by the gopniks of
+#            the Russian courtyard. Same scrolling terminal, entirely in
+#            Cyrillic, and entirely unprintable. Whoever wanders up to your
+#            unattended MacBook gets to read that instead of your work.
+#   sql    : plain ANSI SQL, nothing vendor-specific.
+#   psql   : PostgreSQL - casts, JSONB, ON CONFLICT, plpgsql functions.
+#   mysql  : MySQL - backticks, AUTO_INCREMENT, stored procedures.
+#   oracle : Oracle - PL/SQL blocks, sequences, CONNECT BY.
 # Per-run override: the --style terminal:<lang> flag (e.g. --style terminal:rust).
 # terminal_language: go
 
@@ -963,10 +968,10 @@ never reacts to input, so it leaks no signal that keystrokes are being intercept
 Pick the language two ways (same precedence as glass `glass_blur` vs
 `--style glass:<radius>`): set `terminal_language:` in `config.yml` for the
 default, and/or append `--style terminal:<lang>` to override it for a single run.
-Valid values are `go` (default), `python`, `typescript`, `rust`, and `ys`; a bare
-`--style terminal` with no config key renders Go. Each language has its own
-compiled-in corpus, large enough that the stream does not repeat for over two
-hours, and its own syntax highlighting.
+Valid values are `go` (default), `python`, `typescript`, `rust`, `ys`, `sql`,
+`psql`, `mysql`, and `oracle`; a bare `--style terminal` with no config key renders
+Go. Each language has its own compiled-in corpus, large enough that the stream does
+not repeat for over two hours, and its own syntax highlighting.
 
 ```
 dndmode --style terminal            # Go (default)
@@ -974,7 +979,14 @@ dndmode --style terminal:python
 dndmode --style terminal:typescript
 dndmode --style terminal:rust
 dndmode --style terminal:ys         # YoptaScript
+dndmode --style terminal:psql       # PostgreSQL
 ```
+
+The four SQL values are dialects, not one corpus with a different label: `sql` is
+plain ANSI SQL, `psql` is PostgreSQL (`::` casts, JSONB, `ON CONFLICT`, plpgsql
+functions), `mysql` is MySQL (backticks, `AUTO_INCREMENT`, `DELIMITER` procedures)
+and `oracle` is Oracle (PL/SQL blocks, sequences, `CONNECT BY`). SQL comments start
+with `--` (MySQL also takes `#`), and that is what the highlighter colors.
 
 `ys` is [YoptaScript](https://yopta.space/) - a real joke language that transpiles
 to JavaScript, written entirely in the slang of the Russian courtyard (`йопта` is

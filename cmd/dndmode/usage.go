@@ -30,8 +30,8 @@ Usage:
   dndmode --set-password     capture a new unlock code and store it hashed in the config
 
 Flags (per run; omitted = the config value):
-  --style <look>    black | matrix | terminal[:go|python|typescript|rust|ys] | dvd |
-                    glass[:radius] | none
+  --style <look>    black | matrix | terminal[:<lang>] | dvd | glass[:radius] | none;
+                    <lang> = go|python|typescript|rust|ys|sql|psql|mysql|oracle
   --mute <bool>     mute system audio for the session (true|false)
   --focus <bool>    turn Do Not Disturb on for the session (true|false)
   --timer <dur>     auto-unlock after a Go duration (30m, 1h30m, 90s), then exit 0

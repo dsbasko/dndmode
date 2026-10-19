@@ -141,6 +141,10 @@ func Test_parseStyleFlag(t *testing.T) {
 		{name: "terminal:typescript", in: "terminal:typescript", wantBase: "terminal", wantLang: "typescript"},
 		{name: "terminal:rust", in: "terminal:rust", wantBase: "terminal", wantLang: "rust"},
 		{name: "terminal:ys", in: "terminal:ys", wantBase: "terminal", wantLang: "ys"},
+		{name: "terminal:sql", in: "terminal:sql", wantBase: "terminal", wantLang: "sql"},
+		{name: "terminal:psql", in: "terminal:psql", wantBase: "terminal", wantLang: "psql"},
+		{name: "terminal:mysql", in: "terminal:mysql", wantBase: "terminal", wantLang: "mysql"},
+		{name: "terminal:oracle", in: "terminal:oracle", wantBase: "terminal", wantLang: "oracle"},
 		// parseStyleFlag hands the suffix back VERBATIM — the deprecated
 		// spelling is folded into "ys" one step later, by the single
 		// config.NormalizeTerminalLanguage call that both the flag and the
