@@ -120,7 +120,7 @@ const (
 	OverlayStyleNone = "none"
 
 	// TerminalLangGo / Python / TypeScript / Rust / Yopta / SQL / Postgres /
-	// MySQL / Oracle are the languages the
+	// MySQL / Oracle / Varaq / Elvish are the languages the
 	// `terminal` overlay style can render, selected by the --style terminal:<lang>
 	// flag suffix (mirrors --style glass:N). Each maps to its own compiled-in
 	// source corpus with language-appropriate syntax highlighting. A bare
@@ -136,6 +136,11 @@ const (
 	// vendor's own syntax (casts and JSONB, backticks and AUTO_INCREMENT, PL/SQL)
 	// so the three read as different code at a glance. `psql` is named after
 	// the client people type every day, not the server.
+	//
+	// TerminalLangVaraq is var'aq, a real stack language with Klingon keywords,
+	// and TerminalLangElvish is the elv.sh shell — not Tolkien: the name is the
+	// joke, the corpus is ordinary shell scripting. The apostrophe is dropped
+	// from `varaq` so the suffix survives a shell without quoting.
 	TerminalLangGo         = "go"
 	TerminalLangPython     = "python"
 	TerminalLangTypeScript = "typescript"
@@ -145,6 +150,8 @@ const (
 	TerminalLangPostgres   = "psql"
 	TerminalLangMySQL      = "mysql"
 	TerminalLangOracle     = "oracle"
+	TerminalLangVaraq      = "varaq"
+	TerminalLangElvish     = "elvish"
 
 	// legacyTerminalLangYopta is the spelling YoptaScript shipped under before it
 	// became `ys` — it read as an abbreviation of the language's own name rather
@@ -259,7 +266,7 @@ type Config struct {
 	GlassBlur *float64 `yaml:"glass_blur"`
 	// TerminalLanguage selects the source language for overlay_style "terminal":
 	// "go" (default / absent), "python", "typescript", "rust", "ys", "sql",
-	// "psql", "mysql" or "oracle". Only meaningful
+	// "psql", "mysql", "oracle", "varaq" or "elvish". Only meaningful
 	// for terminal; ignored for every other style. Per-run override: the
 	// --style terminal:<lang> flag suffix (main.go) WINS over this. A plain string
 	// so an ABSENT/empty key defaults to Go via NormalizeTerminalLanguage;
@@ -671,7 +678,7 @@ func NormalizeTerminalLanguage(s string) string {
 	}
 }
 
-// ValidateTerminalLanguage accepts "" (treated as the default, Go), the nine
+// ValidateTerminalLanguage accepts "" (treated as the default, Go), the eleven
 // supported languages and the deprecated `yc` spelling of YoptaScript; anything
 // else returns a non-nil error suitable for main.go's stderr template. Gates the
 // --style terminal:<lang> flag suffix.
@@ -685,10 +692,11 @@ func ValidateTerminalLanguage(s string) error {
 	switch s {
 	case "", TerminalLangGo, TerminalLangPython, TerminalLangTypeScript,
 		TerminalLangRust, TerminalLangYopta, TerminalLangSQL, TerminalLangPostgres,
-		TerminalLangMySQL, TerminalLangOracle, legacyTerminalLangYopta:
+		TerminalLangMySQL, TerminalLangOracle, TerminalLangVaraq, TerminalLangElvish,
+		legacyTerminalLangYopta:
 		return nil
 	default:
-		return fmt.Errorf("unknown terminal language %q (valid: go, python, typescript, rust, ys, sql, psql, mysql, oracle)", s)
+		return fmt.Errorf("unknown terminal language %q (valid: go, python, typescript, rust, ys, sql, psql, mysql, oracle, varaq, elvish)", s)
 	}
 }
 
@@ -998,9 +1006,9 @@ unlock_code: %s
 
 # --- terminal_language -------------------------------------------------------
 # Source language rendered by overlay_style 'terminal': go (default), python,
-# typescript, rust, ys, sql, psql, mysql or oracle. Each has its own
-# compiled-in corpus + syntax highlighting. Only used by 'terminal'; ignored
-# otherwise.
+# typescript, rust, ys, sql, psql, mysql, oracle, varaq or elvish. Each has
+# its own compiled-in corpus + syntax highlighting. Only used by 'terminal';
+# ignored otherwise.
 #   ys     : YoptaScript (yopta.space) — JavaScript as spoken by the gopniks of
 #            the Russian courtyard. Same scrolling terminal, entirely in
 #            Cyrillic, and entirely unprintable. Whoever wanders up to your
@@ -1009,6 +1017,8 @@ unlock_code: %s
 #   psql   : PostgreSQL — casts, JSONB, ON CONFLICT, plpgsql functions.
 #   mysql  : MySQL — backticks, AUTO_INCREMENT, stored procedures.
 #   oracle : Oracle — PL/SQL blocks, sequences, CONNECT BY.
+#   varaq  : var'aq — a stack language with Klingon keywords. Qapla'!
+#   elvish : the Elvish shell (elv.sh). Not Tolkien's; same name, though.
 # Per-run override: the --style terminal:<lang> flag (e.g. --style terminal:rust).
 # terminal_language: go
 

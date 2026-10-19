@@ -237,7 +237,7 @@ func defineFlags(fs *flag.FlagSet) cliFlags {
 	// for a single run without editing ~/.config/dndmode/config.yml. Empty (the
 	// default) means "use whatever the config says". Validated at Step 5b.1 with
 	// the same ValidateOverlayStyle gate as the config value.
-	fl.style = fs.String("style", "", "override overlay_style for this run (black|matrix|terminal[:go|python|typescript|rust|ys|sql|psql|mysql|oracle]|dvd|glass[:radius]|none); empty = use config")
+	fl.style = fs.String("style", "", "override overlay_style for this run (black|matrix|terminal[:go|python|typescript|rust|ys|sql|psql|mysql|oracle|varaq|elvish]|dvd|glass[:radius]|none); empty = use config")
 	// --mute / --focus override the config keys for a single run (same
 	// precedence as --style: non-empty WINS over YAML, empty = use config).
 	// Tri-state strings ("" | "true" | "false") rather than flag.Bool because a

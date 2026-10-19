@@ -31,7 +31,8 @@ Usage:
 
 Flags (per run; omitted = the config value):
   --style <look>    black | matrix | terminal[:<lang>] | dvd | glass[:radius] | none;
-                    <lang> = go|python|typescript|rust|ys|sql|psql|mysql|oracle
+                    <lang> = go|python|typescript|rust|ys|sql|psql|mysql|oracle|
+                             varaq|elvish
   --mute <bool>     mute system audio for the session (true|false)
   --focus <bool>    turn Do Not Disturb on for the session (true|false)
   --timer <dur>     auto-unlock after a Go duration (30m, 1h30m, 90s), then exit 0

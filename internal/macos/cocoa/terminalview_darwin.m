@@ -167,13 +167,55 @@ static const char *const kYsKeywords[] = {
     "Помойка", "Кент", "Гопец", "СловоПацана",
 };
 
-// Line-comment markers a language accepts, as a bitmask: Go/TS/Rust '//',
-// Python '#', SQL '--'. MySQL is the one language with two (`--` and `#`), which
-// is why this is a mask and not a choice of one.
+// var'aq (terminal:varaq) — Brian Connors' Klingon language, in the Latin
+// transliteration its interpreters read. The apostrophe is a LETTER in Klingon,
+// so it is part of the word (see TermSyntax.identStartExtra): `ghobe'chugh` and
+// `law''a'` are one run each and match these entries byte for byte, and `'ar`
+// starts with one. Case is significant too — `HIja'chugh`, not `hija'chugh`.
+// The `~` quote, `{ }` and `( )` are punctuation; `(* ... *)` is the comment.
+static const char *const kVqKeywords[] = {
+    "woD", "latlh", "tam", "chImmoH", "qaw", "qawHa'", "Hotlh", "pong",
+    "cher", "HIja'chugh", "ghobe'chugh", "wIv", "chov", "nargh", "vangqa'",
+    "SIj", "muv", "ghorqu'", "chIm'a'", "tlheghrar", "naQmoH",
+    "tlheghrap'a'", "tlheghpe'", "tlheghjuv", "jor", "boq", "boqHa'",
+    "boq'egh", "boqHa''egh", "HabboqHa''egh", "chuv", "boqHa'qa'", "loS'ar",
+    "wa'boq", "wa'boqHa'", "joq", "joqHa'", "qojmI'", "qojHa'", "ghurtaH",
+    "maHghurtaH", "poD", "Hab", "'ar", "mIScher", "mIS", "HeHmI'",
+    "ghurmI'", "HabmI''a'", "mI''a'", "mI'moH", "mobmoH", "DuD", "tlhoch",
+    "Qo'moH", "nIHghoS", "poSghoS", "law''a'", "puS'a'", "rap'a'",
+    "law'rap'a'", "puSrap'a'", "rapbe'a'", "pagh'a'", "taH'a'", "je",
+    "ghap", "ghobe'", "cha'", "bep", "chu'DonwI'", "chu'tut", "pongmI'",
+    "taghDe'",
+};
+
+// Elvish (terminal:elvish) — the elv.sh shell. Its special commands and the
+// builtins a script leans on. Words are hyphenated (`has-key`, `not-eq`), which
+// is why `-` continues an identifier there (TermSyntax.identCharExtra); `use`
+// is absent for the same reason as YoptaScript's import words — no line may
+// read like the top of a file — and `$true`/`$nil` light up as `true`/`nil`
+// after the `$` sigil.
+static const char *const kElvKeywords[] = {
+    "var", "set", "tmp", "del", "fn", "if", "elif", "else", "while", "for",
+    "try", "catch", "finally", "and", "or", "coalesce", "pragma", "break",
+    "continue", "return", "fail", "put", "echo", "print", "printf",
+    "pprint", "repr", "each", "peach", "range", "count", "take", "drop",
+    "keys", "has-key", "has-value", "not", "eq", "not-eq", "is", "compare",
+    "order", "make-map", "ns", "all", "one", "slurp", "from-lines",
+    "to-lines", "from-json", "to-json", "from-terminated", "to-terminated",
+    "nop", "sleep", "time", "styled", "true", "false", "nil", "ok",
+};
+
+// Comment markers a language accepts, as a bitmask: Go/TS/Rust '//', Python
+// and Elvish '#', SQL '--'. MySQL is the one language with two (`--` and `#`),
+// which is why this is a mask and not a choice of one. var'aq's `(* ... *)` is
+// the only marker that CLOSES: the tokenizer works one line at a time, so it is
+// colored only when it opens and closes on the same line (an unclosed one runs
+// to the end of that line), which is how the corpus writes every one of them.
 enum {
-    TermCommentSlash = 1 << 0, // "//"
-    TermCommentHash  = 1 << 1, // "#"
-    TermCommentDash  = 1 << 2, // "--"
+    TermCommentSlash     = 1 << 0, // "//" to end of line
+    TermCommentHash      = 1 << 1, // "#" to end of line
+    TermCommentDash      = 1 << 2, // "--" to end of line
+    TermCommentParenStar = 1 << 3, // "(*" to "*)"
 };
 
 // The four SQL dialects share one ANSI keyword table (kSqlKeywords, which is all
@@ -251,16 +293,20 @@ static const char *const kOraKeywords[] = {
 
 // TermSyntax parameterizes the tokenizer per language: which keyword set to
 // promote idents against (plus an optional second one, for the SQL dialects
-// layered over kSqlKeywords), which markers start a line comment (TermComment*),
-// and whether single-quoted runs are strings (Python/TS/SQL) or just
-// punctuation (Go/Rust, where ' is a rune/char/lifetime sigil).
+// layered over kSqlKeywords), which markers start a comment (TermComment*),
+// whether single-quoted runs are strings (Python/TS/SQL/Elvish) or just
+// punctuation (Go/Rust, where ' is a rune/char/lifetime sigil), and which extra
+// characters belong to a word: var'aq's apostrophe may also START one, Elvish's
+// hyphen may only continue one (a lone `-` there is still an operator).
 typedef struct {
     const char *const *keywords;
     NSInteger          keywordCount;
     const char *const *extraKeywords;     // NULL unless a second table applies
     NSInteger          extraKeywordCount;
-    unsigned           lineComments;      // TermComment* mask
+    unsigned           comments;          // TermComment* mask
     BOOL               singleQuoteString; // YES: '...' is a string literal
+    const char        *identStartExtra;   // extra chars that may start a word (NULL: none)
+    const char        *identCharExtra;    // extra chars that may continue one (NULL: none)
 } TermSyntax;
 
 #define TERM_KWCOUNT(a) ((NSInteger)(sizeof(a) / sizeof((a)[0])))
@@ -336,6 +382,20 @@ static BOOL term_is_ident_char(char c) {
     return term_is_ident_start(c) || term_is_digit(c);
 }
 
+// The per-language word rules: the base ones above plus the syntax's extra
+// characters. strchr finds the terminating NUL of any set, so '\0' is excluded
+// up front rather than reported as a member.
+static BOOL term_in_set(char c, const char *set) {
+    return set != NULL && c != '\0' && strchr(set, c) != NULL;
+}
+static BOOL term_syn_ident_start(char c, const TermSyntax *syn) {
+    return term_is_ident_start(c) || term_in_set(c, syn->identStartExtra);
+}
+static BOOL term_syn_ident_char(char c, const TermSyntax *syn) {
+    return term_is_ident_char(c) || term_in_set(c, syn->identStartExtra) ||
+           term_in_set(c, syn->identCharExtra);
+}
+
 // term_in_table reports whether the run text[start .. start+len) equals one of
 // the n words in kws — exact length match, so no null terminator at the run
 // boundary is needed (the run is a substring of a longer C string).
@@ -366,7 +426,7 @@ static BOOL term_is_keyword(const char *text, NSInteger start, NSInteger len,
 // every branch consumes >=1 byte and emits <=1 segment, so count <= len.
 //
 // Rules (per syn): a line comment ('//', '#' or '--') -> the rest of the line is
-// comment; a `"` (and, if syn->singleQuoteString, a `'`) -> up to the matching
+// comment, a `(* ... *)` -> up to its close; a `"` (and, if syn->singleQuoteString, a `'`) -> up to the matching
 // quote is string (backslash escapes skipped); a leading digit -> number; an
 // ident run is promoted to keyword if in syn->keywords, else ident; any other run
 // (operators, brackets, whitespace) -> punct.
@@ -375,12 +435,27 @@ static BOOL term_is_keyword(const char *text, NSInteger start, NSInteger len,
 // the byte cursor from drifting apart: the two are advanced in the same place, by
 // the same run, so a segment's col is always the glyph count of everything before
 // it. Emitting a segment by hand would silently desynchronize the grid.
-static BOOL term_is_line_comment(const char *text, NSInteger i, NSInteger len,
-                                 const TermSyntax *syn) {
-    if ((syn->lineComments & TermCommentHash) && text[i] == '#') { return YES; }
-    if (i + 1 >= len || text[i + 1] != text[i]) { return NO; }
-    return ((syn->lineComments & TermCommentSlash) && text[i] == '/') ||
-           ((syn->lineComments & TermCommentDash) && text[i] == '-');
+// term_comment_end returns where a comment starting at text[i] ends (an
+// exclusive byte index), or -1 if no comment starts there. Line comments run to
+// len; a `(*` runs to just past its `*)`, or to len if it does not close on this
+// line.
+static NSInteger term_comment_end(const char *text, NSInteger i, NSInteger len,
+                                  const TermSyntax *syn) {
+    char c = text[i];
+    if ((syn->comments & TermCommentHash) && c == '#') { return len; }
+    if (i + 1 >= len) { return -1; }
+    char d = text[i + 1];
+    if (c == d && (((syn->comments & TermCommentSlash) && c == '/') ||
+                   ((syn->comments & TermCommentDash) && c == '-'))) {
+        return len;
+    }
+    if ((syn->comments & TermCommentParenStar) && c == '(' && d == '*') {
+        for (NSInteger k = i + 2; k + 1 < len; k++) {
+            if (text[k] == '*' && text[k + 1] == ')') { return k + 2; }
+        }
+        return len;
+    }
+    return -1;
 }
 
 static TermSeg *term_tokenize(const char *text, NSInteger len, NSInteger *outCount,
@@ -406,9 +481,10 @@ static TermSeg *term_tokenize(const char *text, NSInteger len, NSInteger *outCou
     while (i < len) {
         char c = text[i];
 
-        if (term_is_line_comment(text, i, len, syn)) {
-            TERM_EMIT(len, TermClassComment);
-            break; // comment runs to the end of the line
+        NSInteger commentEnd = term_comment_end(text, i, len, syn);
+        if (commentEnd >= 0) {
+            TERM_EMIT(commentEnd, TermClassComment); // a line comment ends the loop
+            continue;
         }
         if (c == '"' || (syn->singleQuoteString && c == '\'')) {
             char q = c;
@@ -427,9 +503,9 @@ static TermSeg *term_tokenize(const char *text, NSInteger len, NSInteger *outCou
             TERM_EMIT(j, TermClassNumber);
             continue;
         }
-        if (term_is_ident_start(c)) {
+        if (term_syn_ident_start(c, syn)) {
             NSInteger j = i + 1;
-            while (j < len && term_is_ident_char(text[j])) { j++; }
+            while (j < len && term_syn_ident_char(text[j], syn)) { j++; }
             TermClass cls = term_is_keyword(text, i, j - i, syn) ? TermClassKeyword
                                                                  : TermClassIdent;
             TERM_EMIT(j, cls);
@@ -439,9 +515,9 @@ static TermSeg *term_tokenize(const char *text, NSInteger len, NSInteger *outCou
         NSInteger j = i + 1;
         while (j < len) {
             char d = text[j];
-            if (term_is_ident_start(d) || term_is_digit(d) || d == '"') { break; }
+            if (term_syn_ident_start(d, syn) || term_is_digit(d) || d == '"') { break; }
             if (syn->singleQuoteString && d == '\'') { break; }
-            if (term_is_line_comment(text, j, len, syn)) { break; }
+            if (term_comment_end(text, j, len, syn) >= 0) { break; }
             j++;
         }
         TERM_EMIT(j, TermClassPunct);
@@ -467,6 +543,8 @@ typedef enum {
     TermLangPostgres,
     TermLangMySQL,
     TermLangOracle,
+    TermLangVaraq,
+    TermLangElvish,
 } TermLang;
 
 // TermLangSpec bundles everything language-specific: the corpus block table (from
@@ -499,6 +577,8 @@ static TermLang term_lang_from_string(const char *s) {
     if (strcmp(s, "psql") == 0)       { return TermLangPostgres; }
     if (strcmp(s, "mysql") == 0)      { return TermLangMySQL; }
     if (strcmp(s, "oracle") == 0)     { return TermLangOracle; }
+    if (strcmp(s, "varaq") == 0)      { return TermLangVaraq; }
+    if (strcmp(s, "elvish") == 0)     { return TermLangElvish; }
     return TermLangGo;
 }
 
@@ -510,33 +590,35 @@ static TermLang term_lang_from_string(const char *s) {
 // only the keyword table and the corpus are Cyrillic. SQL: '--' comments ('#' too
 // for MySQL) and single-quoted strings; a double quote is an identifier quote
 // there, which the tokenizer would color as a string, so the SQL corpora simply
-// never use one.
+// never use one. var'aq: `(* *)` comments, double-quoted strings only (' is a
+// letter), apostrophes inside words. Elvish: '#' comments, both quote styles,
+// hyphens inside words.
 static TermLangSpec term_lang_spec(TermLang lang) {
-#define TERM_SQL_SYNTAX(extra, comments)                                       \
+#define TERM_SQL_SYNTAX(extra, marks)                                          \
     { .keywords = kSqlKeywords, .keywordCount = TERM_KWCOUNT(kSqlKeywords),   \
       .extraKeywords = (extra), .extraKeywordCount = TERM_KWCOUNT(extra),     \
-      .lineComments = (comments), .singleQuoteString = YES }
+      .comments = (marks), .singleQuoteString = YES }
     switch (lang) {
         case TermLangPython:
             return (TermLangSpec){ kPyBlocks, kPyBlocksCount,
                 { .keywords = kPyKeywords, .keywordCount = TERM_KWCOUNT(kPyKeywords),
-                  .lineComments = TermCommentHash, .singleQuoteString = YES } };
+                  .comments = TermCommentHash, .singleQuoteString = YES } };
         case TermLangTypeScript:
             return (TermLangSpec){ kTsBlocks, kTsBlocksCount,
                 { .keywords = kTsKeywords, .keywordCount = TERM_KWCOUNT(kTsKeywords),
-                  .lineComments = TermCommentSlash, .singleQuoteString = YES } };
+                  .comments = TermCommentSlash, .singleQuoteString = YES } };
         case TermLangRust:
             return (TermLangSpec){ kRsBlocks, kRsBlocksCount,
                 { .keywords = kRsKeywords, .keywordCount = TERM_KWCOUNT(kRsKeywords),
-                  .lineComments = TermCommentSlash, .singleQuoteString = NO } };
+                  .comments = TermCommentSlash, .singleQuoteString = NO } };
         case TermLangYopta:
             return (TermLangSpec){ kYsBlocks, kYsBlocksCount,
                 { .keywords = kYsKeywords, .keywordCount = TERM_KWCOUNT(kYsKeywords),
-                  .lineComments = TermCommentSlash, .singleQuoteString = YES } };
+                  .comments = TermCommentSlash, .singleQuoteString = YES } };
         case TermLangSQL:
             return (TermLangSpec){ kSqlBlocks, kSqlBlocksCount,
                 { .keywords = kSqlKeywords, .keywordCount = TERM_KWCOUNT(kSqlKeywords),
-                  .lineComments = TermCommentDash, .singleQuoteString = YES } };
+                  .comments = TermCommentDash, .singleQuoteString = YES } };
         case TermLangPostgres:
             return (TermLangSpec){ kPgBlocks, kPgBlocksCount,
                 TERM_SQL_SYNTAX(kPgKeywords, TermCommentDash) };
@@ -546,11 +628,21 @@ static TermLangSpec term_lang_spec(TermLang lang) {
         case TermLangOracle:
             return (TermLangSpec){ kOraBlocks, kOraBlocksCount,
                 TERM_SQL_SYNTAX(kOraKeywords, TermCommentDash) };
+        case TermLangVaraq:
+            return (TermLangSpec){ kVqBlocks, kVqBlocksCount,
+                { .keywords = kVqKeywords, .keywordCount = TERM_KWCOUNT(kVqKeywords),
+                  .comments = TermCommentParenStar, .singleQuoteString = NO,
+                  .identStartExtra = "'" } };
+        case TermLangElvish:
+            return (TermLangSpec){ kElvBlocks, kElvBlocksCount,
+                { .keywords = kElvKeywords, .keywordCount = TERM_KWCOUNT(kElvKeywords),
+                  .comments = TermCommentHash, .singleQuoteString = YES,
+                  .identCharExtra = "-" } };
         case TermLangGo:
         default:
             return (TermLangSpec){ kGoBlocks, kGoBlocksCount,
                 { .keywords = kGoKeywords, .keywordCount = TERM_KWCOUNT(kGoKeywords),
-                  .lineComments = TermCommentSlash, .singleQuoteString = NO } };
+                  .comments = TermCommentSlash, .singleQuoteString = NO } };
     }
 #undef TERM_SQL_SYNTAX
 }

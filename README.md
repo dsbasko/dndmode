@@ -327,7 +327,7 @@ when omitted.
 
 | Flag | Values | Default | Effect |
 | --- | --- | --- | --- |
-| `--style` | `black` \| `matrix` \| `terminal`[`:go`\|`python`\|`typescript`\|`rust`\|`ys`\|`sql`\|`psql`\|`mysql`\|`oracle`] \| `dvd` \| `glass`[`:radius`] \| `none` | config | Overlay look for this run; wins over `overlay_style`. `terminal:<lang>` picks the source language (default `go`). |
+| `--style` | `black` \| `matrix` \| `terminal`[`:go`\|`python`\|`typescript`\|`rust`\|`ys`\|`sql`\|`psql`\|`mysql`\|`oracle`\|`varaq`\|`elvish`] \| `dvd` \| `glass`[`:radius`] \| `none` | config | Overlay look for this run; wins over `overlay_style`. `terminal:<lang>` picks the source language (default `go`). |
 | `--mute` | `true` \| `false` | config | Mute system audio for this run. |
 | `--focus` | `true` \| `false` | config | Toggle Do Not Disturb for this run. |
 | `--timer` | Go duration (`30m`, `1h30m`, `90s`) | off | Auto-unlock after the duration, then exit `0`. |
@@ -586,9 +586,9 @@ unlock_code: Ctrl+Option+Cmd+X
 
 # --- terminal_language -------------------------------------------------------
 # Source language rendered by overlay_style 'terminal': go (default), python,
-# typescript, rust, ys, sql, psql, mysql or oracle. Each has its own
-# compiled-in corpus + syntax highlighting. Only used by 'terminal'; ignored
-# otherwise.
+# typescript, rust, ys, sql, psql, mysql, oracle, varaq or elvish. Each has
+# its own compiled-in corpus + syntax highlighting. Only used by 'terminal';
+# ignored otherwise.
 #   ys     : YoptaScript (yopta.space) - JavaScript as spoken by the gopniks of
 #            the Russian courtyard. Same scrolling terminal, entirely in
 #            Cyrillic, and entirely unprintable. Whoever wanders up to your
@@ -597,6 +597,8 @@ unlock_code: Ctrl+Option+Cmd+X
 #   psql   : PostgreSQL - casts, JSONB, ON CONFLICT, plpgsql functions.
 #   mysql  : MySQL - backticks, AUTO_INCREMENT, stored procedures.
 #   oracle : Oracle - PL/SQL blocks, sequences, CONNECT BY.
+#   varaq  : var'aq - a stack language with Klingon keywords. Qapla'!
+#   elvish : the Elvish shell (elv.sh). Not Tolkien's; same name, though.
 # Per-run override: the --style terminal:<lang> flag (e.g. --style terminal:rust).
 # terminal_language: go
 
@@ -969,8 +971,8 @@ Pick the language two ways (same precedence as glass `glass_blur` vs
 `--style glass:<radius>`): set `terminal_language:` in `config.yml` for the
 default, and/or append `--style terminal:<lang>` to override it for a single run.
 Valid values are `go` (default), `python`, `typescript`, `rust`, `ys`, `sql`,
-`psql`, `mysql`, and `oracle`; a bare `--style terminal` with no config key renders
-Go. Each language has its own compiled-in corpus, large enough that the stream does
+`psql`, `mysql`, `oracle`, `varaq`, and `elvish`; a bare `--style terminal` with no
+config key renders Go. Each language has its own compiled-in corpus, large enough that the stream does
 not repeat for over two hours, and its own syntax highlighting.
 
 ```
@@ -980,6 +982,8 @@ dndmode --style terminal:typescript
 dndmode --style terminal:rust
 dndmode --style terminal:ys         # YoptaScript
 dndmode --style terminal:psql       # PostgreSQL
+dndmode --style terminal:varaq      # var'aq (Klingon)
+dndmode --style terminal:elvish     # Elvish shell
 ```
 
 The four SQL values are dialects, not one corpus with a different label: `sql` is
@@ -987,6 +991,12 @@ plain ANSI SQL, `psql` is PostgreSQL (`::` casts, JSONB, `ON CONFLICT`, plpgsql
 functions), `mysql` is MySQL (backticks, `AUTO_INCREMENT`, `DELIMITER` procedures)
 and `oracle` is Oracle (PL/SQL blocks, sequences, `CONNECT BY`). SQL comments start
 with `--` (MySQL also takes `#`), and that is what the highlighter colors.
+
+`varaq` is [var'aq](https://esolangs.org/wiki/Var'aq) - a real stack-based language
+with Klingon keywords (`latlh` is `dup`, `pong` names a procedure, `HIja'chugh` is
+`if`), written in the Latin transliteration its interpreters read; the apostrophe is
+a letter there, so `ghobe'chugh` highlights as one word. `elvish` is the
+[Elvish shell](https://elv.sh/) - ordinary shell scripting, Tolkien not included.
 
 `ys` is [YoptaScript](https://yopta.space/) - a real joke language that transpiles
 to JavaScript, written entirely in the slang of the Russian courtyard (`йопта` is

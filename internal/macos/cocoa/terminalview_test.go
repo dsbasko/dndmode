@@ -508,3 +508,146 @@ func TestTerminalView_Tokenize_SQL(t *testing.T) {
 		})
 	}
 }
+
+// TestTerminalView_Tokenize_VaraqElvish pins the two word rules and the one
+// closing comment the other languages never needed. In var'aq the apostrophe
+// is a Klingon letter: it continues a word (`ghobe'chugh`, `law''a'`) and can
+// start one (`'ar`), and it never opens a string. `(* ... *)` is a comment that
+// ENDS, so code after it on the same line is still code. In Elvish a hyphen
+// continues a word (`has-key`) but a lone `-` stays an operator, and `#` is a
+// comment there while `--` is not.
+func TestTerminalView_Tokenize_VaraqElvish(t *testing.T) {
+	tests := []struct {
+		name string
+		lang string
+		line string
+		want []termSegment
+	}{
+		{
+			name: "apostrophes stay inside a klingon word",
+			lang: "varaq",
+			line: "law''a' ghobe'chugh",
+			want: []termSegment{
+				{start: 0, length: 7, cls: termClassKeyword}, // law''a'
+				{start: 7, length: 1, cls: termClassPunct},
+				{start: 8, length: 11, cls: termClassKeyword}, // ghobe'chugh
+			},
+		},
+		{
+			name: "an apostrophe can start a word",
+			lang: "varaq",
+			line: "-3 'ar",
+			want: []termSegment{
+				{start: 0, length: 1, cls: termClassPunct},
+				{start: 1, length: 1, cls: termClassNumber},
+				{start: 2, length: 1, cls: termClassPunct},
+				{start: 3, length: 3, cls: termClassKeyword}, // 'ar
+			},
+		},
+		{
+			name: "paren-star comment ends and code resumes",
+			lang: "varaq",
+			line: "(* sum *) boq",
+			want: []termSegment{
+				{start: 0, length: 9, cls: termClassComment},
+				{start: 9, length: 1, cls: termClassPunct},
+				{start: 10, length: 3, cls: termClassKeyword}, // boq
+			},
+		},
+		{
+			name: "unclosed paren-star runs to end of line",
+			lang: "varaq",
+			line: "boq (* sum",
+			want: []termSegment{
+				{start: 0, length: 3, cls: termClassKeyword},
+				{start: 3, length: 1, cls: termClassPunct},
+				{start: 4, length: 6, cls: termClassComment},
+			},
+		},
+		{
+			name: "a list paren is not a comment",
+			lang: "varaq",
+			line: "( 1 2 )",
+			want: []termSegment{
+				{start: 0, length: 2, cls: termClassPunct},
+				{start: 2, length: 1, cls: termClassNumber},
+				{start: 3, length: 1, cls: termClassPunct},
+				{start: 4, length: 1, cls: termClassNumber},
+				{start: 5, length: 2, cls: termClassPunct},
+			},
+		},
+		{
+			name: "define a name with a string",
+			lang: "varaq",
+			line: `~ greet { "nuqneH" cha' } pong`,
+			want: []termSegment{
+				{start: 0, length: 2, cls: termClassPunct}, // "~ "
+				{start: 2, length: 5, cls: termClassIdent}, // greet
+				{start: 7, length: 3, cls: termClassPunct}, // " { "
+				{start: 10, length: 8, cls: termClassString},
+				{start: 18, length: 1, cls: termClassPunct},
+				{start: 19, length: 4, cls: termClassKeyword}, // cha'
+				{start: 23, length: 3, cls: termClassPunct},   // " } "
+				{start: 26, length: 4, cls: termClassKeyword}, // pong
+			},
+		},
+		{
+			name: "hyphen continues an elvish word",
+			lang: "elvish",
+			line: "has-key $m",
+			want: []termSegment{
+				{start: 0, length: 7, cls: termClassKeyword}, // has-key
+				{start: 7, length: 2, cls: termClassPunct},   // " $"
+				{start: 9, length: 1, cls: termClassIdent},
+			},
+		},
+		{
+			name: "lone hyphen is still an operator",
+			lang: "elvish",
+			line: "(- $n 1)",
+			want: []termSegment{
+				{start: 0, length: 4, cls: termClassPunct}, // "(- $"
+				{start: 4, length: 1, cls: termClassIdent},
+				{start: 5, length: 1, cls: termClassPunct},
+				{start: 6, length: 1, cls: termClassNumber},
+				{start: 7, length: 1, cls: termClassPunct},
+			},
+		},
+		{
+			name: "hash comment and single-quoted string",
+			lang: "elvish",
+			line: "put 'a' # note",
+			want: []termSegment{
+				{start: 0, length: 3, cls: termClassKeyword},
+				{start: 3, length: 1, cls: termClassPunct},
+				{start: 4, length: 3, cls: termClassString},
+				{start: 7, length: 1, cls: termClassPunct},
+				{start: 8, length: 6, cls: termClassComment},
+			},
+		},
+		{
+			name: "hyphen does not join words outside elvish",
+			lang: "go",
+			line: "a-b",
+			want: []termSegment{
+				{start: 0, length: 1, cls: termClassIdent},
+				{start: 1, length: 1, cls: termClassPunct},
+				{start: 2, length: 1, cls: termClassIdent},
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cols := tokenizeLineColsForTest(tt.line, tt.lang)
+			got := make([]termSegment, len(cols))
+			for i, s := range cols {
+				got[i] = termSegment{start: s.start, length: s.length, cls: s.cls}
+			}
+			if !equalSegments(got, tt.want) {
+				t.Fatalf("tokenize(%q, %s):\n got  %s\n want %s",
+					tt.line, tt.lang, formatSegments(got), formatSegments(tt.want))
+			}
+		})
+	}
+}
