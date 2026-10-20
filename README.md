@@ -56,6 +56,7 @@ and all eight overlay styles.
 - [Threat model](#threat-model)
 - [Troubleshooting](#troubleshooting)
 - [Uninstall](#uninstall)
+- [Linux (Ubuntu 24.04)](#linux-ubuntu-2404)
 - [Building from source](#building-from-source)
 - [Known limitations](#known-limitations)
 - [License](#license)
@@ -1298,6 +1299,46 @@ dndmode is installed), `watch.json` (written for the life of a background `--wat
 process and deleted when it exits) and `watch.log` (that process's output,
 truncated on every `--watch` start).
 
+## Linux (Ubuntu 24.04)
+
+The same CLI, config file and exit codes run on Linux (GNOME, Wayland or X11).
+Only the platform layer is different:
+
+| Layer | macOS | Linux |
+| --- | --- | --- |
+| Shield | `NSWindow` per display | black GTK4 fullscreen window per monitor |
+| Input lock | `CGEventTap` | exclusive `EVIOCGRAB` of every `/dev/input/event*` |
+| Awake lock | IOPMAssertion / `caffeinate` | `systemd-inhibit` + `gnome-session-inhibit`, tied to dndmode's PID |
+| Mute | `osascript` | `wpctl` (PipeWire), `pactl` as fallback |
+| `focus` | Shortcuts `dndmode-on/off` | GNOME `show-banners` off, previous value restored |
+| `--watch` trigger | Carbon hotkey | GNOME custom shortcut running `dndmode --activate` |
+
+```bash
+sudo apt install golang libgtk-4-dev      # build deps (Go 1.26+)
+make install-linux                        # build + /usr/local/bin/dndmode
+sudo usermod -aG input $USER              # once; log out and back in
+```
+
+Differences worth knowing:
+
+- **Access.** The input lock reads `/dev/input`, so the user must be in the
+  `input` group. Without it dndmode exits `3` and prints the command above.
+  Exit `4` means another program already holds an exclusive grab (a remapper
+  such as keyd or another locker).
+- **Keys.** The unlock-code grammar is unchanged and matched by physical
+  position: `option` is Alt, `cmd` is Super. The default code is therefore
+  `Ctrl+Alt+Super+X`, the default `activate_hotkey` `Ctrl+Alt+Super+D`. A
+  digest written by `--set-password` on one platform works on the other.
+- **Styles.** Only `black` and `none`; any other style exits `1`.
+- **Everything is grabbed**, including VT switching and SysRq, for the length
+  of the session. The way out without the code is `--timer`, SSH (`dndmode
+  --kill` / `pkill dndmode`) or a power cycle — the same as on macOS.
+- **`--watch`** adds an entry named `dndmode` to Settings → Keyboard → Custom
+  Shortcuts and removes it on exit. If the watch process was killed with `-9`,
+  the next press of the combination removes the leftover entry.
+- **`focus`** needs no setup; exit `6` means the GNOME notification settings
+  could not be read.
+
 ## Building from source
 
 The project is Go 1.26 with cgo bridging into AppKit, Quartz, IOKit, and
@@ -1334,6 +1375,13 @@ internal/macos/
   audiomute/          system audio mute and restore
   focus/              Do Not Disturb via the Shortcuts CLI
   permissions/        Accessibility, Input Monitoring, platform, secure-input gates
+internal/linux/
+  overlay/            GTK4 per-monitor shield
+  evdev/              EVIOCGRAB input lock + unlock matching + capture
+  inhibit/            idle / suspend inhibitor chain
+  audio/              wpctl / pactl mute and restore
+  notify/             GNOME notification banners (focus)
+  gnomekeys/          watch-mode GNOME custom shortcut
 internal/state/       teardown registry + runtime.json crash recovery
 internal/supervisor/  single-point shutdown fan-in
 ```

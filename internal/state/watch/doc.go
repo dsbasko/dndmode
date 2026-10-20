@@ -1,4 +1,4 @@
-//go:build darwin
+//go:build darwin || linux
 
 // Package watch owns the on-disk record of a background `dndmode --watch`
 // process — ~/.config/dndmode/watch.json — and the two questions asked of it:

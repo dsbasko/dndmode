@@ -1,4 +1,4 @@
-//go:build darwin
+//go:build darwin || linux
 
 // Package config loads and writes the dndmode YAML configuration. The
 // config schema in v1 is intentionally minimal (the unlock secret plus a
