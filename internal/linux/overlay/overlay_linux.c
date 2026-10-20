@@ -1,5 +1,6 @@
 #include <gtk/gtk.h>
 #include <pthread.h>
+#include <string.h>
 
 #include "overlay_linux.h"
 #include "_cgo_export.h"
@@ -8,7 +9,11 @@
 // items-changed in a row; the shield is rebuilt once they settle.
 #define MONITOR_DEBOUNCE_MS 250
 
+// Frame interval of animated styles (~30 FPS).
+#define ANIM_FRAME_MS 33
+
 static pthread_t ui_thread;
+static cairo_surface_t *dvd_mask;
 static GMainLoop *loop;
 static gulong monitors_handler;
 static guint debounce_source;
@@ -61,7 +66,68 @@ static gboolean refuse_close(GtkWindow *w, gpointer data) {
 	return TRUE;
 }
 
-void *overlay_window_create(int i, const char *startup_id) {
+// dvd animation attached to one window's drawing area.
+typedef struct {
+	GtkWidget *area;
+	uintptr_t handle; // Go-side state (cgo.Handle)
+	guint timer;
+	dvd_frame frame;
+} dvd_anim;
+
+static void dvd_draw(GtkDrawingArea *area, cairo_t *cr, int w, int h, gpointer data) {
+	(void)area;
+	(void)w;
+	(void)h;
+	dvd_anim *a = data;
+	cairo_set_source_rgb(cr, 0, 0, 0);
+	cairo_paint(cr);
+	if (dvd_mask == NULL || a->frame.w <= 0 || a->frame.h <= 0) {
+		return;
+	}
+	cairo_set_source_rgb(cr, a->frame.r, a->frame.g, a->frame.b);
+	cairo_translate(cr, a->frame.x, a->frame.y);
+	cairo_scale(cr, a->frame.w / cairo_image_surface_get_width(dvd_mask),
+		a->frame.h / cairo_image_surface_get_height(dvd_mask));
+	cairo_mask_surface(cr, dvd_mask, 0, 0);
+}
+
+static gboolean dvd_tick(gpointer data) {
+	dvd_anim *a = data;
+	int w = gtk_widget_get_width(a->area);
+	int h = gtk_widget_get_height(a->area);
+	goDVDTick(a->handle, (double)w, (double)h, &a->frame);
+	gtk_widget_queue_draw(a->area);
+	return G_SOURCE_CONTINUE;
+}
+
+// Stops the timer and hands the Go state back when the window goes away.
+static void dvd_destroy(GtkWidget *w, gpointer data) {
+	(void)w;
+	dvd_anim *a = data;
+	if (a->timer != 0) {
+		g_source_remove(a->timer);
+		a->timer = 0;
+	}
+	goDVDFree(a->handle);
+	g_free(a);
+}
+
+void overlay_set_dvd_mask(const unsigned char *alpha, int w, int h) {
+	if (dvd_mask != NULL) {
+		return;
+	}
+	cairo_surface_t *s = cairo_image_surface_create(CAIRO_FORMAT_A8, w, h);
+	int stride = cairo_image_surface_get_stride(s);
+	unsigned char *dst = cairo_image_surface_get_data(s);
+	cairo_surface_flush(s);
+	for (int y = 0; y < h; y++) {
+		memcpy(dst + (size_t)y * stride, alpha + (size_t)y * w, (size_t)w);
+	}
+	cairo_surface_mark_dirty(s);
+	dvd_mask = s;
+}
+
+void *overlay_window_create(int i, const char *startup_id, int style, uintptr_t anim) {
 	GListModel *mons = gdk_display_get_monitors(gdk_display_get_default());
 	GdkMonitor *mon = g_list_model_get_item(mons, (guint)i);
 	if (mon == NULL) {
@@ -73,6 +139,16 @@ void *overlay_window_create(int i, const char *startup_id) {
 	gtk_widget_add_css_class(w, "dndmode-shield");
 	gtk_widget_set_cursor_from_name(w, "none");
 	g_signal_connect(w, "close-request", G_CALLBACK(refuse_close), NULL);
+	if (style == OVERLAY_STYLE_DVD) {
+		dvd_anim *a = g_new0(dvd_anim, 1);
+		a->handle = anim;
+		a->area = gtk_drawing_area_new();
+		gtk_widget_set_cursor_from_name(a->area, "none");
+		gtk_drawing_area_set_draw_func(GTK_DRAWING_AREA(a->area), dvd_draw, a, NULL);
+		gtk_window_set_child(GTK_WINDOW(w), a->area);
+		a->timer = g_timeout_add(ANIM_FRAME_MS, dvd_tick, a);
+		g_signal_connect(w, "destroy", G_CALLBACK(dvd_destroy), a);
+	}
 	if (startup_id != NULL && startup_id[0] != '\0') {
 		gtk_window_set_startup_id(GTK_WINDOW(w), startup_id);
 	}

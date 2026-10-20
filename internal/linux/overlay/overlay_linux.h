@@ -24,9 +24,25 @@ int overlay_iterate(void);
 // Number of monitors currently attached.
 int overlay_monitor_count(void);
 
+// Shield styles.
+#define OVERLAY_STYLE_BLACK 0
+#define OVERLAY_STYLE_DVD   1
+
+// One animation frame of the dvd style, filled in by goDVDTick.
+typedef struct {
+	double x, y, w, h;
+	double r, g, b;
+} dvd_frame;
+
 // Creates a fullscreen shield window on monitor i. startup_id may be NULL.
+// For OVERLAY_STYLE_DVD, anim is the Go handle of the window's animation.
 // Returns NULL when the monitor has gone away.
-void *overlay_window_create(int i, const char *startup_id);
+void *overlay_window_create(int i, const char *startup_id, int style, uintptr_t anim);
+
+// Installs the dvd logo as an alpha mask (w*h bytes, 255 = paint). Called
+// once, before the first dvd window.
+void overlay_set_dvd_mask(const unsigned char *alpha, int w, int h);
+
 void overlay_window_destroy(void *w);
 
 // Starts / stops forwarding monitor changes (debounced) to
