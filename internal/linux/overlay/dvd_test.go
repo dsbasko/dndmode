@@ -2,7 +2,10 @@
 
 package overlay
 
-import "testing"
+import (
+	"math"
+	"testing"
+)
 
 // The cases are the macOS TestDVDView_Step_* ones (cocoa/dvdview_test.go),
 // so both implementations are pinned to the same behaviour: a 100x40 logo
@@ -14,9 +17,12 @@ const (
 	dvdTestBoundsH = 1000.0
 )
 
+// frame is one reference frame in seconds.
+const frame = 1.0 / animRefFPS
+
 func dvdStep(in dvdState) dvdState {
 	in.w, in.h, in.paletteN = dvdTestW, dvdTestH, len(dvdPalette)
-	in.step(dvdTestBoundsW, dvdTestBoundsH)
+	in.step(dvdTestBoundsW, dvdTestBoundsH, 1)
 	return in
 }
 
@@ -83,24 +89,24 @@ func TestDVD_Step_FlashDecaysWithoutCorner(t *testing.T) {
 // logo of the right proportions; later ticks move it.
 func TestDVDView_TickSeedsOnResize(t *testing.T) {
 	v := &dvdView{logoAspect: 470.0 / 270.0}
-	v.tick(0, 0) // not laid out yet: nothing happens
+	v.tick(0, 0, frame) // not laid out yet: nothing happens
 	if v.st.w != 0 {
 		t.Fatal("seeded before the widget had a size")
 	}
-	v.tick(1920, 1080)
+	v.tick(1920, 1080, frame)
 	if v.st.w != 1920*dvdLogoWidthFrac || v.st.x < 0 || v.st.x+v.st.w > 1920 || v.st.y < 0 || v.st.y+v.st.h > 1080 {
 		t.Fatalf("seed = %+v", v.st)
 	}
 	x := v.st.x
-	v.tick(1920, 1080)
+	v.tick(1920, 1080, frame)
 	if v.st.x == x {
 		t.Error("logo did not move on the second tick")
 	}
-	v.tick(640, 480)
+	v.tick(640, 480, frame)
 	if want := max(dvdMinLogoWidth, 640*dvdLogoWidthFrac); v.st.w != want {
 		t.Errorf("resize logo width = %g, want %g", v.st.w, want)
 	}
-	v.tick(300, 200) // small monitor: the width floor applies
+	v.tick(300, 200, frame) // small monitor: the width floor applies
 	if v.st.w != dvdMinLogoWidth {
 		t.Errorf("small-monitor logo width = %g, want %g", v.st.w, dvdMinLogoWidth)
 	}
@@ -126,5 +132,25 @@ func TestDVDLogoAlpha(t *testing.T) {
 	}
 	if painted < len(alpha)/10 {
 		t.Errorf("only %d of %d pixels painted", painted, len(alpha))
+	}
+}
+
+// TestAnimFrames_RateIndependent: one second covers the same distance at 30,
+// 60 and 144 Hz, and a long stall is capped instead of jumping.
+func TestAnimFrames_RateIndependent(t *testing.T) {
+	for _, hz := range []float64{30, 60, 144} {
+		s := dvdState{x: 100, y: 500, vx: dvdSpeed, vy: 0, w: dvdTestW, h: dvdTestH, paletteN: 8}
+		for range int(hz) {
+			s.step(dvdTestBoundsW, dvdTestBoundsH, animFrames(1/hz))
+		}
+		if want := 100 + dvdSpeed*animRefFPS; math.Abs(s.x-want) > 1e-6 {
+			t.Errorf("%g Hz: x after 1 s = %g, want %g", hz, s.x, want)
+		}
+	}
+	if got := animFrames(5); got != animMaxDt*animRefFPS {
+		t.Errorf("5 s stall = %g frames, want capped at %g", got, animMaxDt*animRefFPS)
+	}
+	if animFrames(-1) != 0 {
+		t.Error("negative dt must not move anything")
 	}
 }

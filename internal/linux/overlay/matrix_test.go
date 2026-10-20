@@ -17,11 +17,11 @@ func TestMatrixGlyphs_Alphabet(t *testing.T) {
 // column's cells fill the height, and every glyph is a valid index.
 func TestMatrixRain_ResizeCoversWidth(t *testing.T) {
 	m := &matrixRain{}
-	m.tick(0, 0)
+	m.tick(0, 0, frame)
 	if len(m.cols) != 0 {
 		t.Fatal("columns built before the widget had a size")
 	}
-	m.tick(1920, 1080)
+	m.tick(1920, 1080, frame)
 	if len(m.cols) == 0 {
 		t.Fatal("no columns")
 	}
@@ -57,13 +57,13 @@ func TestMatrixRain_ResizeCoversWidth(t *testing.T) {
 // bottom starts again above the top.
 func TestMatrixRain_StepMovesHeadAndRespawns(t *testing.T) {
 	m := &matrixRain{}
-	m.tick(800, 600)
+	m.tick(800, 600, frame)
 	c := &m.cols[0]
 	c.head, c.speed, c.trail = 2.9, 0.4, 10
 	for r := range c.glyphs {
 		c.glyphs[r] = -1 // sentinel: not yet written
 	}
-	m.step()
+	m.step(1)
 	if c.head != 3.3 {
 		t.Errorf("head = %g, want 3.3", c.head)
 	}
@@ -75,7 +75,7 @@ func TestMatrixRain_StepMovesHeadAndRespawns(t *testing.T) {
 	}
 
 	c.head = float64(c.rows) + c.trail - 0.1
-	m.step()
+	m.step(1)
 	if c.head > 0 {
 		t.Errorf("column did not respawn above the top: head %g", c.head)
 	}
@@ -86,7 +86,7 @@ func TestMatrixRain_StepMovesHeadAndRespawns(t *testing.T) {
 // outside the column's rows.
 func TestMatrixRain_LitFadesFromHead(t *testing.T) {
 	m := &matrixRain{}
-	m.tick(800, 600)
+	m.tick(800, 600, frame)
 	m.cols = m.cols[:1]
 	c := &m.cols[0]
 	c.head, c.trail, c.alpha, c.hue = 10.2, 8, 1, 0

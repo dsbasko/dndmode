@@ -51,7 +51,7 @@ type matrixColumn struct {
 	hue    int     // index into matrixPalette
 	alpha  float64 // opacity multiplier, 0.45..1
 	head   float64 // head position in cells (fractional; negative = above the top)
-	speed  float64 // cells per frame, 0.12..0.40
+	speed  float64 // cells per reference frame, 0.12..0.40
 	trail  float64 // trail length in cells, 8..20
 	rows   int
 	glyphs []int // stable glyph per cell
@@ -104,13 +104,14 @@ func (m *matrixRain) resize(boundsW, boundsH float64) {
 	}
 }
 
-// step slides every head; the head writes a fresh glyph into each cell it
-// enters, and a column respawns once its whole trail has left the bottom.
-func (m *matrixRain) step() {
+// step slides every head by frames reference frames; the head writes a
+// fresh glyph into each cell it enters, and a column respawns once its
+// whole trail has left the bottom.
+func (m *matrixRain) step(frames float64) {
 	for i := range m.cols {
 		c := &m.cols[i]
 		prev := int(math.Floor(c.head))
-		c.head += c.speed
+		c.head += c.speed * frames
 		if c.head-c.trail > float64(c.rows) {
 			c.respawn()
 			continue
@@ -124,8 +125,8 @@ func (m *matrixRain) step() {
 	}
 }
 
-// tick advances one frame for a widget of the given size.
-func (m *matrixRain) tick(boundsW, boundsH float64) {
+// tick advances by dt seconds for a widget of the given size.
+func (m *matrixRain) tick(boundsW, boundsH, dt float64) {
 	if boundsW <= 0 || boundsH <= 0 {
 		return
 	}
@@ -133,7 +134,7 @@ func (m *matrixRain) tick(boundsW, boundsH float64) {
 		m.resize(boundsW, boundsH)
 		return
 	}
-	m.step()
+	m.step(animFrames(dt))
 }
 
 // matrixCell is one glyph to draw.

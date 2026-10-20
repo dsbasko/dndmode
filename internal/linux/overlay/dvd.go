@@ -18,11 +18,10 @@ import (
 // speed, size and physics. Cosmetic only; the shield stays opaque.
 
 const (
-	dvdFrameMs       = 33   // ~30 FPS
 	dvdLogoWidthFrac = 0.16 // logo width as a fraction of the monitor width
 	dvdMinLogoWidth  = 80.0 // floor so small monitors stay legible
-	dvdSpeed         = 2.5  // pixels per frame (~75 px/s)
-	dvdFlashDecay    = 0.08 // per-frame corner-flash fade (~0.4 s to zero)
+	dvdSpeed         = 2.5  // pixels per reference frame (~75 px/s)
+	dvdFlashDecay    = 0.08 // corner-flash fade per reference frame (~0.4 s to zero)
 )
 
 // dvdRGB is a palette colour, components in 0..1.
@@ -85,11 +84,13 @@ type dvdState struct {
 	flash    float64 // 0..1, 1 = just hit a corner
 }
 
-// step advances one frame: move, clamp and reflect off each edge, advance
-// the colour on any bounce, arm the flash when both axes bounce at once.
-func (s *dvdState) step(boundsW, boundsH float64) {
-	s.x += s.vx
-	s.y += s.vy
+// step advances by frames reference frames (1 = one macOS frame at 30 FPS;
+// fractional at higher refresh rates): move, clamp and reflect off each
+// edge, advance the colour on any bounce, arm the flash when both axes
+// bounce at once.
+func (s *dvdState) step(boundsW, boundsH, frames float64) {
+	s.x += s.vx * frames
+	s.y += s.vy * frames
 
 	bounceX, bounceY := false, false
 	if s.x < 0 {
@@ -117,7 +118,7 @@ func (s *dvdState) step(boundsW, boundsH float64) {
 	if bounceX && bounceY {
 		s.flash = 1
 	} else if s.flash > 0 {
-		s.flash = max(s.flash-dvdFlashDecay, 0)
+		s.flash = max(s.flash-dvdFlashDecay*frames, 0)
 	}
 }
 
@@ -157,8 +158,8 @@ func (v *dvdView) resize(boundsW, boundsH float64) {
 	v.st.flash = 0
 }
 
-// tick advances one frame for a widget of the given size.
-func (v *dvdView) tick(boundsW, boundsH float64) {
+// tick advances by dt seconds for a widget of the given size.
+func (v *dvdView) tick(boundsW, boundsH, dt float64) {
 	if boundsW <= 0 || boundsH <= 0 {
 		return
 	}
@@ -166,5 +167,20 @@ func (v *dvdView) tick(boundsW, boundsH float64) {
 		v.resize(boundsW, boundsH)
 		return
 	}
-	v.st.step(boundsW, boundsH)
+	v.st.step(boundsW, boundsH, animFrames(dt))
+}
+
+// animRefFPS is the frame rate the macOS speeds are expressed in. Linux
+// draws on every display refresh (60 Hz and up) and scales the motion by
+// the time that actually passed, so speeds stay identical and only the
+// steps get finer.
+const animRefFPS = 30
+
+// animMaxDt caps one step, so a stall (suspend, a busy compositor) does
+// not make the logo or the rain jump across the screen.
+const animMaxDt = 0.1
+
+// animFrames converts elapsed seconds into reference frames.
+func animFrames(dt float64) float64 {
+	return min(max(dt, 0), animMaxDt) * animRefFPS
 }

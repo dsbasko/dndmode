@@ -10,8 +10,6 @@
 // items-changed in a row; the shield is rebuilt once they settle.
 #define MONITOR_DEBOUNCE_MS 250
 
-// Frame interval of animated styles (~30 FPS).
-#define ANIM_FRAME_MS 33
 
 static pthread_t ui_thread;
 static GMainLoop *loop;
@@ -66,13 +64,16 @@ static gboolean refuse_close(GtkWindow *w, gpointer data) {
 	return TRUE;
 }
 
-// An animated style attached to one window: a drawing area repainted on a
-// timer. Everything style-specific lives on the Go side behind handle; C
-// only owns the widget, the timer and the drawing primitives below.
+// An animated style attached to one window: a drawing area advanced and
+// repainted on every frame of the GTK frame clock, i.e. in step with the
+// display refresh rather than on a free-running timer that drifts against
+// it and judders. Everything style-specific lives on the Go side behind
+// handle; C only owns the widget, the tick and the drawing primitives below.
 typedef struct {
 	GtkWidget *area;
-	uintptr_t handle; // Go-side animation (cgo.Handle)
-	guint timer;
+	uintptr_t handle;  // Go-side animation (cgo.Handle)
+	guint tick;        // tick callback id
+	gint64 last_frame; // frame time of the previous tick, microseconds
 } anim;
 
 static void anim_draw(GtkDrawingArea *area, cairo_t *cr, int w, int h, gpointer data) {
@@ -85,20 +86,23 @@ static void anim_draw(GtkDrawingArea *area, cairo_t *cr, int w, int h, gpointer 
 	goAnimDraw(a->handle, cr);
 }
 
-static gboolean anim_tick(gpointer data) {
+static gboolean anim_tick(GtkWidget *area, GdkFrameClock *clock, gpointer data) {
 	anim *a = data;
-	goAnimTick(a->handle, (double)gtk_widget_get_width(a->area), (double)gtk_widget_get_height(a->area));
-	gtk_widget_queue_draw(a->area);
+	gint64 now = gdk_frame_clock_get_frame_time(clock);
+	double dt = a->last_frame == 0 ? 0.0 : (double)(now - a->last_frame) / G_USEC_PER_SEC;
+	a->last_frame = now;
+	goAnimTick(a->handle, (double)gtk_widget_get_width(area), (double)gtk_widget_get_height(area), dt);
+	gtk_widget_queue_draw(area);
 	return G_SOURCE_CONTINUE;
 }
 
-// Stops the timer and hands the Go state back when the window goes away.
-static void anim_destroy(GtkWidget *w, gpointer data) {
-	(void)w;
+// Stops the ticks and hands the Go state back when the drawing area goes
+// away (it is destroyed with its window).
+static void anim_destroy(GtkWidget *area, gpointer data) {
 	anim *a = data;
-	if (a->timer != 0) {
-		g_source_remove(a->timer);
-		a->timer = 0;
+	if (a->tick != 0) {
+		gtk_widget_remove_tick_callback(area, a->tick);
+		a->tick = 0;
 	}
 	goAnimFree(a->handle);
 	g_free(a);
@@ -214,8 +218,10 @@ void *overlay_window_create(int i, const char *startup_id, uintptr_t animation) 
 		gtk_widget_set_cursor_from_name(a->area, "none");
 		gtk_drawing_area_set_draw_func(GTK_DRAWING_AREA(a->area), anim_draw, a, NULL);
 		gtk_window_set_child(GTK_WINDOW(w), a->area);
-		a->timer = g_timeout_add(ANIM_FRAME_MS, anim_tick, a);
-		g_signal_connect(w, "destroy", G_CALLBACK(anim_destroy), a);
+		a->tick = gtk_widget_add_tick_callback(a->area, anim_tick, a, NULL);
+		// On the area, not the window: GTK destroys the child before the
+		// window's own destroy signal runs, so by then a->area is gone.
+		g_signal_connect(a->area, "destroy", G_CALLBACK(anim_destroy), a);
 	}
 	if (startup_id != NULL && startup_id[0] != '\0') {
 		gtk_window_set_startup_id(GTK_WINDOW(w), startup_id);

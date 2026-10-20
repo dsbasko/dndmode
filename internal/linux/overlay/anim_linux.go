@@ -16,11 +16,12 @@ import (
 )
 
 // animation is the Go side of an animated shield window. C owns the widget
-// and a ~30 FPS timer; each tick calls tick with the widget size, each
-// repaint calls draw on an already black-filled cairo context. UI thread
-// only.
+// and drives it from the GTK frame clock (once per display refresh); each
+// frame calls tick with the widget size and the seconds since the previous
+// frame, each repaint calls draw on an already black-filled cairo context.
+// UI thread only.
 type animation interface {
-	tick(w, h float64)
+	tick(w, h, dt float64)
 	draw(cr *C.cairo_t)
 }
 
@@ -41,8 +42,8 @@ func newAnimation(style string, log *slog.Logger) animation {
 }
 
 //export goAnimTick
-func goAnimTick(h C.uintptr_t, w, ht C.double) {
-	cgo.Handle(h).Value().(animation).tick(float64(w), float64(ht))
+func goAnimTick(h C.uintptr_t, w, ht, dt C.double) {
+	cgo.Handle(h).Value().(animation).tick(float64(w), float64(ht), float64(dt))
 }
 
 //export goAnimDraw
