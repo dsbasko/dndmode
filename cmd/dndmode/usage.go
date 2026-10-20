@@ -30,7 +30,7 @@ Usage:
   dndmode --set-password     capture a new unlock code and store it hashed in the config
 
 Flags (per run; omitted = the config value):
-  --style <look>    black | matrix | terminal[:<lang>] | dvd | gold |
+  --style <look>    black | matrix | terminal[:<lang>] | dvd | gold | bamboo |
                     glass[:radius] | none;
                     <lang> = go|python|typescript|rust|ys|sql|psql|mysql|oracle|
                              varaq|elvish

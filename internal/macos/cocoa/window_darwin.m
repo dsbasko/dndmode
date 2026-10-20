@@ -11,6 +11,7 @@
 #import "terminalview_darwin.h"  // @interface TerminalView (same separate-TU rule as MatrixView above)
 #import "dvdview_darwin.h"  // @interface DVDView (same separate-TU rule as MatrixView above)
 #import "goldview_darwin.h"  // @interface GoldView (same separate-TU rule as MatrixView above)
+#import "bambooview_darwin.h"  // @interface BambooView (same separate-TU rule as MatrixView above)
 
 // kGlassBlurRadius is the Gaussian blur radius (in points) for the "glass" style.
 // The overlay grabs a ONE-SHOT screenshot of the desktop (ScreenCaptureKit) and
@@ -149,13 +150,14 @@ static NSImage *captureBlurredDesktopImage(uint32_t displayID, NSScreen *target,
 // corpus + highlighting; "dvd" installs a DVDView (a "DVD VIDEO" logo bouncing
 // edge-to-edge, recoloring on each bounce) over the same opaque black base;
 // "gold" installs a GoldView (a candlestick chart of a climbing synthetic gold
-// price) over the same opaque black base;
+// price) over the same opaque black base; "bamboo" installs a BambooView (a
+// pixel-art night walk through a bamboo forest) over the same opaque black base;
 // "glass" (QUICK-glass) shows a STATIC,
 // tunable-radius CIGaussianBlur of a one-shot ScreenCaptureKit screenshot of the
 // desktop (frosted glass — the ONLY non-opaque style; falls back to
 // NSVisualEffectView frost if Screen Recording is not granted or the capture
 // fails); for "black", NULL, or anything else the plain
-// opaque-black path is untouched. black + matrix + terminal + dvd + gold keep setOpaque:YES
+// opaque-black path is untouched. black + matrix + terminal + dvd + gold + bamboo keep setOpaque:YES
 // (T-gh8-03 no bleed-through); glass deliberately relaxes that for the look while
 // input stays blocked.
 //
@@ -324,6 +326,16 @@ void* cocoa_create_overlay_window(uint32_t displayID, const char* style,
             GoldView *gv = [[GoldView alloc] initWithFrame:[[w contentView] bounds]];
             [gv setAutoresizingMask:(NSViewWidthSizable | NSViewHeightSizable)];
             [w setContentView:gv];
+        // bamboo swaps in a night-forest-walk contentView over the SAME opaque
+        // black base (opaque BambooView layer on top, never transparent) — same
+        // T-gh8-03 no-bleed-through guarantee as matrix/terminal/dvd/gold. One
+        // BambooView per display, each seeded on its own, so every screen walks
+        // through its own forest. BambooView's @interface comes from
+        // bambooview_darwin.h.
+        } else if (style != NULL && strcmp(style, "bamboo") == 0) {
+            BambooView *bv = [[BambooView alloc] initWithFrame:[[w contentView] bounds]];
+            [bv setAutoresizingMask:(NSViewWidthSizable | NSViewHeightSizable)];
+            [w setContentView:bv];
         }
     }
 

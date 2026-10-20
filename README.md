@@ -38,7 +38,7 @@ brew upgrade dndmode               # update to the latest release
 
 The [project site](https://dsbasko.github.io/dndmode/) covers the same ground in a
 browser, in English and Russian: what the shield looks like, how watch mode works,
-and all seven overlay styles.
+and all eight overlay styles.
 
 ---
 
@@ -327,7 +327,7 @@ when omitted.
 
 | Flag | Values | Default | Effect |
 | --- | --- | --- | --- |
-| `--style` | `black` \| `matrix` \| `terminal`[`:go`\|`python`\|`typescript`\|`rust`\|`ys`\|`sql`\|`psql`\|`mysql`\|`oracle`\|`varaq`\|`elvish`] \| `dvd` \| `gold` \| `glass`[`:radius`] \| `none` | config | Overlay look for this run; wins over `overlay_style`. `terminal:<lang>` picks the source language (default `go`). |
+| `--style` | `black` \| `matrix` \| `terminal`[`:go`\|`python`\|`typescript`\|`rust`\|`ys`\|`sql`\|`psql`\|`mysql`\|`oracle`\|`varaq`\|`elvish`] \| `dvd` \| `gold` \| `bamboo` \| `glass`[`:radius`] \| `none` | config | Overlay look for this run; wins over `overlay_style`. `terminal:<lang>` picks the source language (default `go`). |
 | `--mute` | `true` \| `false` | config | Mute system audio for this run. |
 | `--focus` | `true` \| `false` | config | Toggle Do Not Disturb for this run. |
 | `--timer` | Go duration (`30m`, `1h30m`, `90s`) | off | Auto-unlock after the duration, then exit `0`. |
@@ -566,6 +566,10 @@ unlock_code: Ctrl+Option+Cmd+X
 #            coins rain down behind it. The price is synthetic, made up on the
 #            fly. Cosmetic only; opaque, every blocking guarantee is
 #            identical to black.
+#   bamboo : a night walk through a dim bamboo forest lit only by the
+#            moon, pixel art in parallax layers, with mist, drifting leaves,
+#            a few fireflies and a panda wandering far off. Cosmetic only;
+#            opaque, every blocking guarantee is identical to black.
 #   glass  : TRANSPARENT frosted glass — the blurred desktop shows through.
 #            Trades the no-bleed-through guarantee for the look; keyboard and
 #            trackpad are still fully blocked. Blur strength = glass_blur below.
@@ -956,6 +960,7 @@ off (see [Known limitations](#known-limitations)).
 | `terminal` | Syntax-highlighted source code that types itself out and scrolls up, over an opaque black shield. Cosmetic. | No | Yes |
 | `dvd` | A "DVD VIDEO" logo bounces around an opaque black shield, changing color on every edge hit. Cosmetic. | No | Yes |
 | `gold` | A candlestick chart of a gold price climbing steadily, with pixel-art gold coins falling behind it, over an opaque black shield. Cosmetic. | No | Yes |
+| `bamboo` | A dim pixel-art walk through a moonlit bamboo forest, in parallax layers, with a panda wandering far off, over an opaque black shield. Cosmetic. | No | Yes |
 | `glass` | Frosted `NSVisualEffectView`; the blurred desktop shows through. | Yes, by design | Yes |
 | `none` | No overlay. Awake-only mode - see below. | n/a | No |
 
@@ -1045,6 +1050,23 @@ the starting price after 12 hours. Like `dvd`, it is a purely cosmetic content
 swap on top of the same opaque black shield, so every blocking guarantee is
 identical to `black`, and the animation is ambient - it never reacts to input.
 There are no knobs: `dndmode --style gold` (or `overlay_style: gold`).
+
+**`bamboo`.** A night walk through a bamboo forest, in pixel art. The camera
+walks to the right, so the forest slides left in five parallax layers: the far
+ones small, dim and lost in fog, the nearer ones bigger and faster, with a few
+dark culms passing right in front of you. The scene is dark on purpose: the
+moon is its only light, mist lies at the foot of the far layers, leaves drift
+down, a few fireflies blink low over the ground, and far off a panda wanders
+through the culms, now walking, now stopping to look around or sitting down to
+chew on a stalk. The forest is generated from a seed as you walk, so it never
+runs out or repeats, and every display walks through its own. The sprites are
+pixel art compiled into the binary as text grids, scaled only by whole numbers,
+so the pixels stay sharp. The walk runs at 15 frames a second, and a frame is
+drawn at art resolution and scaled up by the compositor, which keeps the style
+cheap: a few ms a frame on a Retina laptop. Like `dvd`, it is a purely cosmetic
+content swap on top of the same opaque black shield, so every blocking guarantee
+is identical to `black`, and the animation is ambient - it never reacts to
+input. There are no knobs: `dndmode --style bamboo` (or `overlay_style: bamboo`).
 
 **Awake-only mode (`none`).** `overlay_style: none` (or `dndmode --style none`) turns
 dndmode into a thin [`caffeinate(8)`](https://ss64.com/mac/caffeinate.html) wrapper.

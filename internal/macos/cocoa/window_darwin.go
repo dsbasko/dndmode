@@ -4,7 +4,7 @@ package cocoa
 
 /*
 #cgo CFLAGS: -x objective-c -fobjc-arc -mmacosx-version-min=14.0 -Wno-deprecated-declarations
-#cgo LDFLAGS: -framework Cocoa -framework QuartzCore -framework CoreGraphics -framework Foundation -framework ApplicationServices -framework ScreenCaptureKit -framework CoreImage
+#cgo LDFLAGS: -framework Cocoa -framework QuartzCore -framework CoreGraphics -framework Foundation -framework ApplicationServices -framework ScreenCaptureKit -framework CoreImage -framework IOSurface
 
 #include <stdint.h>
 #include <stdlib.h>
