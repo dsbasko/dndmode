@@ -15,8 +15,9 @@ import (
 // stationary glyphs. Columns differ in glyph size, shade and opacity for
 // depth. Cosmetic only; the shield stays opaque.
 
-// matrixSizes are the per-column glyph sizes (pixels), varied for depth.
-var matrixSizes = []float64{24, 34, 46}
+// matrixSizes are the per-column glyph sizes (pixels), varied for depth;
+// about a third smaller than the macOS 24/34/46 points.
+var matrixSizes = []float64{16, 22, 30}
 
 const (
 	matrixCellHFactor = 1.18 // vertical advance, as a multiple of the size
