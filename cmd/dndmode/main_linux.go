@@ -12,7 +12,7 @@
 //	focus       GNOME show-banners                (internal/linux/notify)
 //	watch key   GNOME custom shortcut + SIGUSR1   (internal/linux/gnomekeys)
 //
-// Only overlay_style black, dvd and none are available.
+// Only overlay_style black, dvd, matrix and none are available.
 package main
 
 import (
@@ -196,7 +196,7 @@ func run() int {
 		if styleSource == "flag" {
 			_, _ = fmt.Fprintf(errW, "dndmode: invalid --style %q: %v.\n", overlayStyle, err)
 		} else {
-			_, _ = fmt.Fprintf(errW, "dndmode: invalid overlay_style %q: %v. Fix overlay_style in %s (valid on Linux: black, dvd, none).\n", overlayStyle, err, cfgPath)
+			_, _ = fmt.Fprintf(errW, "dndmode: invalid overlay_style %q: %v. Fix overlay_style in %s (valid on Linux: black, dvd, matrix, none).\n", overlayStyle, err, cfgPath)
 		}
 		return exitConfigErr
 	}
@@ -206,7 +206,7 @@ func run() int {
 		if styleSource == "flag" {
 			src = "--style"
 		}
-		_, _ = fmt.Fprintf(errW, "dndmode: overlay style %q is not available on Linux (use black, dvd or none). Fix %s.\n", overlayStyle, src)
+		_, _ = fmt.Fprintf(errW, "dndmode: overlay style %q is not available on Linux (use black, dvd, matrix or none). Fix %s.\n", overlayStyle, src)
 		return exitConfigErr
 	}
 

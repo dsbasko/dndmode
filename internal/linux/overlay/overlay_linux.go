@@ -12,7 +12,8 @@
 // the UI thread (the main goroutine, pinned to thread 0 by runtimepin);
 // other goroutines reach it through DispatchMain.
 //
-// overlay_style black and dvd are implemented on Linux (dvd.go).
+// overlay_style black, dvd (dvd.go) and matrix (matrix.go) are implemented
+// on Linux; anim_linux.go connects the animated ones to GTK.
 package overlay
 
 /*
@@ -174,7 +175,7 @@ type Controller struct {
 }
 
 // Styles lists the overlay styles this package draws.
-var Styles = []string{"black", "dvd"}
+var Styles = []string{"black", "dvd", "matrix"}
 
 // NewController returns a controller with no windows yet. style is one of
 // Styles; anything else draws black. startupID is an xdg-activation token
@@ -187,42 +188,6 @@ func NewController(style, startupID string, log *slog.Logger) *Controller {
 	}
 	return &Controller{log: log, style: style, startupID: startupID}
 }
-
-var (
-	dvdMaskOnce   sync.Once
-	dvdMaskOK     bool
-	dvdLogoAspect float64
-)
-
-// loadDVDMask hands the decoded logo to C once per process. UI thread only.
-func loadDVDMask(log *slog.Logger) bool {
-	dvdMaskOnce.Do(func() {
-		alpha, w, h, err := dvdLogoAlpha()
-		if err != nil {
-			log.Warn("dvd logo unusable, drawing a plain black shield", slog.Any("err", err))
-			return
-		}
-		C.overlay_set_dvd_mask((*C.uchar)(unsafe.Pointer(&alpha[0])), C.int(w), C.int(h))
-		dvdLogoAspect = float64(w) / float64(h)
-		dvdMaskOK = true
-	})
-	return dvdMaskOK
-}
-
-//export goDVDTick
-func goDVDTick(h C.uintptr_t, boundsW, boundsH C.double, out *C.dvd_frame) {
-	v := cgo.Handle(h).Value().(*dvdView)
-	v.tick(float64(boundsW), float64(boundsH))
-	c := v.st.color()
-	*out = C.dvd_frame{
-		x: C.double(v.st.x), y: C.double(v.st.y),
-		w: C.double(v.st.w), h: C.double(v.st.h),
-		r: C.double(c.r), g: C.double(c.g), b: C.double(c.b),
-	}
-}
-
-//export goDVDFree
-func goDVDFree(h C.uintptr_t) { cgo.Handle(h).Delete() }
 
 // Name implements state.Releaser.
 func (c *Controller) Name() string { return "windows" }
@@ -251,21 +216,18 @@ func (c *Controller) build() {
 		sid = C.CString(c.startupID)
 		defer C.free(unsafe.Pointer(sid))
 	}
-	style := C.int(C.OVERLAY_STYLE_BLACK)
-	if c.style == "dvd" && loadDVDMask(c.log) {
-		style = C.OVERLAY_STYLE_DVD
-	}
 	n := int(C.overlay_monitor_count())
 	for i := range n {
-		// Each monitor gets its own logo on its own path.
-		var anim cgo.Handle
-		if style == C.OVERLAY_STYLE_DVD {
-			anim = cgo.NewHandle(&dvdView{logoAspect: dvdLogoAspect})
+		// Each monitor gets its own animation state, so logos and rain
+		// move independently per screen.
+		var h cgo.Handle
+		if a := newAnimation(c.style, c.log); a != nil {
+			h = cgo.NewHandle(a)
 		}
-		w := C.overlay_window_create(C.int(i), sid, style, C.uintptr_t(anim))
+		w := C.overlay_window_create(C.int(i), sid, C.uintptr_t(h))
 		if w == nil {
-			if anim != 0 {
-				anim.Delete()
+			if h != 0 {
+				h.Delete()
 			}
 			continue
 		}

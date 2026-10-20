@@ -1,4 +1,5 @@
 #include <gtk/gtk.h>
+#include <pango/pangocairo.h>
 #include <pthread.h>
 #include <string.h>
 
@@ -13,7 +14,6 @@
 #define ANIM_FRAME_MS 33
 
 static pthread_t ui_thread;
-static cairo_surface_t *dvd_mask;
 static GMainLoop *loop;
 static gulong monitors_handler;
 static guint debounce_source;
@@ -66,51 +66,62 @@ static gboolean refuse_close(GtkWindow *w, gpointer data) {
 	return TRUE;
 }
 
-// dvd animation attached to one window's drawing area.
+// An animated style attached to one window: a drawing area repainted on a
+// timer. Everything style-specific lives on the Go side behind handle; C
+// only owns the widget, the timer and the drawing primitives below.
 typedef struct {
 	GtkWidget *area;
-	uintptr_t handle; // Go-side state (cgo.Handle)
+	uintptr_t handle; // Go-side animation (cgo.Handle)
 	guint timer;
-	dvd_frame frame;
-} dvd_anim;
+} anim;
 
-static void dvd_draw(GtkDrawingArea *area, cairo_t *cr, int w, int h, gpointer data) {
+static void anim_draw(GtkDrawingArea *area, cairo_t *cr, int w, int h, gpointer data) {
 	(void)area;
 	(void)w;
 	(void)h;
-	dvd_anim *a = data;
+	anim *a = data;
 	cairo_set_source_rgb(cr, 0, 0, 0);
 	cairo_paint(cr);
-	if (dvd_mask == NULL || a->frame.w <= 0 || a->frame.h <= 0) {
-		return;
-	}
-	cairo_set_source_rgb(cr, a->frame.r, a->frame.g, a->frame.b);
-	cairo_translate(cr, a->frame.x, a->frame.y);
-	cairo_scale(cr, a->frame.w / cairo_image_surface_get_width(dvd_mask),
-		a->frame.h / cairo_image_surface_get_height(dvd_mask));
-	cairo_mask_surface(cr, dvd_mask, 0, 0);
+	goAnimDraw(a->handle, cr);
 }
 
-static gboolean dvd_tick(gpointer data) {
-	dvd_anim *a = data;
-	int w = gtk_widget_get_width(a->area);
-	int h = gtk_widget_get_height(a->area);
-	goDVDTick(a->handle, (double)w, (double)h, &a->frame);
+static gboolean anim_tick(gpointer data) {
+	anim *a = data;
+	goAnimTick(a->handle, (double)gtk_widget_get_width(a->area), (double)gtk_widget_get_height(a->area));
 	gtk_widget_queue_draw(a->area);
 	return G_SOURCE_CONTINUE;
 }
 
 // Stops the timer and hands the Go state back when the window goes away.
-static void dvd_destroy(GtkWidget *w, gpointer data) {
+static void anim_destroy(GtkWidget *w, gpointer data) {
 	(void)w;
-	dvd_anim *a = data;
+	anim *a = data;
 	if (a->timer != 0) {
 		g_source_remove(a->timer);
 		a->timer = 0;
 	}
-	goDVDFree(a->handle);
+	goAnimFree(a->handle);
 	g_free(a);
 }
+
+// stencil paints the current source colour through an A8 mask, scaled into
+// the box (x, y, w, h).
+static void stencil(cairo_t *cr, cairo_surface_t *mask, double x, double y, double w, double h,
+	double r, double g, double b) {
+	cairo_save(cr);
+	cairo_set_source_rgb(cr, r, g, b);
+	cairo_translate(cr, x, y);
+	double sx, sy;
+	cairo_surface_get_device_scale(mask, &sx, &sy);
+	cairo_scale(cr, w / (cairo_image_surface_get_width(mask) / sx),
+		h / (cairo_image_surface_get_height(mask) / sy));
+	cairo_mask_surface(cr, mask, 0, 0);
+	cairo_restore(cr);
+}
+
+// --- dvd ----------------------------------------------------------------
+
+static cairo_surface_t *dvd_mask;
 
 void overlay_set_dvd_mask(const unsigned char *alpha, int w, int h) {
 	if (dvd_mask != NULL) {
@@ -127,7 +138,64 @@ void overlay_set_dvd_mask(const unsigned char *alpha, int w, int h) {
 	dvd_mask = s;
 }
 
-void *overlay_window_create(int i, const char *startup_id, int style, uintptr_t anim) {
+void overlay_dvd_draw(cairo_t *cr, double x, double y, double w, double h, double r, double g, double b) {
+	if (dvd_mask != NULL && w > 0 && h > 0) {
+		stencil(cr, dvd_mask, x, y, w, h, r, g, b);
+	}
+}
+
+// --- matrix -------------------------------------------------------------
+
+// Glyph atlas: every glyph pre-rendered once per size as an A8 mask, then
+// recoloured per frame with stencil — no text layout in the frame loop.
+// Rendered at 2x so it stays crisp on HiDPI monitors.
+#define ATLAS_SCALE 2
+
+static cairo_surface_t **atlas;
+static int atlas_sizes, atlas_glyphs;
+
+int overlay_matrix_atlas(const double *sizes, int nsizes, const char *const *glyphs, int nglyphs) {
+	if (atlas != NULL) {
+		return 0;
+	}
+	cairo_surface_t **a = g_new0(cairo_surface_t *, (gsize)nsizes * nglyphs);
+	for (int s = 0; s < nsizes; s++) {
+		PangoFontDescription *fd = pango_font_description_from_string("Monospace Medium");
+		pango_font_description_set_absolute_size(fd, sizes[s] * ATLAS_SCALE * PANGO_SCALE);
+		int cw = (int)(sizes[s] * ATLAS_SCALE * 1.2) + 1;
+		int ch = (int)(sizes[s] * ATLAS_SCALE * 1.4) + 1;
+		for (int g = 0; g < nglyphs; g++) {
+			cairo_surface_t *m = cairo_image_surface_create(CAIRO_FORMAT_A8, cw, ch);
+			cairo_t *cr = cairo_create(m);
+			PangoLayout *l = pango_cairo_create_layout(cr);
+			pango_layout_set_font_description(l, fd);
+			pango_layout_set_text(l, glyphs[g], -1);
+			pango_cairo_show_layout(cr, l);
+			g_object_unref(l);
+			cairo_destroy(cr);
+			cairo_surface_set_device_scale(m, ATLAS_SCALE, ATLAS_SCALE);
+			a[s * nglyphs + g] = m;
+		}
+		pango_font_description_free(fd);
+	}
+	atlas = a;
+	atlas_sizes = nsizes;
+	atlas_glyphs = nglyphs;
+	return 0;
+}
+
+void overlay_matrix_glyph(cairo_t *cr, int size, int glyph, double x, double y, double r, double g, double b) {
+	if (atlas == NULL || size < 0 || size >= atlas_sizes || glyph < 0 || glyph >= atlas_glyphs) {
+		return;
+	}
+	cairo_surface_t *m = atlas[size * atlas_glyphs + glyph];
+	cairo_save(cr);
+	cairo_set_source_rgb(cr, r, g, b);
+	cairo_mask_surface(cr, m, x, y);
+	cairo_restore(cr);
+}
+
+void *overlay_window_create(int i, const char *startup_id, uintptr_t animation) {
 	GListModel *mons = gdk_display_get_monitors(gdk_display_get_default());
 	GdkMonitor *mon = g_list_model_get_item(mons, (guint)i);
 	if (mon == NULL) {
@@ -139,15 +207,15 @@ void *overlay_window_create(int i, const char *startup_id, int style, uintptr_t 
 	gtk_widget_add_css_class(w, "dndmode-shield");
 	gtk_widget_set_cursor_from_name(w, "none");
 	g_signal_connect(w, "close-request", G_CALLBACK(refuse_close), NULL);
-	if (style == OVERLAY_STYLE_DVD) {
-		dvd_anim *a = g_new0(dvd_anim, 1);
-		a->handle = anim;
+	if (animation != 0) {
+		anim *a = g_new0(anim, 1);
+		a->handle = animation;
 		a->area = gtk_drawing_area_new();
 		gtk_widget_set_cursor_from_name(a->area, "none");
-		gtk_drawing_area_set_draw_func(GTK_DRAWING_AREA(a->area), dvd_draw, a, NULL);
+		gtk_drawing_area_set_draw_func(GTK_DRAWING_AREA(a->area), anim_draw, a, NULL);
 		gtk_window_set_child(GTK_WINDOW(w), a->area);
-		a->timer = g_timeout_add(ANIM_FRAME_MS, dvd_tick, a);
-		g_signal_connect(w, "destroy", G_CALLBACK(dvd_destroy), a);
+		a->timer = g_timeout_add(ANIM_FRAME_MS, anim_tick, a);
+		g_signal_connect(w, "destroy", G_CALLBACK(anim_destroy), a);
 	}
 	if (startup_id != NULL && startup_id[0] != '\0') {
 		gtk_window_set_startup_id(GTK_WINDOW(w), startup_id);
