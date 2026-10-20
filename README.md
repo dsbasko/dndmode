@@ -38,7 +38,7 @@ brew upgrade dndmode               # update to the latest release
 
 The [project site](https://dsbasko.github.io/dndmode/) covers the same ground in a
 browser, in English and Russian: what the shield looks like, how watch mode works,
-and all six overlay styles.
+and all seven overlay styles.
 
 ---
 
@@ -327,7 +327,7 @@ when omitted.
 
 | Flag | Values | Default | Effect |
 | --- | --- | --- | --- |
-| `--style` | `black` \| `matrix` \| `terminal`[`:go`\|`python`\|`typescript`\|`rust`\|`ys`\|`sql`\|`psql`\|`mysql`\|`oracle`\|`varaq`\|`elvish`] \| `dvd` \| `glass`[`:radius`] \| `none` | config | Overlay look for this run; wins over `overlay_style`. `terminal:<lang>` picks the source language (default `go`). |
+| `--style` | `black` \| `matrix` \| `terminal`[`:go`\|`python`\|`typescript`\|`rust`\|`ys`\|`sql`\|`psql`\|`mysql`\|`oracle`\|`varaq`\|`elvish`] \| `dvd` \| `gold` \| `glass`[`:radius`] \| `none` | config | Overlay look for this run; wins over `overlay_style`. `terminal:<lang>` picks the source language (default `go`). |
 | `--mute` | `true` \| `false` | config | Mute system audio for this run. |
 | `--focus` | `true` \| `false` | config | Toggle Do Not Disturb for this run. |
 | `--timer` | Go duration (`30m`, `1h30m`, `90s`) | off | Auto-unlock after the duration, then exit `0`. |
@@ -561,6 +561,11 @@ unlock_code: Ctrl+Option+Cmd+X
 #   dvd    : a "DVD VIDEO" logo bounces around the black shield, changing color
 #            on every edge hit (the old-DVD-player screensaver). Cosmetic only;
 #            opaque, every blocking guarantee is identical to black.
+#   gold   : a candlestick chart of gold (XAU/USD) that keeps climbing, the
+#            newest candle forming at the right edge, while pixel-art gold
+#            coins rain down behind it. The price is synthetic, made up on the
+#            fly. Cosmetic only; opaque, every blocking guarantee is
+#            identical to black.
 #   glass  : TRANSPARENT frosted glass — the blurred desktop shows through.
 #            Trades the no-bleed-through guarantee for the look; keyboard and
 #            trackpad are still fully blocked. Blur strength = glass_blur below.
@@ -950,6 +955,7 @@ off (see [Known limitations](#known-limitations)).
 | `matrix` | Green digital rain over an opaque black shield. Cosmetic. | No | Yes |
 | `terminal` | Syntax-highlighted source code that types itself out and scrolls up, over an opaque black shield. Cosmetic. | No | Yes |
 | `dvd` | A "DVD VIDEO" logo bounces around an opaque black shield, changing color on every edge hit. Cosmetic. | No | Yes |
+| `gold` | A candlestick chart of a gold price climbing steadily, with pixel-art gold coins falling behind it, over an opaque black shield. Cosmetic. | No | Yes |
 | `glass` | Frosted `NSVisualEffectView`; the blurred desktop shows through. | Yes, by design | Yes |
 | `none` | No overlay. Awake-only mode - see below. | n/a | No |
 
@@ -1022,6 +1028,23 @@ input lock, shield window level) is identical to `black`, and the animation is
 ambient - it never reacts to input. Each display gets its own logo bouncing on its
 own path. There are no knobs; it is just `dndmode --style dvd` (or
 `overlay_style: dvd`).
+
+**`gold`.** A candlestick chart of gold (XAU/USD) that keeps going up. The newest
+candle forms at the right edge, its close drifting frame by frame, while the whole
+chart slides left and the price axis refits itself to what is on screen; a gold
+moving-average line runs through the candles, and a tag on the axis follows the
+live price. Behind the chart, hundreds of small pixel-art gold coins rain down
+from the top edge, spinning as they fall, some with a glint; nearer ones are
+bigger, brighter and faster, so the shower has depth. The price is synthetic: a
+seeded random walk with an upward drift, generated on the fly. Nothing is fetched
+(dndmode makes no network calls), no real quote history is compiled in, and no
+two displays or sessions draw the same chart.
+It climbs about 10% an hour - clearly up across one screen, with red candles along
+the way - and stays a believable gold price for a long session, about three times
+the starting price after 12 hours. Like `dvd`, it is a purely cosmetic content
+swap on top of the same opaque black shield, so every blocking guarantee is
+identical to `black`, and the animation is ambient - it never reacts to input.
+There are no knobs: `dndmode --style gold` (or `overlay_style: gold`).
 
 **Awake-only mode (`none`).** `overlay_style: none` (or `dndmode --style none`) turns
 dndmode into a thin [`caffeinate(8)`](https://ss64.com/mac/caffeinate.html) wrapper.

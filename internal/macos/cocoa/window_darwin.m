@@ -10,6 +10,7 @@
 #import "matrixview_darwin.h"  // @interface MatrixView (cgo compiles each .m as a separate TU, so a bare @class forward decl is not enough)
 #import "terminalview_darwin.h"  // @interface TerminalView (same separate-TU rule as MatrixView above)
 #import "dvdview_darwin.h"  // @interface DVDView (same separate-TU rule as MatrixView above)
+#import "goldview_darwin.h"  // @interface GoldView (same separate-TU rule as MatrixView above)
 
 // kGlassBlurRadius is the Gaussian blur radius (in points) for the "glass" style.
 // The overlay grabs a ONE-SHOT screenshot of the desktop (ScreenCaptureKit) and
@@ -147,12 +148,14 @@ static NSImage *captureBlurredDesktopImage(uint32_t displayID, NSScreen *target,
 // NULL => go) selects the
 // corpus + highlighting; "dvd" installs a DVDView (a "DVD VIDEO" logo bouncing
 // edge-to-edge, recoloring on each bounce) over the same opaque black base;
+// "gold" installs a GoldView (a candlestick chart of a climbing synthetic gold
+// price) over the same opaque black base;
 // "glass" (QUICK-glass) shows a STATIC,
 // tunable-radius CIGaussianBlur of a one-shot ScreenCaptureKit screenshot of the
 // desktop (frosted glass — the ONLY non-opaque style; falls back to
 // NSVisualEffectView frost if Screen Recording is not granted or the capture
 // fails); for "black", NULL, or anything else the plain
-// opaque-black path is untouched. black + matrix + terminal + dvd keep setOpaque:YES
+// opaque-black path is untouched. black + matrix + terminal + dvd + gold keep setOpaque:YES
 // (T-gh8-03 no bleed-through); glass deliberately relaxes that for the look while
 // input stays blocked.
 //
@@ -312,6 +315,15 @@ void* cocoa_create_overlay_window(uint32_t displayID, const char* style,
             DVDView *dv = [[DVDView alloc] initWithFrame:[[w contentView] bounds]];
             [dv setAutoresizingMask:(NSViewWidthSizable | NSViewHeightSizable)];
             [w setContentView:dv];
+        // gold swaps in a candlestick-chart contentView over the SAME opaque
+        // black base (opaque GoldView layer on top, never transparent) — same
+        // T-gh8-03 no-bleed-through guarantee as matrix/terminal/dvd. One GoldView
+        // per display, each seeded on its own, so every screen draws its own
+        // chart. GoldView's @interface comes from goldview_darwin.h.
+        } else if (style != NULL && strcmp(style, "gold") == 0) {
+            GoldView *gv = [[GoldView alloc] initWithFrame:[[w contentView] bounds]];
+            [gv setAutoresizingMask:(NSViewWidthSizable | NSViewHeightSizable)];
+            [w setContentView:gv];
         }
     }
 

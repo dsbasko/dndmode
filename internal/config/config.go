@@ -103,6 +103,14 @@ const (
 	// blocking guarantee is byte-for-byte identical to black. One bouncing logo per
 	// display. Ambient only: it never reacts to input.
 	OverlayStyleDVD = "dvd"
+	// OverlayStyleGold renders a candlestick chart of a gold price (XAU/USD)
+	// climbing steadily over the opaque black shield: the newest candle forms at
+	// the right edge while the chart slides left, and pixel-art gold coins
+	// fall behind it. The price is synthetic — a seeded random walk with an
+	// upward drift, generated on the fly; nothing is fetched. Like matrix/terminal/dvd it is cosmetic only — setOpaque:YES, pure
+	// #000000 fill, every blocking guarantee is byte-for-byte identical to black.
+	// One chart per display. Ambient only: it never reacts to input.
+	OverlayStyleGold = "gold"
 	// OverlayStyleGlass makes the shield TRANSPARENT and frosts it: an
 	// NSVisualEffectView blurs whatever is behind the window (frosted glass).
 	// Unlike black/matrix/terminal it is intentionally non-opaque — the desktop shows
@@ -253,7 +261,7 @@ type Config struct {
 	ActivateHotkey *string `yaml:"activate_hotkey"`
 	// OverlayStyle selects the overlay look. Absent/empty => "black" (v1
 	// default, via NormalizeOverlayStyle); the only valid non-empty values are
-	// "black", "matrix", "terminal", "dvd", "glass" and "none" ("none" = caffeinate-only
+	// "black", "matrix", "terminal", "dvd", "gold", "glass" and "none" ("none" = caffeinate-only
 	// mode, no overlay/DND/input-block — see OverlayStyleNone). The VALUE is validated by the caller
 	// (main.go via ValidateOverlayStyle), NOT by yaml.Strict() — Strict only
 	// guards unknown KEYS, so a known key with a junk value parses fine (QUICK-gh8).
@@ -327,17 +335,17 @@ func NormalizeMute(m *bool) bool {
 }
 
 // ValidateOverlayStyle accepts "" (treated as black), "black", "matrix",
-// "terminal", "dvd", "glass" and "none"; anything else returns a non-nil error whose
+// "terminal", "dvd", "gold", "glass" and "none"; anything else returns a non-nil error whose
 // message is suitable for embedding in main.go's stderr template. yaml.Strict()
 // cannot catch a bad VALUE (only unknown keys), so this is the real gate before
 // any window is created (T-gh8-01). "none" is accepted here but routes to the
 // caffeinate-only path in main.go — it never reaches the overlay controller.
 func ValidateOverlayStyle(s string) error {
 	switch s {
-	case "", OverlayStyleBlack, OverlayStyleMatrix, OverlayStyleTerminal, OverlayStyleDVD, OverlayStyleGlass, OverlayStyleNone:
+	case "", OverlayStyleBlack, OverlayStyleMatrix, OverlayStyleTerminal, OverlayStyleDVD, OverlayStyleGold, OverlayStyleGlass, OverlayStyleNone:
 		return nil
 	default:
-		return fmt.Errorf("unknown overlay_style %q (valid: black, matrix, terminal, dvd, glass, none)", s)
+		return fmt.Errorf("unknown overlay_style %q (valid: black, matrix, terminal, dvd, gold, glass, none)", s)
 	}
 }
 
@@ -981,6 +989,11 @@ unlock_code: %s
 #   dvd    : a "DVD VIDEO" logo bounces around the black shield, changing color
 #            on every edge hit (the old-DVD-player screensaver). Cosmetic only;
 #            opaque, every blocking guarantee is identical to black.
+#   gold   : a candlestick chart of gold (XAU/USD) that keeps climbing, the
+#            newest candle forming at the right edge, while pixel-art gold
+#            coins rain down behind it. The price is synthetic, made up on the
+#            fly. Cosmetic only; opaque, every blocking guarantee is
+#            identical to black.
 #   glass  : TRANSPARENT frosted glass — the blurred desktop shows through.
 #            Trades the no-bleed-through guarantee for the look; keyboard and
 #            trackpad are still fully blocked. Blur strength = glass_blur below.

@@ -30,7 +30,8 @@ Usage:
   dndmode --set-password     capture a new unlock code and store it hashed in the config
 
 Flags (per run; omitted = the config value):
-  --style <look>    black | matrix | terminal[:<lang>] | dvd | glass[:radius] | none;
+  --style <look>    black | matrix | terminal[:<lang>] | dvd | gold |
+                    glass[:radius] | none;
                     <lang> = go|python|typescript|rust|ys|sql|psql|mysql|oracle|
                              varaq|elvish
   --mute <bool>     mute system audio for the session (true|false)
