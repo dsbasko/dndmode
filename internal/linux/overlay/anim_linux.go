@@ -27,6 +27,13 @@ type animation interface {
 	draw(cr *C.cairo_t)
 }
 
+// stillFrame is implemented by animations that do not change on every
+// display refresh (bamboo walks at 15 FPS): after a tick that left the frame
+// as it was, still reports true and the repaint is skipped.
+type stillFrame interface {
+	still() bool
+}
+
 // newAnimation returns the animation for style, or nil for plain black
 // (including when an animated style's assets could not be prepared). lang
 // is the terminal style's source language.
@@ -45,13 +52,22 @@ func newAnimation(style, lang string, log *slog.Logger) animation {
 	case "gold":
 		loadGoldSprites()
 		return &goldAnim{}
+	case "bamboo":
+		return &bambooAnim{}
 	}
 	return nil
 }
 
+// goAnimTick advances the animation and reports whether it needs a repaint.
+//
 //export goAnimTick
-func goAnimTick(h C.uintptr_t, w, ht, dt C.double) {
-	cgo.Handle(h).Value().(animation).tick(float64(w), float64(ht), float64(dt))
+func goAnimTick(h C.uintptr_t, w, ht, dt C.double) C.int {
+	a := cgo.Handle(h).Value().(animation)
+	a.tick(float64(w), float64(ht), float64(dt))
+	if s, ok := a.(stillFrame); ok && s.still() {
+		return 0
+	}
+	return 1
 }
 
 //export goAnimDraw
@@ -495,3 +511,90 @@ func (a *goldAnim) draw(cr *C.cairo_t) {
 	_, ch := goldTextSize(f.change, chg)
 	goldText(cr, f.change, chg, a.chartX+pw+16, priceTop+(ph-ch)*0.7, trend, halo)
 }
+
+// --- bamboo ---
+
+// bambooAnim paints a bambooView into a canvas at art resolution when the
+// walk steps, and shows it scaled up on every repaint. The sprite set holds
+// the baked sprites and the statics; it is rebuilt with them on a resize.
+type bambooAnim struct {
+	bambooView
+	sprites unsafe.Pointer
+	canvas  unsafe.Pointer
+	stale   bool // the sprite set and canvas no longer match the view
+	painted bool // the canvas holds the current frame
+	ops     []C.int
+}
+
+func (a *bambooAnim) tick(w, h, dt float64) {
+	seeded, bw, bh := a.seeded, a.boundsW, a.boundsH
+	a.bambooView.tick(w, h, dt)
+	if a.seeded && (!seeded || bw != a.boundsW || bh != a.boundsH) {
+		a.stale = true
+	}
+	if a.changed {
+		a.painted = false
+	}
+}
+
+// still reports a frame the canvas already shows.
+func (a *bambooAnim) still() bool {
+	changed := a.changed
+	a.changed = false
+	return !changed
+}
+
+// upload hands the sprite set to C and makes a canvas the size of the frame.
+func (a *bambooAnim) upload() {
+	a.freeC()
+	imgs := a.sheet.images
+	wh := make([]C.int, 0, 2*len(imgs))
+	n := 0
+	for _, im := range imgs {
+		wh = append(wh, C.int(im.w), C.int(im.h))
+		n += len(im.px)
+	}
+	px := make([]C.uint32_t, 0, n)
+	for _, im := range imgs {
+		for _, p := range im.px {
+			px = append(px, C.uint32_t(p))
+		}
+	}
+	a.sprites = C.overlay_sprites_new(&px[0], &wh[0], C.int(len(imgs)))
+	fw, fh := a.frameSize()
+	a.canvas = C.overlay_canvas_new(C.int(fw), C.int(fh))
+	a.stale = false
+}
+
+func (a *bambooAnim) draw(cr *C.cairo_t) {
+	if !a.seeded {
+		return
+	}
+	if a.stale {
+		a.upload()
+		a.painted = false
+	}
+	if !a.painted {
+		a.ops = a.ops[:0]
+		for _, b := range a.frame() {
+			a.ops = append(a.ops, C.int(b.sprite), C.int(b.x), C.int(b.y), C.int(b.w), C.int(b.h), C.int(b.alpha))
+		}
+		C.overlay_canvas_paint(a.canvas, a.sprites, &a.ops[0], C.int(len(a.ops)/6))
+		a.painted = true
+	}
+	// The frame is laid out from the bottom, like the y-up model: a frame
+	// pixel taller than the widget is lost at the top.
+	_, fh := a.frameSize()
+	u := a.unit()
+	C.overlay_canvas_show(cr, a.canvas, 0, C.double(a.boundsH-float64(fh)*u), C.double(u))
+}
+
+func (a *bambooAnim) freeC() {
+	C.overlay_sprites_free(a.sprites)
+	C.overlay_canvas_free(a.canvas)
+	a.sprites, a.canvas = nil, nil
+}
+
+// free releases the sprite set and the canvas; called when the window goes
+// away.
+func (a *bambooAnim) free() { a.freeC() }

@@ -60,6 +60,21 @@ void overlay_fill_rect(cairo_t *cr, double x, double y, double w, double h, doub
 void overlay_gold_sprites(const uint32_t *argb, int n, int px);
 void overlay_gold_coins(cairo_t *cr, const double *xys, const int *sprite, int n);
 
+// Sprite sets and canvases, for styles painted at art resolution (bamboo).
+// A set holds n premultiplied ARGB32 images; wh lists each one's width and
+// height, argb their pixels back to back, row 0 at the top. A canvas is an
+// offscreen frame painted from a set in one call: each op is six ints,
+// sprite, x, y, w, h (frame pixels, y down) and alpha 0..255; a sprite whose
+// size differs from w x h is stretched nearest-neighbour. overlay_canvas_show
+// paints the canvas scaled by scale with its top-left at (x, y), without
+// smoothing.
+void *overlay_sprites_new(const uint32_t *argb, const int *wh, int n);
+void overlay_sprites_free(void *set);
+void *overlay_canvas_new(int w, int h);
+void overlay_canvas_free(void *canvas);
+void overlay_canvas_paint(void *canvas, void *set, const int *ops, int n);
+void overlay_canvas_show(cairo_t *cr, void *canvas, double x, double y, double scale);
+
 // Shapes. dash 0 strokes a solid line; xy holds n points.
 void overlay_line(cairo_t *cr, double x0, double y0, double x1, double y1, double width,
 	double r, double g, double b, double a, double dash);

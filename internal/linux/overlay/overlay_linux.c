@@ -64,10 +64,10 @@ static gboolean refuse_close(GtkWindow *w, gpointer data) {
 	return TRUE;
 }
 
-// An animated style attached to one window: a drawing area advanced and
-// repainted on every frame of the GTK frame clock, i.e. in step with the
-// display refresh rather than on a free-running timer that drifts against
-// it and judders. Everything style-specific lives on the Go side behind
+// An animated style attached to one window: a drawing area advanced on
+// every frame of the GTK frame clock, i.e. in step with the display refresh
+// rather than on a free-running timer that drifts against it and judders,
+// and repainted whenever the Go side reports that the frame changed. Everything style-specific lives on the Go side behind
 // handle; C only owns the widget, the tick and the drawing primitives below.
 typedef struct {
 	GtkWidget *area;
@@ -91,8 +91,9 @@ static gboolean anim_tick(GtkWidget *area, GdkFrameClock *clock, gpointer data) 
 	gint64 now = gdk_frame_clock_get_frame_time(clock);
 	double dt = a->last_frame == 0 ? 0.0 : (double)(now - a->last_frame) / G_USEC_PER_SEC;
 	a->last_frame = now;
-	goAnimTick(a->handle, (double)gtk_widget_get_width(area), (double)gtk_widget_get_height(area), dt);
-	gtk_widget_queue_draw(area);
+	if (goAnimTick(a->handle, (double)gtk_widget_get_width(area), (double)gtk_widget_get_height(area), dt)) {
+		gtk_widget_queue_draw(area);
+	}
 	return G_SOURCE_CONTINUE;
 }
 
@@ -307,6 +308,107 @@ void overlay_gold_coins(cairo_t *cr, const double *xys, const int *sprite, int n
 		cairo_fill(cr);
 		cairo_restore(cr);
 	}
+}
+
+// --- sprite sets and canvases -------------------------------------------
+
+typedef struct {
+	int n;
+	cairo_surface_t **s;
+} sprite_set;
+
+void *overlay_sprites_new(const uint32_t *argb, const int *wh, int n) {
+	sprite_set *set = g_new0(sprite_set, 1);
+	set->n = n;
+	set->s = g_new0(cairo_surface_t *, n);
+	size_t off = 0;
+	for (int i = 0; i < n; i++) {
+		int w = wh[2 * i], h = wh[2 * i + 1];
+		if (w <= 0 || h <= 0) {
+			continue;
+		}
+		cairo_surface_t *img = cairo_image_surface_create(CAIRO_FORMAT_ARGB32, w, h);
+		cairo_surface_flush(img);
+		int stride = cairo_image_surface_get_stride(img);
+		unsigned char *dst = cairo_image_surface_get_data(img);
+		for (int y = 0; y < h; y++) {
+			memcpy(dst + (size_t)y * stride, argb + off + (size_t)y * w, (size_t)w * 4);
+		}
+		cairo_surface_mark_dirty(img);
+		set->s[i] = img;
+		off += (size_t)w * h;
+	}
+	return set;
+}
+
+void overlay_sprites_free(void *p) {
+	sprite_set *set = p;
+	if (set == NULL) {
+		return;
+	}
+	for (int i = 0; i < set->n; i++) {
+		if (set->s[i] != NULL) {
+			cairo_surface_destroy(set->s[i]);
+		}
+	}
+	g_free(set->s);
+	g_free(set);
+}
+
+void *overlay_canvas_new(int w, int h) {
+	return cairo_image_surface_create(CAIRO_FORMAT_RGB24, w > 0 ? w : 1, h > 0 ? h : 1);
+}
+
+void overlay_canvas_free(void *canvas) {
+	if (canvas != NULL) {
+		cairo_surface_destroy(canvas);
+	}
+}
+
+void overlay_canvas_paint(void *canvas, void *p, const int *ops, int n) {
+	sprite_set *set = p;
+	if (canvas == NULL || set == NULL) {
+		return;
+	}
+	cairo_t *cr = cairo_create(canvas);
+	for (int i = 0; i < n; i++) {
+		const int *op = ops + 6 * i;
+		if (op[0] < 0 || op[0] >= set->n || set->s[op[0]] == NULL || op[5] <= 0) {
+			continue;
+		}
+		cairo_surface_t *s = set->s[op[0]];
+		int sw = cairo_image_surface_get_width(s), sh = cairo_image_surface_get_height(s);
+		cairo_save(cr);
+		cairo_translate(cr, op[1], op[2]);
+		if (op[3] != sw || op[4] != sh) {
+			cairo_scale(cr, (double)op[3] / sw, (double)op[4] / sh);
+		}
+		cairo_set_source_surface(cr, s, 0, 0);
+		cairo_pattern_set_filter(cairo_get_source(cr), CAIRO_FILTER_NEAREST);
+		cairo_rectangle(cr, 0, 0, sw, sh);
+		if (op[5] >= 255) {
+			cairo_fill(cr);
+		} else {
+			cairo_clip(cr);
+			cairo_paint_with_alpha(cr, op[5] / 255.0);
+		}
+		cairo_restore(cr);
+	}
+	cairo_destroy(cr);
+	cairo_surface_flush(canvas);
+}
+
+void overlay_canvas_show(cairo_t *cr, void *canvas, double x, double y, double scale) {
+	if (canvas == NULL) {
+		return;
+	}
+	cairo_save(cr);
+	cairo_translate(cr, x, y);
+	cairo_scale(cr, scale, scale);
+	cairo_set_source_surface(cr, canvas, 0, 0);
+	cairo_pattern_set_filter(cairo_get_source(cr), CAIRO_FILTER_NEAREST);
+	cairo_paint(cr);
+	cairo_restore(cr);
 }
 
 void overlay_line(cairo_t *cr, double x0, double y0, double x1, double y1, double width,

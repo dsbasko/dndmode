@@ -13,8 +13,8 @@
 // other goroutines reach it through DispatchMain.
 //
 // overlay_style black, dvd (dvd.go), matrix (matrix.go), terminal
-// (terminal.go) and gold (gold.go) are implemented on Linux;
-// anim_linux.go connects the animated ones to GTK.
+// (terminal.go), gold (gold.go) and bamboo (bamboo.go) are implemented on
+// Linux; anim_linux.go connects the animated ones to GTK.
 package overlay
 
 /*
@@ -178,7 +178,7 @@ type Controller struct {
 }
 
 // Styles lists the overlay styles this package draws.
-var Styles = []string{"black", "dvd", "matrix", "terminal", "gold"}
+var Styles = []string{"black", "dvd", "matrix", "terminal", "gold", "bamboo"}
 
 // NewController returns a controller with no windows yet. style is one of
 // Styles; anything else draws black. lang is the terminal style's source

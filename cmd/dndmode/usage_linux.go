@@ -24,8 +24,8 @@ Usage:
   dndmode --set-password     capture a new unlock code and store it hashed in the config
 
 Flags (per run; omitted = the config value):
-  --style <look>    black | dvd | matrix | terminal[:<lang>] | gold | none
-                    (bamboo and glass are not available on Linux);
+  --style <look>    black | dvd | matrix | terminal[:<lang>] | gold | bamboo |
+                    none (glass is not available on Linux);
                     <lang> = go|python|typescript|rust|ys|sql|psql|mysql|oracle|
                              varaq|elvish|php
   --mute <bool>     mute the default audio output for the session (true|false)
