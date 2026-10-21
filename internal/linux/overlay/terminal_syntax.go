@@ -78,6 +78,7 @@ type termSegment struct {
 var termLangs = map[string]int{
 	"go": 0, "python": 1, "typescript": 2, "rust": 3, "ys": 4,
 	"sql": 5, "psql": 6, "mysql": 7, "oracle": 8, "varaq": 9, "elvish": 10,
+	"php": 11,
 }
 
 // termLangIndex resolves a language name, defaulting to Go.
@@ -101,6 +102,7 @@ var termSyntaxes = []termSyntax{
 	{keywords: termSqlKeywords, extraKeywords: termOraKeywords, comments: termCommentDash, singleQuoteString: true},
 	{keywords: termVqKeywords, comments: termCommentParenStar, identStartExtra: "'"},
 	{keywords: termElvKeywords, comments: termCommentHash, singleQuoteString: true, identCharExtra: "-"},
+	{keywords: termPhpKeywords, comments: termCommentSlash | termCommentHash, singleQuoteString: true},
 }
 
 func termIsUTF8Cont(b byte) bool { return b&0xC0 == 0x80 }
@@ -416,4 +418,16 @@ var termOraKeywords = []string{
 	"VARRAY", "PLS_INTEGER", "NEW", "OLD", "OUT", "NOCOPY", "IMMEDIATE",
 	"DBMS_OUTPUT", "PUT_LINE", "SQL", "ROWCOUNT", "REGEXP_SUBSTR",
 	"REGEXP_LIKE", "REGEXP_REPLACE", "GLOBAL", "PRESERVE", "ONLINE", "COMMENT",
+}
+
+var termPhpKeywords = []string{
+	"function", "fn", "return", "if", "else", "elseif", "foreach", "for",
+	"while", "do", "switch", "case", "default", "break", "continue", "match",
+	"class", "interface", "trait", "enum", "extends", "implements", "abstract",
+	"final", "readonly", "public", "private", "protected", "static", "const",
+	"new", "clone", "instanceof", "throw", "try", "catch", "finally", "yield",
+	"from", "as", "echo", "print", "isset", "unset", "empty", "list", "array",
+	"string", "int", "float", "bool", "void", "mixed", "never", "null", "true",
+	"false", "self", "parent", "this", "iterable", "callable", "object", "and",
+	"or", "xor", "global",
 }

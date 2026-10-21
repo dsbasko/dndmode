@@ -21,6 +21,7 @@ static const TermBlock *term_table(int lang, NSInteger *count) {
 	case 8: *count = kOraBlocksCount; return kOraBlocks;
 	case 9: *count = kVqBlocksCount; return kVqBlocks;
 	case 10: *count = kElvBlocksCount; return kElvBlocks;
+	case 11: *count = kPhpBlocksCount; return kPhpBlocks;
 	default: *count = kGoBlocksCount; return kGoBlocks;
 	}
 }

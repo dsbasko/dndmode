@@ -328,7 +328,7 @@ when omitted.
 
 | Flag | Values | Default | Effect |
 | --- | --- | --- | --- |
-| `--style` | `black` \| `matrix` \| `terminal`[`:go`\|`python`\|`typescript`\|`rust`\|`ys`\|`sql`\|`psql`\|`mysql`\|`oracle`\|`varaq`\|`elvish`] \| `dvd` \| `gold` \| `bamboo` \| `glass`[`:radius`] \| `none` | config | Overlay look for this run; wins over `overlay_style`. `terminal:<lang>` picks the source language (default `go`). |
+| `--style` | `black` \| `matrix` \| `terminal`[`:go`\|`python`\|`typescript`\|`rust`\|`ys`\|`sql`\|`psql`\|`mysql`\|`oracle`\|`varaq`\|`elvish`\|`php`] \| `dvd` \| `gold` \| `bamboo` \| `glass`[`:radius`] \| `none` | config | Overlay look for this run; wins over `overlay_style`. `terminal:<lang>` picks the source language (default `go`). |
 | `--mute` | `true` \| `false` | config | Mute system audio for this run. |
 | `--focus` | `true` \| `false` | config | Toggle Do Not Disturb for this run. |
 | `--timer` | Go duration (`30m`, `1h30m`, `90s`) | off | Auto-unlock after the duration, then exit `0`. |
@@ -596,7 +596,7 @@ unlock_code: Ctrl+Option+Cmd+X
 
 # --- terminal_language -------------------------------------------------------
 # Source language rendered by overlay_style 'terminal': go (default), python,
-# typescript, rust, ys, sql, psql, mysql, oracle, varaq or elvish. Each has
+# typescript, rust, ys, sql, psql, mysql, oracle, varaq, elvish or php. Each has
 # its own compiled-in corpus + syntax highlighting. Only used by 'terminal';
 # ignored otherwise.
 #   ys     : YoptaScript (yopta.space) - JavaScript as spoken by the gopniks of
@@ -609,6 +609,7 @@ unlock_code: Ctrl+Option+Cmd+X
 #   oracle : Oracle - PL/SQL blocks, sequences, CONNECT BY.
 #   varaq  : var'aq - a stack language with Klingon keywords. Qapla'!
 #   elvish : the Elvish shell (elv.sh). Not Tolkien's; same name, though.
+#   php    : modern PHP 8 - enums, match, readonly classes.
 # Per-run override: the --style terminal:<lang> flag (e.g. --style terminal:rust).
 # terminal_language: go
 
@@ -983,7 +984,7 @@ Pick the language two ways (same precedence as glass `glass_blur` vs
 `--style glass:<radius>`): set `terminal_language:` in `config.yml` for the
 default, and/or append `--style terminal:<lang>` to override it for a single run.
 Valid values are `go` (default), `python`, `typescript`, `rust`, `ys`, `sql`,
-`psql`, `mysql`, `oracle`, `varaq`, and `elvish`; a bare `--style terminal` with no
+`psql`, `mysql`, `oracle`, `varaq`, `elvish`, and `php`; a bare `--style terminal` with no
 config key renders Go. Each language has its own compiled-in corpus, large enough that the stream does
 not repeat for over two hours, and its own syntax highlighting.
 
@@ -996,6 +997,7 @@ dndmode --style terminal:ys         # YoptaScript
 dndmode --style terminal:psql       # PostgreSQL
 dndmode --style terminal:varaq      # var'aq (Klingon)
 dndmode --style terminal:elvish     # Elvish shell
+dndmode --style terminal:php        # PHP 8
 ```
 
 The four SQL values are dialects, not one corpus with a different label: `sql` is
@@ -1009,6 +1011,8 @@ with Klingon keywords (`latlh` is `dup`, `pong` names a procedure, `HIja'chugh` 
 `if`), written in the Latin transliteration its interpreters read; the apostrophe is
 a letter there, so `ghobe'chugh` highlights as one word. `elvish` is the
 [Elvish shell](https://elv.sh/) - ordinary shell scripting, Tolkien not included.
+`php` is modern PHP 8 (typed properties, backed enums, `match`, readonly classes);
+like every corpus it never shows an opening `<?php` tag or a `namespace` / `use` line.
 
 `ys` is [YoptaScript](https://yopta.space/) - a real joke language that transpiles
 to JavaScript, written entirely in the slang of the Russian courtyard (`йопта` is

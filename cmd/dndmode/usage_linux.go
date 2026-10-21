@@ -27,7 +27,7 @@ Flags (per run; omitted = the config value):
   --style <look>    black | dvd | matrix | terminal[:<lang>] | none
                     (gold, bamboo and glass are not available on Linux);
                     <lang> = go|python|typescript|rust|ys|sql|psql|mysql|oracle|
-                             varaq|elvish
+                             varaq|elvish|php
   --mute <bool>     mute the default audio output for the session (true|false)
   --focus <bool>    hide GNOME notification banners for the session (true|false)
   --timer <dur>     auto-unlock after a Go duration (30m, 1h30m, 90s), then exit 0
