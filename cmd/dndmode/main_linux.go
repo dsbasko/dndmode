@@ -12,7 +12,7 @@
 //	focus       GNOME show-banners                (internal/linux/notify)
 //	watch key   GNOME custom shortcut + SIGUSR1   (internal/linux/gnomekeys)
 //
-// Only overlay_style black, dvd, matrix and none are available.
+// Only overlay_style black, dvd, matrix, terminal and none are available.
 package main
 
 import (
@@ -183,20 +183,22 @@ func run() int {
 	// --- Step 5b.1: overlay style ---
 	overlayStyle := cfg.OverlayStyle
 	styleSource := "config"
+	var langOverride string // set only by a --style terminal:<lang> suffix
 	if *fl.style != "" {
-		base, _, _, perr := parseStyleFlag(*fl.style)
+		base, _, lo, perr := parseStyleFlag(*fl.style)
 		if perr != nil {
 			_, _ = fmt.Fprintf(errW, "dndmode: invalid --style %q: %v.\n", *fl.style, perr)
 			return exitConfigErr
 		}
 		overlayStyle = base
+		langOverride = lo
 		styleSource = "flag"
 	}
 	if err := config.ValidateOverlayStyle(overlayStyle); err != nil {
 		if styleSource == "flag" {
 			_, _ = fmt.Fprintf(errW, "dndmode: invalid --style %q: %v.\n", overlayStyle, err)
 		} else {
-			_, _ = fmt.Fprintf(errW, "dndmode: invalid overlay_style %q: %v. Fix overlay_style in %s (valid on Linux: black, dvd, matrix, none).\n", overlayStyle, err, cfgPath)
+			_, _ = fmt.Fprintf(errW, "dndmode: invalid overlay_style %q: %v. Fix overlay_style in %s (valid on Linux: black, dvd, matrix, terminal, none).\n", overlayStyle, err, cfgPath)
 		}
 		return exitConfigErr
 	}
@@ -206,9 +208,21 @@ func run() int {
 		if styleSource == "flag" {
 			src = "--style"
 		}
-		_, _ = fmt.Fprintf(errW, "dndmode: overlay style %q is not available on Linux (use black, dvd, matrix or none). Fix %s.\n", overlayStyle, src)
+		_, _ = fmt.Fprintf(errW, "dndmode: overlay style %q is not available on Linux (use black, dvd, matrix, terminal or none). Fix %s.\n", overlayStyle, src)
 		return exitConfigErr
 	}
+
+	// Terminal source language, resolved like on macOS: the --style suffix
+	// wins, then terminal_language from the config (validated here so a
+	// typo fails fast), default go.
+	terminalLanguage := cfg.TerminalLanguage
+	if langOverride != "" {
+		terminalLanguage = langOverride
+	} else if err := config.ValidateTerminalLanguage(terminalLanguage); err != nil {
+		_, _ = fmt.Fprintf(errW, "dndmode: invalid terminal_language %q: %v. Fix terminal_language in %s.\n", terminalLanguage, err, cfgPath)
+		return exitConfigErr
+	}
+	terminalLanguage = config.NormalizeTerminalLanguage(terminalLanguage)
 
 	// --- Step 5b.2: timer ---
 	timerDur, err := parseTimer(*fl.timer)
@@ -249,6 +263,9 @@ func run() int {
 		_, _ = fmt.Fprintf(outW,
 			"dndmode: warning — the unlock code is short; %d steps or more is strongly recommended (every keypress is a fresh match attempt).\n",
 			config.WeakUnlockSteps)
+	}
+	if overlayStyle == config.OverlayStyleTerminal {
+		_, _ = fmt.Fprintf(outW, "dndmode: terminal_language=%s\n", terminalLanguage)
 	}
 	if timerDur > 0 {
 		_, _ = fmt.Fprintf(outW, "dndmode: timer=%s — auto-disable after this long\n", timerDur)
@@ -467,7 +484,7 @@ func run() int {
 		}
 
 		// Step 15: shield windows.
-		controller := overlay.NewController(overlayStyle, startupID, log)
+		controller := overlay.NewController(overlayStyle, terminalLanguage, startupID, log)
 		var createErr error
 		dispatchMainSync(func() { createErr = controller.CreateWindowsForAllScreens() })
 		if createErr != nil {

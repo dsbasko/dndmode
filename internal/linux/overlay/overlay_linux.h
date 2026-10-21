@@ -41,6 +41,18 @@ void overlay_dvd_draw(cairo_t *cr, double x, double y, double w, double h, doubl
 int overlay_matrix_atlas(const double *sizes, int nsizes, const char *const *glyphs, int nglyphs);
 void overlay_matrix_glyph(cairo_t *cr, int size, int glyph, double x, double y, double r, double g, double b);
 
+// terminal: corpus access (terminalcorpus_linux.c) and text drawing.
+int overlay_term_block_count(int lang);
+int overlay_term_block_len(int lang, int block);
+const char *overlay_term_line(int lang, int block, int line);
+// Sets up the monospaced font once; reports the cell width and line height.
+void overlay_term_init(double size, double *cell_w, double *line_h);
+// A layout of text coloured per segment (byte ranges, rgb triples).
+void *overlay_term_layout(const char *text, const int *starts, const int *lens, const double *rgb, int n);
+void overlay_term_draw(cairo_t *cr, void *layout, double x, double y, double clip_x, double clip_w);
+void overlay_term_free(void *layout);
+void overlay_fill_rect(cairo_t *cr, double x, double y, double w, double h, double r, double g, double b);
+
 void overlay_window_destroy(void *w);
 
 // Starts / stops forwarding monitor changes (debounced) to

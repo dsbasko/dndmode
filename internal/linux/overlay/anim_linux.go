@@ -26,9 +26,12 @@ type animation interface {
 }
 
 // newAnimation returns the animation for style, or nil for plain black
-// (including when an animated style's assets could not be prepared).
-func newAnimation(style string, log *slog.Logger) animation {
+// (including when an animated style's assets could not be prepared). lang
+// is the terminal style's source language.
+func newAnimation(style, lang string, log *slog.Logger) animation {
 	switch style {
+	case "terminal":
+		return newTermAnim(lang)
 	case "dvd":
 		if loadDVDMask(log) {
 			return &dvdAnim{dvdView{logoAspect: dvdLogoAspect}}
@@ -52,7 +55,13 @@ func goAnimDraw(h C.uintptr_t, cr *C.cairo_t) {
 }
 
 //export goAnimFree
-func goAnimFree(h C.uintptr_t) { cgo.Handle(h).Delete() }
+func goAnimFree(h C.uintptr_t) {
+	handle := cgo.Handle(h)
+	if f, ok := handle.Value().(interface{ free() }); ok {
+		f.free()
+	}
+	handle.Delete()
+}
 
 // --- dvd ---
 
@@ -119,4 +128,111 @@ func (a *matrixAnim) draw(cr *C.cairo_t) {
 		C.overlay_matrix_glyph(cr, C.int(c.bucket), C.int(c.glyph), C.double(c.x), C.double(c.y),
 			C.double(c.r), C.double(c.g), C.double(c.b))
 	})
+}
+
+// --- terminal ---
+
+// cCorpus reads one language of the shared corpus through C.
+type cCorpus struct{ lang C.int }
+
+// cInt lets tests, which cannot use cgo, build a cCorpus.
+func cInt(i int) C.int { return C.int(i) }
+
+func (c cCorpus) blockCount() int    { return int(C.overlay_term_block_count(c.lang)) }
+func (c cCorpus) blockLen(b int) int { return int(C.overlay_term_block_len(c.lang, C.int(b))) }
+func (c cCorpus) line(b, i int) string {
+	return C.GoString(C.overlay_term_line(c.lang, C.int(b), C.int(i)))
+}
+
+var (
+	termInitOnce         sync.Once
+	termCellW, termLineH float64
+)
+
+// termAnim draws a terminalView. Each visible line keeps one Pango layout,
+// built when the line enters the screen and freed when it scrolls off; the
+// typing line is the same layout clipped to the glyphs typed so far.
+type termAnim struct {
+	view    *terminalView
+	layouts map[uint64]unsafe.Pointer
+}
+
+func newTermAnim(lang string) *termAnim {
+	termInitOnce.Do(func() {
+		var w, h C.double
+		C.overlay_term_init(C.double(termFontSize), &w, &h)
+		termCellW, termLineH = float64(w), float64(h)
+	})
+	i := termLangIndex(lang)
+	return &termAnim{
+		view:    newTerminalView(cCorpus{lang: C.int(i)}, &termSyntaxes[i]),
+		layouts: map[uint64]unsafe.Pointer{},
+	}
+}
+
+func (a *termAnim) tick(w, h, dt float64) {
+	a.view.tick(w, h, dt)
+	live := make(map[uint64]bool, len(a.view.lines))
+	for _, l := range a.view.lines {
+		live[l.id] = true
+		if _, ok := a.layouts[l.id]; !ok {
+			a.layouts[l.id] = termLayout(l)
+		}
+	}
+	for id, p := range a.layouts {
+		if !live[id] {
+			C.overlay_term_free(p)
+			delete(a.layouts, id)
+		}
+	}
+}
+
+// termLayout builds the coloured Pango layout of one line.
+func termLayout(l termLine) unsafe.Pointer {
+	n := len(l.segs)
+	if n == 0 {
+		return nil
+	}
+	text := C.CString(l.text)
+	defer C.free(unsafe.Pointer(text))
+	starts := make([]C.int, n)
+	lens := make([]C.int, n)
+	rgb := make([]C.double, 3*n)
+	for i, s := range l.segs {
+		starts[i], lens[i] = C.int(s.start), C.int(s.length)
+		c := termPalette[s.cls]
+		rgb[3*i], rgb[3*i+1], rgb[3*i+2] = C.double(c.r), C.double(c.g), C.double(c.b)
+	}
+	return C.overlay_term_layout(text, &starts[0], &lens[0], &rgb[0], C.int(n))
+}
+
+func (a *termAnim) draw(cr *C.cairo_t) {
+	v := a.view
+	if len(v.lines) == 0 {
+		return
+	}
+	colX, colW := v.column()
+	cellH := termCellH()
+	bottom := len(v.lines) - 1
+	for row, l := range v.lines {
+		clipW := colW
+		if row == bottom {
+			clipW = min(colW, float64(v.typed())*termCellW)
+		}
+		C.overlay_term_draw(cr, a.layouts[l.id], C.double(colX), C.double(float64(row)*cellH),
+			C.double(colX), C.double(clipW))
+	}
+	if x := colX + float64(v.typed())*termCellW; v.caretOn() && x < colX+colW {
+		c := termCaretColor
+		C.overlay_fill_rect(cr, C.double(x), C.double(float64(bottom)*cellH), C.double(termCellW), C.double(termLineH),
+			C.double(c.r), C.double(c.g), C.double(c.b))
+	}
+}
+
+// free releases every layout; called when the window goes away.
+func (a *termAnim) free() {
+	for id, p := range a.layouts {
+		C.overlay_term_free(p)
+		delete(a.layouts, id)
+	}
 }

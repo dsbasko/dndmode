@@ -12,12 +12,14 @@
 // the UI thread (the main goroutine, pinned to thread 0 by runtimepin);
 // other goroutines reach it through DispatchMain.
 //
-// overlay_style black, dvd (dvd.go) and matrix (matrix.go) are implemented
-// on Linux; anim_linux.go connects the animated ones to GTK.
+// overlay_style black, dvd (dvd.go), matrix (matrix.go) and terminal
+// (terminal.go) are implemented on Linux; anim_linux.go connects the
+// animated ones to GTK.
 package overlay
 
 /*
 #cgo pkg-config: gtk4
+#cgo CFLAGS: -I${SRCDIR}/compat -I${SRCDIR}/../../macos/cocoa
 #include <stdlib.h>
 #include "overlay_linux.h"
 */
@@ -167,6 +169,7 @@ func goOverlayMonitorsChanged() {
 type Controller struct {
 	log       *slog.Logger
 	style     string
+	lang      string
 	startupID string
 
 	mu       sync.Mutex
@@ -175,18 +178,19 @@ type Controller struct {
 }
 
 // Styles lists the overlay styles this package draws.
-var Styles = []string{"black", "dvd", "matrix"}
+var Styles = []string{"black", "dvd", "matrix", "terminal"}
 
 // NewController returns a controller with no windows yet. style is one of
-// Styles; anything else draws black. startupID is an xdg-activation token
+// Styles; anything else draws black. lang is the terminal style's source
+// language (ignored by the others). startupID is an xdg-activation token
 // (may be empty); passing the one GNOME gave the `--activate` command lets
 // the compositor raise the shield above the focused window without a
 // focus-stealing refusal.
-func NewController(style, startupID string, log *slog.Logger) *Controller {
+func NewController(style, lang, startupID string, log *slog.Logger) *Controller {
 	if log == nil {
 		log = slog.Default()
 	}
-	return &Controller{log: log, style: style, startupID: startupID}
+	return &Controller{log: log, style: style, lang: lang, startupID: startupID}
 }
 
 // Name implements state.Releaser.
@@ -221,7 +225,7 @@ func (c *Controller) build() {
 		// Each monitor gets its own animation state, so logos and rain
 		// move independently per screen.
 		var h cgo.Handle
-		if a := newAnimation(c.style, c.log); a != nil {
+		if a := newAnimation(c.style, c.lang, c.log); a != nil {
 			h = cgo.NewHandle(a)
 		}
 		w := C.overlay_window_create(C.int(i), sid, C.uintptr_t(h))

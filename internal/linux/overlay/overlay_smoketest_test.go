@@ -24,7 +24,7 @@ func TestSmoke_Controller_ShowRelease(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, style := range Styles {
-		c := NewController(style, "", nil)
+		c := NewController(style, "ys", "", nil)
 		if err := c.CreateWindowsForAllScreens(); err != nil {
 			t.Fatalf("%s: %v", style, err)
 		}

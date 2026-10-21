@@ -199,6 +199,70 @@ void overlay_matrix_glyph(cairo_t *cr, int size, int glyph, double x, double y, 
 	cairo_restore(cr);
 }
 
+// --- terminal -----------------------------------------------------------
+
+static PangoContext *term_ctx;
+static PangoFontDescription *term_font;
+
+void overlay_term_init(double size, double *cell_w, double *line_h) {
+	if (term_ctx == NULL) {
+		term_ctx = pango_font_map_create_context(pango_cairo_font_map_get_default());
+		term_font = pango_font_description_from_string("Monospace");
+		pango_font_description_set_absolute_size(term_font, size * PANGO_SCALE);
+	}
+	PangoLayout *l = pango_layout_new(term_ctx);
+	pango_layout_set_font_description(l, term_font);
+	pango_layout_set_text(l, "M", -1);
+	PangoRectangle logical;
+	pango_layout_get_extents(l, NULL, &logical);
+	*cell_w = (double)logical.width / PANGO_SCALE;
+	*line_h = (double)logical.height / PANGO_SCALE;
+	g_object_unref(l);
+}
+
+void *overlay_term_layout(const char *text, const int *starts, const int *lens, const double *rgb, int n) {
+	PangoLayout *l = pango_layout_new(term_ctx);
+	pango_layout_set_font_description(l, term_font);
+	pango_layout_set_text(l, text, -1);
+	PangoAttrList *attrs = pango_attr_list_new();
+	for (int i = 0; i < n; i++) {
+		PangoAttribute *a = pango_attr_foreground_new(
+			(guint16)(rgb[3 * i] * 65535), (guint16)(rgb[3 * i + 1] * 65535), (guint16)(rgb[3 * i + 2] * 65535));
+		a->start_index = (guint)starts[i];
+		a->end_index = (guint)(starts[i] + lens[i]);
+		pango_attr_list_insert(attrs, a);
+	}
+	pango_layout_set_attributes(l, attrs);
+	pango_attr_list_unref(attrs);
+	return l;
+}
+
+// Draws the layout at (x, y), showing only the columns between clip_x and
+// clip_x + clip_w: the code column, or the typed part of the bottom line.
+void overlay_term_draw(cairo_t *cr, void *layout, double x, double y, double clip_x, double clip_w) {
+	if (layout == NULL || clip_w <= 0) {
+		return;
+	}
+	cairo_save(cr);
+	cairo_rectangle(cr, clip_x, y, clip_w, 1e6);
+	cairo_clip(cr);
+	cairo_move_to(cr, x, y);
+	pango_cairo_show_layout(cr, layout);
+	cairo_restore(cr);
+}
+
+void overlay_term_free(void *layout) {
+	if (layout != NULL) {
+		g_object_unref(layout);
+	}
+}
+
+void overlay_fill_rect(cairo_t *cr, double x, double y, double w, double h, double r, double g, double b) {
+	cairo_set_source_rgb(cr, r, g, b);
+	cairo_rectangle(cr, x, y, w, h);
+	cairo_fill(cr);
+}
+
 void *overlay_window_create(int i, const char *startup_id, uintptr_t animation) {
 	GListModel *mons = gdk_display_get_monitors(gdk_display_get_default());
 	GdkMonitor *mon = g_list_model_get_item(mons, (guint)i);
