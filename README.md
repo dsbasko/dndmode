@@ -571,10 +571,11 @@ unlock_code: Ctrl+Option+Cmd+X
 #            moon, pixel art in parallax layers, with mist, drifting leaves,
 #            a few fireflies and a panda wandering far off. Cosmetic only;
 #            opaque, every blocking guarantee is identical to black.
-#   dino   : Linux only. The Chrome offline T-Rex game at night, playing
-#            itself: the dino jumps cacti and pterodactyls, never misses,
-#            and the score counts up. Cosmetic only; opaque, every blocking
-#            guarantee is identical to black.
+#   dino   : Linux only. The Chrome offline T-Rex game, playing itself:
+#            the dino jumps cacti and pterodactyls, never misses, and the
+#            score counts up. Starts at night under a moon and stars and
+#            fades to day and back every 700 points. Cosmetic only; opaque,
+#            every blocking guarantee is identical to black.
 #   glass  : TRANSPARENT frosted glass — the blurred desktop shows through.
 #            Trades the no-bleed-through guarantee for the look; keyboard and
 #            trackpad are still fully blocked. Blur strength = glass_blur below.
@@ -969,7 +970,7 @@ off (see [Known limitations](#known-limitations)).
 | `dvd` | A "DVD VIDEO" logo bounces around an opaque black shield, changing color on every edge hit. Cosmetic. | No | Yes |
 | `gold` | A candlestick chart of a gold price climbing steadily, with pixel-art gold coins falling behind it, over an opaque black shield. Cosmetic. | No | Yes |
 | `bamboo` | A dim pixel-art walk through a moonlit bamboo forest, in parallax layers, with a panda wandering far off, over an opaque black shield. Cosmetic. | No | Yes |
-| `dino` | Linux only. The Chrome offline T-Rex game at night, playing itself: a pixel-art dino jumps cacti and pterodactyls and never misses, over an opaque black shield. Cosmetic. | No | Yes |
+| `dino` | Linux only. The Chrome offline T-Rex game, playing itself: a pixel-art dino jumps cacti and pterodactyls and never misses, fading from night (moon and stars) to day and back every 700 points, over an opaque shield. Cosmetic. | No | Yes |
 | `glass` | The desktop as it was when the shield went up, blurred and slightly darkened. | Yes, by design | Yes |
 | `none` | No overlay. Awake-only mode - see below. | n/a | No |
 
@@ -1082,20 +1083,24 @@ content swap on top of the same opaque black shield, so every blocking guarantee
 is identical to `black`, and the animation is ambient - it never reacts to
 input. There are no knobs: `dndmode --style bamboo` (or `overlay_style: bamboo`).
 
-**`dino`** (Linux only). The Chrome offline T-Rex game, at night: a light grey
-dino runs along the ground line in the middle of the screen and plays itself.
-It jumps cacti and low pterodactyls, ducks under the ones flying at head height
-and runs under the high ones, and it never misses, so the run is endless. The
-speed, jump and score follow the Chrome runner: the run speeds up to its cap in
-about two minutes, the score counts in the top right corner and blinks on every
-hundred, wrapping past 99999. The sprites are own pixel art after the original,
-compiled into the binary as text grids and scaled only by whole numbers. The
-model steps at the runner's 60 frames a second and the strip is drawn at art
-resolution and scaled up. Like `dvd`, it is a purely cosmetic content swap on
-top of the same opaque black shield, so every blocking guarantee is identical to
-`black`, and the animation is ambient - it never reacts to input. The macOS
-build refuses it with exit `1`. There are no knobs: `dndmode --style dino` (or
-`overlay_style: dino`).
+**`dino`** (Linux only). The Chrome offline T-Rex game: a pixel-art dino runs
+along the ground line in the middle of the screen and plays itself. It jumps
+cacti and low pterodactyls, ducks under the ones flying at head height and runs
+under the high ones, and it never misses, so the run is endless. The speed, jump
+and score follow the Chrome runner: the run speeds up to its cap in about two
+minutes, the score counts in the top right corner and blinks on every hundred,
+wrapping past 99999. Like the runner, it turns from night to day and back every
+700 points: the run starts at night, light grey on black under a moon and two
+stars, and fades in about a second to the runner's day, dark grey on near-white
+across the whole screen, then back; every night shows the next moon phase. The
+sprites are own pixel art after the original, compiled into the binary as text
+grids and scaled only by whole numbers. The model steps at the runner's 60
+frames a second and the strip is drawn at art resolution and scaled up; every
+shade of the fade is baked ahead, so a fade costs nothing. Like `dvd`, it is a
+purely cosmetic content swap on top of an opaque shield (black at night,
+near-white by day), so every blocking guarantee is identical to `black`, and the
+animation is ambient - it never reacts to input. The macOS build refuses it with
+exit `1`. There are no knobs: `dndmode --style dino` (or `overlay_style: dino`).
 
 **Awake-only mode (`none`).** `overlay_style: none` (or `dndmode --style none`) turns
 dndmode into a thin [`caffeinate(8)`](https://ss64.com/mac/caffeinate.html) wrapper.

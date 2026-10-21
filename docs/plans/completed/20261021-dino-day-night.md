@@ -73,12 +73,12 @@
 - Modify: `internal/linux/overlay/dino.go`
 - Modify: `internal/linux/overlay/dino_test.go`
 
-- [ ] написать тесты палитры: `shade 0` — ночные цвета, `shade 8` — дневные, каждый канал монотонен между ними, днём `m` и `s` равны фону
-- [ ] обновить `TestDinoBake` под `dinoBake(grid, w, h, scale, shade)`: цвет символа — `dinoShade` нужного шага
-- [ ] обновить `TestDinoArt_IsWellFormed`: `len(dinoNight) == len(dinoDay) == len(dinoPalette)` вместо `dinoColors`
-- [ ] заменить `dinoColors` на ночную/дневную палитру с символами `a`, `g`, `m`, `s`, добавить `dinoShade` и `dinoBackground`
-- [ ] добавить параметр `shade` в `dinoBake`/`dinoBakeArt`; `layout` пока печёт один набор `shade 0`, чтобы пакет собирался
-- [ ] прогнать `go test -race ./internal/linux/overlay` — должно пройти
+- [x] написать тесты палитры: `shade 0` — ночные цвета, `shade 8` — дневные, каждый канал монотонен между ними, днём `m` и `s` равны фону
+- [x] обновить `TestDinoBake` под `dinoBake(grid, w, h, scale, shade)`: цвет символа — `dinoShade` нужного шага
+- [x] обновить `TestDinoArt_IsWellFormed`: `len(dinoNight) == len(dinoDay) == len(dinoPalette)` вместо `dinoColors`
+- [x] заменить `dinoColors` на ночную/дневную палитру с символами `a`, `g`, `m`, `s`, добавить `dinoShade` и `dinoBackground`
+- [x] добавить параметр `shade` в `dinoBake`/`dinoBakeArt`; `layout` пока печёт один набор `shade 0`, чтобы пакет собирался
+- [x] прогнать `go test -race ./internal/linux/overlay` — должно пройти
 
 ### Task 2: Смена темы в модели
 
@@ -86,10 +86,10 @@
 - Modify: `internal/linux/overlay/dino.go`
 - Modify: `internal/linux/overlay/dino_test.go`
 
-- [ ] написать тесты: старт ночью (`shade 0`); на 700 очках цель — день, `shade = 8` ровно через 56 шагов от шага смены; на 1400 — обратно к ночи; на каждом шаге `|Δshade| ≤ 1`
-- [ ] написать тест: переход счёта 99999 → 0 переключает тему (и 99400 тоже — период 600 очков)
-- [ ] реализовать `day`, `shade`, `shadeWait` (сброс в `dinoShadeSteps` при смене) в `dinoRun.step`
-- [ ] прогнать тесты — должно пройти
+- [x] написать тесты: старт ночью (`shade 0`); на 700 очках цель — день, `shade = 8` ровно через 56 шагов от шага смены; на 1400 — обратно к ночи; на каждом шаге `|Δshade| ≤ 1`
+- [x] написать тест: переход счёта 99999 → 0 переключает тему (и 99400 тоже — период 600 очков)
+- [x] реализовать `day`, `shade`, `shadeWait` (сброс в `dinoShadeSteps` при смене) в `dinoRun.step`
+- [x] прогнать тесты — должно пройти
 
 ### Task 3: Луна и звёзды
 
@@ -98,13 +98,13 @@
 - Modify: `internal/linux/overlay/dino.go`
 - Modify: `internal/linux/overlay/dino_test.go`
 
-- [ ] обновить `TestDinoArt_IsWellFormed`: 4 фазы луны 10×10 и звезда 3×3 в списке `want` после облака, до земли
-- [ ] написать тест: после `init` луна и обе звезды на экране
-- [ ] написать тесты луны: первая ночь — полная; каждое переключение день → ночь — следующая фаза по кругу из 4; дрейф 0,25 px/шаг влево; за левым краем появляется справа
-- [ ] написать тесты звёзд: всегда 2, `y` в полосе 10..60, дрейф влево, за левым краем появляются справа
-- [ ] нарисовать арт луны (4 фазы) и звезды, добавить индексы `dinoArtMoon`, `dinoArtStar` после `dinoArtCloud`
-- [ ] реализовать `dinoRun.moon` и `dinoRun.stars` (генератор `cloudRng`)
-- [ ] прогнать тесты — должно пройти
+- [x] обновить `TestDinoArt_IsWellFormed`: 4 фазы луны 10×10 и звезда 3×3 в списке `want` после облака, до земли
+- [x] написать тест: после `init` луна и обе звезды на экране
+- [x] написать тесты луны: первая ночь — полная; каждое переключение день → ночь — следующая фаза по кругу из 4; дрейф 0,25 px/шаг влево; за левым краем появляется справа
+- [x] написать тесты звёзд: всегда 2, `y` в полосе 10..60, дрейф влево, за левым краем появляются справа
+- [x] нарисовать арт луны (4 фазы) и звезды, добавить индексы `dinoArtMoon`, `dinoArtStar` после `dinoArtCloud`
+- [x] реализовать `dinoRun.moon` и `dinoRun.stars` (генератор `cloudRng`)
+- [x] прогнать тесты — должно пройти
 
 ### Task 4: Кадр и набор спрайтов по шагам
 
@@ -112,35 +112,35 @@
 - Modify: `internal/linux/overlay/dino.go`
 - Modify: `internal/linux/overlay/dino_test.go`
 
-- [ ] обновить `TestDinoView_Sheet`: `9 × dinoSheetN` изображений, фон каждого набора — `dinoBackground(shade)`
-- [ ] обновить `TestDinoView_FrameBlits`: `art := b.sprite % dinoSheetN`, `b.sprite / dinoSheetN == shade`, цифры по диапазону `[dinoArtDigit, dinoArtDigit+10)`; первый блит — фон своего шага; звёзды и луна раньше облаков
-- [ ] написать тест `dinoView.background()`: `bambooARGB(background()) == ` пиксель запечённого фона шага, для всех 9 шагов
-- [ ] обновить doc-комментарии: `dino.go` (описание стиля «at night», поле `images`/`back`), `dino_art.go` (про ночную тему)
-- [ ] запекать 9 наборов в `layout`, брать индекс `shade*dinoSheetN + art` в `blit`, рисовать звёзды и луну в `frame()`
-- [ ] прогнать тесты — должно пройти
+- [x] обновить `TestDinoView_Sheet`: `9 × dinoSheetN` изображений, фон каждого набора — `dinoBackground(shade)`
+- [x] обновить `TestDinoView_FrameBlits`: `art := b.sprite % dinoSheetN`, `b.sprite / dinoSheetN == shade`, цифры по диапазону `[dinoArtDigit, dinoArtDigit+10)`; первый блит — фон своего шага; звёзды и луна раньше облаков
+- [x] написать тест `dinoView.background()`: `bambooARGB(background()) == ` пиксель запечённого фона шага, для всех 9 шагов
+- [x] обновить doc-комментарии: `dino.go` (описание стиля «at night», поле `images`/`back`), `dino_art.go` (про ночную тему)
+- [x] запекать 9 наборов в `layout`, брать индекс `shade*dinoSheetN + art` в `blit`, рисовать звёзды и луну в `frame()`
+- [x] прогнать тесты — должно пройти
 
 ### Task 5: Фон вокруг полосы
 
 **Files:**
 - Modify: `internal/linux/overlay/anim_linux.go`
 
-- [ ] в `dinoAnim.draw` при `shade > 0` заливать весь виджет цветом `background()` через `overlay_fill_rect(cr, 0, 0, boundsW, boundsH, …)` на каждой перерисовке — вне блока `if !a.painted`, сразу перед `overlay_canvas_show`
-- [ ] обновить комментарий `dinoAnim` («the rest of the widget is already black»)
-- [ ] `upload()` загружает все наборы (код не меняется, проверить объём)
-- [ ] тест `TestDinoStyle_Registered` остаётся зелёным; отдельного теста на заливку нет — она в cgo, проверяется превью и живым прогоном
-- [ ] прогнать `go test -race ./internal/linux/overlay` и `go vet ./...` — должно пройти
+- [x] в `dinoAnim.draw` при `shade > 0` заливать весь виджет цветом `background()` через `overlay_fill_rect(cr, 0, 0, boundsW, boundsH, …)` на каждой перерисовке — вне блока `if !a.painted`, сразу перед `overlay_canvas_show`
+- [x] обновить комментарий `dinoAnim` («the rest of the widget is already black»)
+- [x] `upload()` загружает все наборы (код не меняется, проверить объём)
+- [x] тест `TestDinoStyle_Registered` остаётся зелёным; отдельного теста на заливку нет — она в cgo, проверяется превью и живым прогоном
+- [x] прогнать `go test -race ./internal/linux/overlay` и `go vet ./...` — должно пройти
 
 ### Task 6: Проверка критериев приёмки
-- [ ] все требования из Overview реализованы
-- [ ] `make test`
-- [ ] `make lint` — без новых замечаний (4 старых вне задачи остаются)
-- [ ] `make build-linux`
-- [ ] превью кадров в PNG (ночь с луной и звёздами, середина перехода, день) временным manual-тестом, затем удалить его
+- [x] все требования из Overview реализованы
+- [x] `make test`
+- [x] `make lint` — без новых замечаний (4 старых вне задачи остаются)
+- [x] `make build-linux`
+- [x] превью кадров в PNG (ночь с луной и звёздами, середина перехода, день) временным manual-тестом, затем удалить его
 
 ### Task 7: [Final] Документация
-- [ ] README: таблица стилей (строка `dino`), раздел `dino` («at night», «light grey dino», «opaque black shield»), копия шаблона конфига
-- [ ] `internal/config/config.go`: шаблон конфига и doc-комментарий `OverlayStyleDino`
-- [ ] перенести план в `docs/plans/completed/`
+- [x] README: таблица стилей (строка `dino`), раздел `dino` («at night», «light grey dino», «opaque black shield»), копия шаблона конфига
+- [x] `internal/config/config.go`: шаблон конфига и doc-комментарий `OverlayStyleDino`
+- [x] перенести план в `docs/plans/completed/`
 
 ## Post-Completion
 *Ручные шаги, без чекбоксов*

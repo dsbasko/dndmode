@@ -16,8 +16,9 @@ import (
 // cheap to repaint.
 
 func TestDinoArt_IsWellFormed(t *testing.T) {
-	if strings.Contains(dinoPalette, ".") || len(dinoColors) != len(dinoPalette) {
-		t.Fatalf("palette %q with %d colours: want colours only, '.' is transparent", dinoPalette, len(dinoColors))
+	if strings.Contains(dinoPalette, ".") || len(dinoNight) != len(dinoPalette) || len(dinoDay) != len(dinoPalette) {
+		t.Fatalf("palette %q with %d night and %d day colours: want one of each per character, '.' is transparent",
+			dinoPalette, len(dinoNight), len(dinoDay))
 	}
 	want := []struct {
 		prefix string
@@ -26,7 +27,8 @@ func TestDinoArt_IsWellFormed(t *testing.T) {
 	}{
 		{"run", 2, 22, 24}, {"jump", 1, 22, 24}, {"duck", 2, 30, 13},
 		{"cactus", 3, 9, 18}, {"big", 3, 13, 25}, {"bird", 2, 23, 20},
-		{"cloud", 1, 23, 7}, {"ground", 3, 50, 5}, {"digit", 10, 5, 7},
+		{"cloud", 1, 23, 7}, {"moon", 4, 10, 10}, {"star", 1, 3, 3},
+		{"ground", 3, 50, 5}, {"digit", 10, 5, 7},
 	}
 	i := 0
 	for _, w := range want {
@@ -70,21 +72,57 @@ func TestDinoArt_StandsOnBottomRow(t *testing.T) {
 
 func TestDinoBake(t *testing.T) {
 	grid := "a." + ".g"
-	img := dinoBake(grid, 2, 2, 2)
-	if img.w != 4 || img.h != 4 || len(img.px) != 16 {
-		t.Fatalf("baked %dx%d with %d pixels, want 4x4 with 16", img.w, img.h, len(img.px))
+	for _, shade := range []int{0, dinoShades / 2, dinoShades - 1} {
+		img := dinoBake(grid, 2, 2, 2, shade)
+		if img.w != 4 || img.h != 4 || len(img.px) != 16 {
+			t.Fatalf("baked %dx%d with %d pixels, want 4x4 with 16", img.w, img.h, len(img.px))
+		}
+		a := bambooARGB(dinoShade(strings.IndexByte(dinoPalette, 'a'), shade))
+		g := bambooARGB(dinoShade(strings.IndexByte(dinoPalette, 'g'), shade))
+		want := []uint32{
+			a, a, 0, 0,
+			a, a, 0, 0,
+			0, 0, g, g,
+			0, 0, g, g,
+		}
+		for i, p := range want {
+			if img.px[i] != p {
+				t.Fatalf("shade %d pixel %d = %#x, want %#x", shade, i, img.px[i], p)
+			}
+		}
 	}
-	a := bambooARGB(dinoColors[strings.IndexByte(dinoPalette, 'a')])
-	g := bambooARGB(dinoColors[strings.IndexByte(dinoPalette, 'g')])
-	want := []uint32{
-		a, a, 0, 0,
-		a, a, 0, 0,
-		0, 0, g, g,
-		0, 0, g, g,
+}
+
+// The palette runs from the night colours at shade 0 to the day ones at the
+// last shade, every channel moving one way only, so a fade never flickers.
+// By day the moon and the stars are the background colour: they fade out
+// with the night instead of needing their own transparency.
+func TestDinoPalette_NightToDay(t *testing.T) {
+	last := dinoShades - 1
+	if dinoBackground(0) != (dvdRGB{0, 0, 0}) {
+		t.Errorf("night background %v, want black like the shield", dinoBackground(0))
 	}
-	for i, p := range want {
-		if img.px[i] != p {
-			t.Fatalf("pixel %d = %#x, want %#x", i, img.px[i], p)
+	check := func(name string, at func(int) dvdRGB, night, day dvdRGB) {
+		t.Helper()
+		if at(0) != night || at(last) != day {
+			t.Errorf("%s: %v at night and %v by day, want %v and %v", name, at(0), at(last), night, day)
+		}
+		for s := 1; s <= last; s++ {
+			a, b := at(s-1), at(s)
+			for _, d := range [3]float64{b.r - a.r, b.g - a.g, b.b - a.b} {
+				if (day.r-night.r)*d < 0 {
+					t.Fatalf("%s: shade %d moves back from %v to %v", name, s, a, b)
+				}
+			}
+		}
+	}
+	check("background", dinoBackground, dinoBackground(0), dinoBackground(last))
+	for i := range len(dinoPalette) {
+		check(dinoPalette[i:i+1], func(s int) dvdRGB { return dinoShade(i, s) }, dinoNight[i], dinoDay[i])
+	}
+	for _, ch := range "ms" {
+		if c := dinoShade(strings.IndexRune(dinoPalette, ch), last); c != dinoBackground(last) {
+			t.Errorf("%c by day is %v, want the day background %v", ch, c, dinoBackground(last))
 		}
 	}
 }
@@ -559,24 +597,27 @@ func TestDinoView_Changed(t *testing.T) {
 }
 
 // The frame starts with the opaque back over the whole canvas (the canvas
-// is never cleared), draws only baked sprites at their size and only where
-// the canvas is, and puts five digits at the top right while they are lit.
+// is never cleared), draws only sprites of the current shade at their size
+// and only where the canvas is, the stars and the moon behind the clouds,
+// and puts five digits at the top right while they are lit.
 func TestDinoView_FrameBlits(t *testing.T) {
 	v := newDinoTestView()
 	for range 3 * 60 * dinoFPS {
 		v.tick(dinoTestViewW, dinoTestViewH, 1.0/60)
 	}
 	fw, fh := v.frameSize()
-	check := func(lit bool) {
+	check := func(shade int, lit bool) {
 		t.Helper()
+		v.r.shade = shade
 		bs := v.frame()
-		if len(bs) == 0 || bs[0] != (bambooBlit{v.back, 0, 0, fw, fh, 255}) {
-			t.Fatalf("first blit %+v, want the back over the %dx%d frame", bs[0], fw, fh)
+		if len(bs) == 0 || bs[0] != (bambooBlit{shade*dinoSheetN + dinoArtBack, 0, 0, fw, fh, 255}) {
+			t.Fatalf("shade %d: first blit %+v, want the shade's back over the %dx%d frame", shade, bs[0], fw, fh)
 		}
-		digits := 0
-		for _, b := range bs[1:] {
-			if b.sprite < 0 || b.sprite >= dinoArtCount {
-				t.Fatalf("blit of sprite %d, not an art frame", b.sprite)
+		digits, firstCloud, lastSky := 0, -1, -1
+		for i, b := range bs[1:] {
+			art := b.sprite % dinoSheetN
+			if b.sprite/dinoSheetN != shade || art >= dinoArtCount {
+				t.Fatalf("shade %d: blit of sprite %d (shade %d art %d), want an art frame of this shade", shade, b.sprite, b.sprite/dinoSheetN, art)
 			}
 			im := &v.images[b.sprite]
 			if b.w != im.w || b.h != im.h || b.alpha != 255 {
@@ -585,36 +626,69 @@ func TestDinoView_FrameBlits(t *testing.T) {
 			if b.x+b.w <= 0 || b.x >= fw || b.y+b.h <= 0 || b.y >= fh {
 				t.Fatalf("blit %+v outside the %dx%d frame", b, fw, fh)
 			}
-			if b.sprite >= dinoArtDigit {
+			switch {
+			case art >= dinoArtDigit && art < dinoArtDigit+10:
 				digits++
 				if b.x < fw/2 || b.y > 20 {
 					t.Errorf("digit at %d,%d, want top right", b.x, b.y)
 				}
+			case art == dinoArtCloud && firstCloud < 0:
+				firstCloud = i
+			case art >= dinoArtMoon && art <= dinoArtStar:
+				lastSky = i
 			}
 		}
 		if want := map[bool]int{true: 5, false: 0}[lit]; digits != want {
-			t.Errorf("%d digits drawn, want %d (lit %v)", digits, want, lit)
+			t.Errorf("shade %d: %d digits drawn, want %d (lit %v)", shade, digits, want, lit)
+		}
+		if lastSky < 0 || firstCloud >= 0 && lastSky > firstCloud {
+			t.Errorf("shade %d: moon or star blit %d, first cloud %d, want the night sky drawn first", shade, lastSky, firstCloud)
 		}
 	}
-	v.r.flash = 0
-	check(true)
-	v.r.flash, v.r.flashScore = 2*dinoFlashBlinks*dinoFlashSteps, 100
-	check(false)
+	for _, shade := range []int{0, dinoShades / 2, dinoShades - 1} {
+		v.r.flash = 0
+		check(shade, true)
+		v.r.flash, v.r.flashScore = 2*dinoFlashBlinks*dinoFlashSteps, 100
+		check(shade, false)
+	}
 }
 
-// The sheet holds every art frame at its index, baked 1:1, and the back.
+// The sheet holds every art frame and the back in every shade, baked 1:1,
+// each shade's back in that shade's sky colour.
 func TestDinoView_Sheet(t *testing.T) {
 	v := newDinoTestView()
-	if len(v.images) != dinoArtCount+1 || v.back != dinoArtCount {
-		t.Fatalf("%d images with the back at %d, want %d and %d", len(v.images), v.back, dinoArtCount+1, dinoArtCount)
+	if len(v.images) != dinoShades*dinoSheetN {
+		t.Fatalf("%d images, want %d", len(v.images), dinoShades*dinoSheetN)
 	}
-	for i, a := range dinoArt {
-		if im := v.images[i]; im.w != a.w*dinoArtScale || im.h != a.h*dinoArtScale {
-			t.Errorf("%s baked %dx%d, want %dx%d", a.name, im.w, im.h, a.w*dinoArtScale, a.h*dinoArtScale)
+	for shade := range dinoShades {
+		for i, a := range dinoArt {
+			if im := v.images[shade*dinoSheetN+i]; im.w != a.w*dinoArtScale || im.h != a.h*dinoArtScale {
+				t.Errorf("shade %d %s baked %dx%d, want %dx%d", shade, a.name, im.w, im.h, a.w*dinoArtScale, a.h*dinoArtScale)
+			}
+		}
+		want := bambooARGB(dinoBackground(shade))
+		if b := v.images[shade*dinoSheetN+dinoArtBack]; b.w != 1 || b.h != 1 || b.px[0] != want {
+			t.Errorf("shade %d back %dx%d %#x, want opaque %#x 1x1", shade, b.w, b.h, b.px, want)
 		}
 	}
-	if b := v.images[v.back]; b.w != 1 || b.h != 1 || b.px[0] != 0xFF000000 {
-		t.Errorf("back %dx%d %#x, want opaque black 1x1", b.w, b.h, b.px)
+}
+
+// The widget around the strip is filled with exactly the strip's sky: the
+// colour is the baked byte, so cairo cannot round it to a seam one level off.
+func TestDinoView_Background(t *testing.T) {
+	v := newDinoTestView()
+	for shade := range dinoShades {
+		v.r.shade = shade
+		back := v.images[shade*dinoSheetN+dinoArtBack].px[0]
+		if got := bambooARGB(v.background()); got != back {
+			t.Errorf("shade %d: background %#x, want the baked back %#x", shade, got, back)
+		}
+		c := v.background()
+		for _, ch := range [3]float64{c.r, c.g, c.b} {
+			if b := ch * 255; math.Abs(b-math.Round(b)) > 1e-9 {
+				t.Errorf("shade %d: channel %g is not a whole byte", shade, ch)
+			}
+		}
 	}
 }
 
@@ -626,5 +700,133 @@ func TestDinoStyle_Registered(t *testing.T) {
 	}
 	if a, ok := newAnimation("dino", "", nil).(*dinoAnim); !ok || a == nil {
 		t.Fatalf("newAnimation(dino) = %T, want *dinoAnim", newAnimation("dino", "", nil))
+	}
+}
+
+// stepToScore runs at a crawl from just under score until the score has
+// reached it, and returns the steps taken.
+func stepToScore(r *dinoRun, score int) int {
+	r.dist = (float64(score) - 0.6) / dinoScoreCoef
+	r.speed = 0.05 / dinoScoreCoef // a twentieth of a point a step
+	n := 0
+	for r.score() != score%dinoScoreMod {
+		r.step()
+		n++
+	}
+	return n
+}
+
+// The run starts at night; every 700 points it fades to day or back, one
+// shade every dinoShadeSteps steps from the step the theme changed, so the
+// fade takes exactly 56 steps and never jumps.
+func TestDinoRun_DayAndNight(t *testing.T) {
+	r := newDinoTestRun(1)
+	if r.day || r.shade != 0 {
+		t.Fatalf("start: day %v shade %d, want night at shade 0", r.day, r.shade)
+	}
+	last := dinoShades - 1
+	fade := func(toDay bool, at int) {
+		t.Helper()
+		stepToScore(r, at)
+		if r.day != toDay {
+			t.Fatalf("at %d: day %v, want %v", at, r.day, toDay)
+		}
+		want := map[bool]int{true: last, false: 0}[toDay]
+		for i := 1; i <= last*dinoShadeSteps; i++ {
+			prev := r.shade
+			r.step()
+			if d := r.shade - prev; d > 1 || d < -1 {
+				t.Fatalf("at %d step %d: shade %d after %d", at, i, r.shade, prev)
+			}
+			if r.shade == want && i != last*dinoShadeSteps {
+				t.Fatalf("at %d: reached shade %d after %d steps, want %d", at, want, i, last*dinoShadeSteps)
+			}
+		}
+		if r.shade != want {
+			t.Fatalf("at %d: shade %d after the fade, want %d", at, r.shade, want)
+		}
+	}
+	fade(true, 700)
+	fade(false, 1400)
+	fade(true, 2100)
+}
+
+// Wrapping past 99999 counts as a change too, so the theme keeps turning:
+// the period before the wrap is 600 points, from 99400.
+func TestDinoRun_DayAndNightWrap(t *testing.T) {
+	r := newDinoTestRun(1)
+	stepToScore(r, 99400)
+	if !r.day {
+		t.Fatal("99400 did not turn to day")
+	}
+	stepToScore(r, dinoScoreMod)
+	if r.day {
+		t.Fatal("the wrap to 0 did not turn to night")
+	}
+}
+
+// The night sky starts on screen: the moon, full on the first night, and
+// both stars are visible at once.
+func TestDinoSky_StartsOnScreen(t *testing.T) {
+	r := newDinoTestRun(4)
+	if r.moonPhase != dinoMoonFull {
+		t.Errorf("first moon phase %d, want full (%d)", r.moonPhase, dinoMoonFull)
+	}
+	if r.moonX < 0 || r.moonX+dinoMoonW > r.w {
+		t.Errorf("moon at x %g, want inside the %g wide frame", r.moonX, r.w)
+	}
+	if len(r.stars) != dinoStars {
+		t.Fatalf("%d stars, want %d", len(r.stars), dinoStars)
+	}
+	for _, s := range r.stars {
+		if s.x < 0 || s.x+dinoStarW > r.w || s.y < dinoSkyTop || s.y > dinoSkyBottom {
+			t.Errorf("star at %g,%d, want inside the frame, top in %d..%d", s.x, s.y, dinoSkyTop, dinoSkyBottom)
+		}
+	}
+}
+
+// Every new night shows the next moon phase, four in a cycle.
+func TestDinoSky_MoonPhases(t *testing.T) {
+	r := newDinoTestRun(4)
+	want := dinoMoonFull
+	for night := 1; night <= 5; night++ {
+		stepToScore(r, (2*night-1)*dinoDayEvery) // day
+		if r.moonPhase != want {
+			t.Fatalf("day %d changed the moon to phase %d, want %d", night, r.moonPhase, want)
+		}
+		stepToScore(r, 2*night*dinoDayEvery) // night
+		want = (want + 1) % dinoMoonPhases
+		if r.moonPhase != want {
+			t.Fatalf("night %d: moon phase %d, want %d", night+1, r.moonPhase, want)
+		}
+	}
+}
+
+// The moon and the stars drift left slowly, at the same pace whatever the
+// run's speed, and come back in from the right once gone past the left
+// edge, the stars at a new height.
+func TestDinoSky_DriftsAndWraps(t *testing.T) {
+	for _, speed := range []float64{dinoStartSpeed, dinoMaxSpeed} {
+		r := newDinoTestRun(4)
+		r.speed = speed
+		mx, sx := r.moonX, r.stars[0].x
+		r.step()
+		if d := mx - r.moonX; math.Abs(d-dinoSkyDrift) > 1e-9 {
+			t.Errorf("speed %g: moon drifted %g, want %g", speed, d, dinoSkyDrift)
+		}
+		if d := sx - r.stars[0].x; math.Abs(d-dinoSkyDrift) > 1e-9 {
+			t.Errorf("speed %g: star drifted %g, want %g", speed, d, dinoSkyDrift)
+		}
+	}
+	r := newDinoTestRun(4)
+	r.moonX = -dinoMoonW + 0.1
+	r.stars[1].x = -dinoStarW + 0.1
+	r.step()
+	if r.moonX < r.w {
+		t.Errorf("moon gone left came back at x %g, want beyond the right edge %g", r.moonX, r.w)
+	}
+	if s := r.stars[1]; s.x < r.w || s.y < dinoSkyTop || s.y > dinoSkyBottom || len(r.stars) != dinoStars {
+		t.Errorf("star gone left came back at %g,%d with %d stars, want beyond %g, top in %d..%d, %d stars",
+			s.x, s.y, len(r.stars), r.w, dinoSkyTop, dinoSkyBottom, dinoStars)
 	}
 }

@@ -606,8 +606,10 @@ func (a *bambooAnim) free() { a.freeC() }
 
 // dinoAnim paints a dinoView into a canvas the size of the strip when the
 // run steps, and shows it scaled up across the middle of the widget on
-// every repaint; the rest of the widget is already black. The sprite set
-// and the canvas are rebuilt on a resize.
+// every repaint. Around the strip the widget is black, as C fills it before
+// each repaint, so by day and during a fade it is filled with the strip's
+// sky first. The sprite set (every shade) and the canvas are rebuilt on a
+// resize.
 type dinoAnim struct {
 	dinoView
 	sprites unsafe.Pointer
@@ -671,6 +673,12 @@ func (a *dinoAnim) draw(cr *C.cairo_t) {
 		}
 		C.overlay_canvas_paint(a.canvas, a.sprites, &a.ops[0], C.int(len(a.ops)/6))
 		a.painted = true
+	}
+	// On every repaint, not only after a step: C has just filled the widget
+	// black again.
+	if a.r.shade > 0 {
+		c := a.background()
+		C.overlay_fill_rect(cr, 0, 0, C.double(a.boundsW), C.double(a.boundsH), C.double(c.r), C.double(c.g), C.double(c.b))
 	}
 	C.overlay_canvas_show(cr, a.canvas, 0, C.double(a.yOffset()), C.double(a.unit()))
 }

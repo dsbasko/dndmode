@@ -8,11 +8,12 @@ import (
 	"strings"
 )
 
-// The dino style: an endless run after the Chrome offline T-Rex game, at
-// night. The dino plays itself: it jumps cacti and low pterodactyls, ducks
-// under middle ones and runs under high ones, never misses, and speeds up to
-// the runner's cap. Linux only, no macOS twin. Cosmetic only; the shield
-// stays opaque.
+// The dino style: an endless run after the Chrome offline T-Rex game,
+// fading from night to day and back every 700 points like the runner,
+// starting at night under a moon and two stars. The dino plays itself: it
+// jumps cacti and low pterodactyls, ducks under middle ones and runs under
+// high ones, never misses, and speeds up to the runner's cap. Linux only,
+// no macOS twin. Cosmetic only; the shield stays opaque.
 //
 // The world is a strip of the Chrome runner's height in frame pixels (y
 // down), centred on the screen; the frame is painted at one pixel per frame
@@ -35,6 +36,9 @@ const (
 
 	dinoFlashSteps  = 15 // a quarter second off or on
 	dinoFlashBlinks = 3
+
+	dinoDayEvery   = 700 // points between a turn to day and back to night
+	dinoShadeSteps = 7   // steps per shade of the fade: 8 shades in 56 steps
 )
 
 // The strip, y down: the runner's canvas height, the ground line the dino
@@ -78,7 +82,20 @@ const (
 	dinoSkyBottom   = 60
 )
 
-// dinoCloud is a cloud's left edge and top.
+// The night sky: the moon and two stars, drifting left at a fixed pace,
+// slower than the clouds and whatever the run's speed. By day they take the
+// sky's colour (dino_art.go).
+const (
+	dinoSkyDrift   = 0.25
+	dinoMoonY      = 20
+	dinoMoonPhases = 4
+	dinoMoonFull   = dinoMoonPhases - 1 // the first night's moon
+	dinoMoonW      = 10 * dinoArtScale
+	dinoStars      = 2
+	dinoStarW      = 3 * dinoArtScale
+)
+
+// dinoCloud is a cloud's or a star's left edge and top.
 type dinoCloud struct {
 	x float64
 	y int
@@ -122,6 +139,10 @@ type dinoRun struct {
 	flash      int // steps left of the score flash
 	flashScore int // the hundred the flash shows
 
+	day       bool // the theme the run fades towards
+	shade     int  // 0 night .. dinoShades-1 day
+	shadeWait int  // steps until the next shade of a fade
+
 	obs    []dinoObstacle // left to right
 	next   float64        // where the next obstacle's left edge goes
 	made   int            // obstacles made so far
@@ -132,6 +153,10 @@ type dinoRun struct {
 	clouds    []dinoCloud
 	cloudNext float64 // where the next cloud's left edge goes
 	cloudRng  uint64  // the sky's own generator, so the obstacles do not depend on the width
+
+	moonX     float64
+	moonPhase int // 0 crescent .. dinoMoonFull, one more each night
+	stars     []dinoCloud
 }
 
 func (r *dinoRun) init(seed uint64, w float64) {
@@ -141,6 +166,15 @@ func (r *dinoRun) init(seed uint64, w float64) {
 	for r.cloudNext = r.cloudGap() - dinoCloudW; r.cloudNext < w; {
 		r.addCloud()
 	}
+	r.moonX, r.moonPhase = 0.7*w, dinoMoonFull
+	for range dinoStars {
+		r.stars = append(r.stars, dinoCloud{goldUniform(&r.cloudRng) * (w - dinoStarW), r.skyLevel()})
+	}
+}
+
+// skyLevel is a random top in the sky band.
+func (r *dinoRun) skyLevel() int {
+	return dinoSkyTop + min(int(goldUniform(&r.cloudRng)*(dinoSkyBottom-dinoSkyTop+1)), dinoSkyBottom-dinoSkyTop)
 }
 
 // dinoCloudW is a cloud's width in frame pixels.
@@ -152,8 +186,7 @@ func (r *dinoRun) cloudGap() float64 {
 
 // addCloud puts a cloud at cloudNext and moves cloudNext a gap past it.
 func (r *dinoRun) addCloud() {
-	y := dinoSkyTop + min(int(goldUniform(&r.cloudRng)*(dinoSkyBottom-dinoSkyTop+1)), dinoSkyBottom-dinoSkyTop)
-	r.clouds = append(r.clouds, dinoCloud{r.cloudNext, y})
+	r.clouds = append(r.clouds, dinoCloud{r.cloudNext, r.skyLevel()})
 	r.cloudNext += dinoCloudW + r.cloudGap()
 }
 
@@ -225,6 +258,34 @@ func (r *dinoRun) step() {
 		r.flash = 2 * dinoFlashBlinks * dinoFlashSteps
 		r.flashScore = now / 100 * 100
 	}
+	r.fade(before)
+}
+
+// fade moves the shade one step towards the theme every dinoShadeSteps
+// steps, and turns the theme every dinoDayEvery points; the wrap past 99999
+// counts as a turn, so the cycle keeps going.
+func (r *dinoRun) fade(before int) {
+	target := 0
+	if r.day {
+		target = dinoShades - 1
+	}
+	if r.shade != target {
+		if r.shadeWait--; r.shadeWait <= 0 {
+			if target > r.shade {
+				r.shade++
+			} else {
+				r.shade--
+			}
+			r.shadeWait = dinoShadeSteps
+		}
+	}
+	if r.score()/dinoDayEvery != before/dinoDayEvery {
+		r.day = !r.day
+		r.shadeWait = dinoShadeSteps
+		if !r.day {
+			r.moonPhase = (r.moonPhase + 1) % dinoMoonPhases
+		}
+	}
 }
 
 // move slides the obstacles left, drops the ones gone past the left edge
@@ -260,6 +321,16 @@ func (r *dinoRun) move() {
 	r.clouds = r.clouds[:n]
 	if r.cloudNext -= drift; r.cloudNext < r.w+dinoSpawnAt {
 		r.addCloud()
+	}
+
+	if r.moonX -= dinoSkyDrift; r.moonX+dinoMoonW < 0 {
+		r.moonX = r.w + dinoSpawnAt
+	}
+	for i := range r.stars {
+		s := &r.stars[i]
+		if s.x -= dinoSkyDrift; s.x+dinoStarW < 0 {
+			s.x, s.y = r.w+dinoSpawnAt, r.skyLevel()
+		}
 	}
 }
 
@@ -358,9 +429,10 @@ func (r *dinoRun) shownScore() (int, bool) {
 
 // --- sprites ---
 
-// dinoBake bakes a w x h grid of palette characters blown up to scale frame
-// pixels per art pixel, so drawing it is a 1:1 copy.
-func dinoBake(grid string, w, h, scale int) bambooImage {
+// dinoBake bakes a w x h grid of palette characters in the colours of a
+// shade, blown up to scale frame pixels per art pixel, so drawing it is a
+// 1:1 copy.
+func dinoBake(grid string, w, h, scale, shade int) bambooImage {
 	img := bambooImage{w: w * scale, h: h * scale, px: make([]uint32, w*scale*h*scale)}
 	for y := range img.h {
 		for x := range img.w {
@@ -368,15 +440,15 @@ func dinoBake(grid string, w, h, scale int) bambooImage {
 			if i < 0 {
 				continue
 			}
-			img.px[y*img.w+x] = bambooARGB(dinoColors[i])
+			img.px[y*img.w+x] = bambooARGB(dinoShade(i, shade))
 		}
 	}
 	return img
 }
 
-func dinoBakeArt(art int) bambooImage {
+func dinoBakeArt(art, shade int) bambooImage {
 	a := &dinoArt[art]
-	return dinoBake(a.px, a.w, a.h, dinoArtScale)
+	return dinoBake(a.px, a.w, a.h, dinoArtScale, shade)
 }
 
 // --- view ---
@@ -389,14 +461,18 @@ const (
 	dinoScoreTop   = 6
 	dinoGroundTile = 50 * dinoArtScale
 	dinoSnap       = 0.1 // a frame this close to a whole number of steps is that many
+
+	// Each shade's sprites are one set: the art frames at their dinoArt
+	// index, then the back (a 1x1 sky, stretched over the canvas).
+	dinoArtBack = dinoArtCount
+	dinoSheetN  = dinoArtCount + 1
 )
 
 // dinoView is the per-window animation state: the run, stepped at 60 FPS
-// from the frame clock, and the sprites baked for it.
+// from the frame clock, and the sprites baked for it in every shade.
 type dinoView struct {
 	r      dinoRun
-	images []bambooImage // the art frames at their dinoArt index, then the back
-	back   int
+	images []bambooImage // shade s, sprite i at s*dinoSheetN+i
 	seed   uint64
 	seeded bool
 
@@ -422,18 +498,20 @@ func (v *dinoView) yOffset() float64 {
 }
 
 // layout lays the run out again for the widget size, with the same seed;
-// the sprites do not depend on the size and are baked once.
+// the sprites do not depend on the size and are baked once, every shade of
+// the fade ahead of time so it costs nothing while it runs.
 func (v *dinoView) layout(w, h float64) {
 	v.boundsW, v.boundsH = w, h
 	fw, _ := v.frameSize()
 	v.r.init(v.seed, float64(fw))
 	if !v.seeded {
-		v.images = make([]bambooImage, 0, dinoArtCount+1)
-		for i := range dinoArtCount {
-			v.images = append(v.images, dinoBakeArt(i))
+		v.images = make([]bambooImage, 0, dinoShades*dinoSheetN)
+		for shade := range dinoShades {
+			for i := range dinoArtCount {
+				v.images = append(v.images, dinoBakeArt(i, shade))
+			}
+			v.images = append(v.images, bambooImage{w: 1, h: 1, px: []uint32{bambooARGB(dinoBackground(shade))}})
 		}
-		v.back = len(v.images)
-		v.images = append(v.images, bambooImage{w: 1, h: 1, px: []uint32{0xFF000000}})
 		v.seeded = true
 	}
 	v.acc = 0
@@ -468,23 +546,36 @@ func (v *dinoView) tick(w, h, dt float64) {
 	}
 }
 
-// blit queues art frame art with its top-left corner at (x, y) frame
-// pixels, unless it misses the frame.
+// background is the sky of the current shade as baked, so the widget fill
+// around the strip lands on the same bytes as the strip's back.
+func (v *dinoView) background() dvdRGB {
+	p := v.images[v.r.shade*dinoSheetN+dinoArtBack].px[0]
+	return dvdRGB{float64(p>>16&0xFF) / 255, float64(p>>8&0xFF) / 255, float64(p&0xFF) / 255}
+}
+
+// blit queues art frame art of the current shade with its top-left corner
+// at (x, y) frame pixels, unless it misses the frame.
 func (v *dinoView) blit(art, x, y int) {
-	im := &v.images[art]
+	sprite := v.r.shade*dinoSheetN + art
+	im := &v.images[sprite]
 	fw, fh := v.frameSize()
 	if x+im.w <= 0 || x >= fw || y+im.h <= 0 || y >= fh {
 		return
 	}
-	v.blits = append(v.blits, bambooBlit{art, x, y, im.w, im.h, 255})
+	v.blits = append(v.blits, bambooBlit{sprite, x, y, im.w, im.h, 255})
 }
 
 // frame lists the blits of the whole strip, back to front: the back, the
-// clouds, the ground, the obstacles, the dino and the score.
+// stars and the moon, the clouds, the ground, the obstacles, the dino and
+// the score.
 func (v *dinoView) frame() []bambooBlit {
 	r := &v.r
 	fw, fh := v.frameSize()
-	v.blits = append(v.blits[:0], bambooBlit{v.back, 0, 0, fw, fh, 255})
+	v.blits = append(v.blits[:0], bambooBlit{r.shade*dinoSheetN + dinoArtBack, 0, 0, fw, fh, 255})
+	for _, s := range r.stars {
+		v.blit(dinoArtStar, int(math.Round(s.x)), s.y)
+	}
+	v.blit(dinoArtMoon+r.moonPhase, int(math.Round(r.moonX)), dinoMoonY)
 	for _, c := range r.clouds {
 		v.blit(dinoArtCloud, int(math.Round(c.x)), c.y)
 	}

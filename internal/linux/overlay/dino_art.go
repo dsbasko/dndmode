@@ -5,16 +5,53 @@ package overlay
 // The dino sprites: own pixel art after the Chrome offline runner, drawn at
 // half the runner's resolution and baked at twice the size, so one art
 // pixel is a 2x2 block of frame pixels. One palette, '.' transparent; each
-// frame is h rows of w palette characters, row 0 at the top. The night
-// theme needs no outline: the black shield shows through the eye and the
-// gaps.
+// frame is h rows of w palette characters, row 0 at the top. No outline:
+// the background shows through the eye and the gaps.
+//
+// The palette has a night and a day colour per character, after the Chrome
+// runner's two themes, and the shades between them; the run fades from one
+// to the other. By day the moon and the stars take the background colour,
+// so they fade out with the night.
 
-const dinoPalette = "ag"
+const dinoPalette = "agms"
 
-var dinoColors = []dvdRGB{
-	{0.675, 0.675, 0.675}, // a dino, obstacles, ground line and score (#ACACAC)
-	{0.373, 0.373, 0.373}, // g clouds and pebbles (#5F5F5F)
+// dinoShades is the number of baked shades: 0 is night, dinoShades-1 day.
+const dinoShades = 9
+
+var dinoNight = []dvdRGB{
+	{172.0 / 255, 172.0 / 255, 172.0 / 255}, // a dino, obstacles, ground line and score (#ACACAC)
+	{95.0 / 255, 95.0 / 255, 95.0 / 255},    // g clouds and pebbles (#5F5F5F)
+	{240.0 / 255, 240.0 / 255, 240.0 / 255}, // m moon (#F0F0F0)
+	{218.0 / 255, 218.0 / 255, 218.0 / 255}, // s stars (#DADADA)
 }
+
+var dinoDay = []dvdRGB{
+	{83.0 / 255, 83.0 / 255, 83.0 / 255},    // a (#535353)
+	{218.0 / 255, 218.0 / 255, 218.0 / 255}, // g (#DADADA)
+	dinoDayBack,                             // m gone into the sky
+	dinoDayBack,                             // s gone into the sky
+}
+
+var (
+	dinoNightBack = dvdRGB{0, 0, 0}                               // the shield's black
+	dinoDayBack   = dvdRGB{247.0 / 255, 247.0 / 255, 247.0 / 255} // #F7F7F7
+)
+
+// dinoMix is shade steps of the way from night to day.
+func dinoMix(night, day dvdRGB, shade int) dvdRGB {
+	t := float64(shade) / (dinoShades - 1)
+	return dvdRGB{
+		night.r + (day.r-night.r)*t,
+		night.g + (day.g-night.g)*t,
+		night.b + (day.b-night.b)*t,
+	}
+}
+
+// dinoShade is palette colour i at a shade.
+func dinoShade(i, shade int) dvdRGB { return dinoMix(dinoNight[i], dinoDay[i], shade) }
+
+// dinoBackground is the sky at a shade.
+func dinoBackground(shade int) dvdRGB { return dinoMix(dinoNightBack, dinoDayBack, shade) }
 
 // dinoArtScale is frame pixels per art pixel.
 const dinoArtScale = 2
@@ -35,7 +72,9 @@ const (
 	dinoArtBig    = dinoArtCactus + 3 // 3 large cacti
 	dinoArtBird   = dinoArtBig + 3    // 2 frames: wings up, wings down
 	dinoArtCloud  = dinoArtBird + 2   // 1 frame
-	dinoArtGround = dinoArtCloud + 1  // 3 ground tiles
+	dinoArtMoon   = dinoArtCloud + 1  // 4 phases: crescent, half, gibbous, full
+	dinoArtStar   = dinoArtMoon + 4   // 1 frame
+	dinoArtGround = dinoArtStar + 1   // 3 ground tiles
 	dinoArtDigit  = dinoArtGround + 3 // 0..9
 	dinoArtCount  = dinoArtDigit + 10
 )
@@ -286,6 +325,51 @@ var dinoArt = [dinoArtCount]dinoArtFrame{
 			"..g...................g" +
 			".g....................g" +
 			"ggggggggggggggggggggggg"},
+	{"moon0", 10, 10,
+		"......m..." +
+			".......mm." +
+			"........m." +
+			"........mm" +
+			"........mm" +
+			"........mm" +
+			"........mm" +
+			"........m." +
+			".......mm." +
+			"......m..."},
+	{"moon1", 10, 10,
+		".....mm..." +
+			".....mmmm." +
+			".....mmmm." +
+			".....mmmmm" +
+			".....mmmmm" +
+			".....mmmmm" +
+			".....mmmmm" +
+			".....mmmm." +
+			".....mmmm." +
+			".....mm..."},
+	{"moon2", 10, 10,
+		"....mmm..." +
+			"..mmmmmmm." +
+			"..mmmmmmm." +
+			".mmmmmmmmm" +
+			".mmmmmmmmm" +
+			".mmmmmmmmm" +
+			".mmmmmmmmm" +
+			"..mmmmmmm." +
+			"..mmmmmmm." +
+			"....mmm..."},
+	{"moon3", 10, 10,
+		"...mmmm..." +
+			".mmmmmmmm." +
+			".mmmmmmmm." +
+			"mmmmmmmmmm" +
+			"mmmmmmmmmm" +
+			"mmmmmmmmmm" +
+			"mmmmmmmmmm" +
+			".mmmmmmmm." +
+			".mmmmmmmm." +
+			"...mmmm..."},
+	{"star", 3, 3, ".s." + "sss" + ".s."},
 	{"ground0", 50, 5,
 		"...........aa.......................a............." +
 			"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" +
