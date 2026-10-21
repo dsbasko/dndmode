@@ -73,8 +73,8 @@ const (
 	dinoArtBird   = dinoArtBig + 3    // 2 frames: wings up, wings down
 	dinoArtCloud  = dinoArtBird + 2   // 1 frame
 	dinoArtMoon   = dinoArtCloud + 1  // 4 phases: crescent, half, gibbous, full
-	dinoArtStar   = dinoArtMoon + 4   // 1 frame
-	dinoArtGround = dinoArtStar + 1   // 3 ground tiles
+	dinoArtStar   = dinoArtMoon + 4   // 3 frames of a twinkle: +, x, dot
+	dinoArtGround = dinoArtStar + 3   // 3 ground tiles
 	dinoArtDigit  = dinoArtGround + 3 // 0..9
 	dinoArtCount  = dinoArtDigit + 10
 )
@@ -369,7 +369,9 @@ var dinoArt = [dinoArtCount]dinoArtFrame{
 			".mmmmmmmm." +
 			".mmmmmmmm." +
 			"...mmmm..."},
-	{"star", 3, 3, ".s." + "sss" + ".s."},
+	{"star0", 3, 3, ".s." + "sss" + ".s."},
+	{"star1", 3, 3, "s.s" + ".s." + "s.s"},
+	{"star2", 3, 3, "..." + ".s." + "..."},
 	{"ground0", 50, 5,
 		"...........aa.......................a............." +
 			"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" +

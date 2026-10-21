@@ -10,10 +10,10 @@ import (
 
 // The dino style: an endless run after the Chrome offline T-Rex game,
 // fading from night to day and back every 700 points like the runner,
-// starting at night under a moon and two stars. The dino plays itself: it
-// jumps cacti and low pterodactyls, ducks under middle ones and runs under
-// high ones, never misses, and speeds up to the runner's cap. Linux only,
-// no macOS twin. Cosmetic only; the shield stays opaque.
+// starting at night under a moon and twinkling stars. The dino plays
+// itself: it jumps cacti and low pterodactyls, ducks under middle ones and
+// runs under high ones, never misses, and speeds up to the runner's cap.
+// Linux only, no macOS twin. Cosmetic only; the shield stays opaque.
 //
 // The world is a strip of the Chrome runner's height in frame pixels (y
 // down), centred on the screen; the frame is painted at one pixel per frame
@@ -82,23 +82,34 @@ const (
 	dinoSkyBottom   = 60
 )
 
-// The night sky: the moon and two stars, drifting left at a fixed pace,
-// slower than the clouds and whatever the run's speed. By day they take the
-// sky's colour (dino_art.go).
+// The night sky: the moon and six twinkling stars, drifting left at a fixed
+// pace, slower than the clouds and whatever the run's speed. By day they take
+// the sky's colour (dino_art.go).
 const (
 	dinoSkyDrift   = 0.25
 	dinoMoonY      = 20
 	dinoMoonPhases = 4
 	dinoMoonFull   = dinoMoonPhases - 1 // the first night's moon
 	dinoMoonW      = 10 * dinoArtScale
-	dinoStars      = 2
+	dinoStars      = 6
 	dinoStarW      = 3 * dinoArtScale
+
+	dinoStarPeriodMin = 120 // steps of one twinkle: 2..4 s
+	dinoStarPeriodMax = 240
 )
 
-// dinoCloud is a cloud's or a star's left edge and top.
+// dinoCloud is a cloud's left edge and top.
 type dinoCloud struct {
 	x float64
 	y int
+}
+
+// dinoStar is a star's left edge and top and its own twinkle: the period in
+// steps and where in it the star started.
+type dinoStar struct {
+	x             float64
+	y             int
+	period, phase int
 }
 
 // dinoObstacle is a cactus group or a bird: its left edge, top and size in
@@ -156,7 +167,7 @@ type dinoRun struct {
 
 	moonX     float64
 	moonPhase int // 0 crescent .. dinoMoonFull, one more each night
-	stars     []dinoCloud
+	stars     []dinoStar
 }
 
 func (r *dinoRun) init(seed uint64, w float64) {
@@ -168,8 +179,35 @@ func (r *dinoRun) init(seed uint64, w float64) {
 	}
 	r.moonX, r.moonPhase = 0.7*w, dinoMoonFull
 	for range dinoStars {
-		r.stars = append(r.stars, dinoCloud{goldUniform(&r.cloudRng) * (w - dinoStarW), r.skyLevel()})
+		r.stars = append(r.stars, r.newStar(goldUniform(&r.cloudRng)*(w-dinoStarW)))
 	}
+}
+
+// frame is the star's art frame at a step: a + for two thirds of its
+// period, then an x, a dot, an x and the + again in four equal parts.
+func (s *dinoStar) frame(steps int64) int {
+	t := int((steps + int64(s.phase)) % int64(s.period))
+	lit := 2 * s.period / 3
+	if t < lit {
+		return dinoArtStar
+	}
+	switch (t - lit) * 4 / (s.period - lit) {
+	case 0, 2:
+		return dinoArtStar + 1
+	case 1:
+		return dinoArtStar + 2
+	default:
+		return dinoArtStar
+	}
+}
+
+// newStar is a star at x at a random height with a twinkle of its own.
+func (r *dinoRun) newStar(x float64) dinoStar {
+	s := dinoStar{x: x, y: r.skyLevel()}
+	span := dinoStarPeriodMax - dinoStarPeriodMin + 1
+	s.period = dinoStarPeriodMin + min(int(goldUniform(&r.cloudRng)*float64(span)), span-1)
+	s.phase = min(int(goldUniform(&r.cloudRng)*float64(s.period)), s.period-1)
+	return s
 }
 
 // skyLevel is a random top in the sky band.
@@ -329,7 +367,7 @@ func (r *dinoRun) move() {
 	for i := range r.stars {
 		s := &r.stars[i]
 		if s.x -= dinoSkyDrift; s.x+dinoStarW < 0 {
-			s.x, s.y = r.w+dinoSpawnAt, r.skyLevel()
+			*s = r.newStar(r.w + dinoSpawnAt)
 		}
 	}
 }
@@ -577,8 +615,9 @@ func (v *dinoView) frame() []bambooBlit {
 	// the first and last columns; one pixel of overhang on every side keeps
 	// those partial pixels off the canvas.
 	v.blits = append(v.blits[:0], bambooBlit{r.shade*dinoSheetN + dinoArtBack, -1, -1, fw + 2, fh + 2, 255})
-	for _, s := range r.stars {
-		v.blit(dinoArtStar, int(math.Round(s.x)), s.y)
+	for i := range r.stars {
+		s := &r.stars[i]
+		v.blit(s.frame(r.steps), int(math.Round(s.x)), s.y)
 	}
 	v.blit(dinoArtMoon+r.moonPhase, int(math.Round(r.moonX)), dinoMoonY)
 	for _, c := range r.clouds {

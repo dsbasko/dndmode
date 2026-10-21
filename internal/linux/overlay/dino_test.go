@@ -27,7 +27,7 @@ func TestDinoArt_IsWellFormed(t *testing.T) {
 	}{
 		{"run", 2, 22, 24}, {"jump", 1, 22, 24}, {"duck", 2, 30, 13},
 		{"cactus", 3, 9, 18}, {"big", 3, 13, 25}, {"bird", 2, 23, 20},
-		{"cloud", 1, 23, 7}, {"moon", 4, 10, 10}, {"star", 1, 3, 3},
+		{"cloud", 1, 23, 7}, {"moon", 4, 10, 10}, {"star", 3, 3, 3},
 		{"ground", 3, 50, 5}, {"digit", 10, 5, 7},
 	}
 	i := 0
@@ -637,7 +637,7 @@ func TestDinoView_FrameBlits(t *testing.T) {
 				}
 			case art == dinoArtCloud && firstCloud < 0:
 				firstCloud = i
-			case art >= dinoArtMoon && art <= dinoArtStar:
+			case art >= dinoArtMoon && art < dinoArtStar+3:
 				lastSky = i
 			}
 		}
@@ -831,5 +831,69 @@ func TestDinoSky_DriftsAndWraps(t *testing.T) {
 	if s := r.stars[1]; s.x < r.w || s.y < dinoSkyTop || s.y > dinoSkyBottom || len(r.stars) != dinoStars {
 		t.Errorf("star gone left came back at %g,%d with %d stars, want beyond %g, top in %d..%d, %d stars",
 			s.x, s.y, len(r.stars), r.w, dinoSkyTop, dinoSkyBottom, dinoStars)
+	}
+}
+
+// Each star keeps its own twinkle: a period of 2..4 s and a phase within
+// it, so the six do not blink in step.
+func TestDinoSky_StarsHaveTheirOwnRhythm(t *testing.T) {
+	r := newDinoTestRun(4)
+	if len(r.stars) != 6 {
+		t.Fatalf("%d stars, want 6", len(r.stars))
+	}
+	seen := map[[2]int]bool{}
+	for i, s := range r.stars {
+		if s.period < dinoStarPeriodMin || s.period > dinoStarPeriodMax || s.phase < 0 || s.phase >= s.period {
+			t.Errorf("star %d: period %d phase %d, want period in %d..%d and phase below it",
+				i, s.period, s.phase, dinoStarPeriodMin, dinoStarPeriodMax)
+		}
+		seen[[2]int{s.period, s.phase}] = true
+	}
+	if len(seen) < 2 {
+		t.Error("all stars twinkle in step")
+	}
+}
+
+// A star that came back in from the right twinkles to a new rhythm too.
+func TestDinoSky_StarComesBackWithANewRhythm(t *testing.T) {
+	r := newDinoTestRun(4)
+	old := r.stars[2]
+	r.stars[2].x = -dinoStarW + 0.1
+	r.step()
+	s := r.stars[2]
+	if s.x < r.w || s.period < dinoStarPeriodMin || s.period > dinoStarPeriodMax || s.phase < 0 || s.phase >= s.period {
+		t.Fatalf("star came back as %+v, want beyond %g with a period in %d..%d", s, r.w, dinoStarPeriodMin, dinoStarPeriodMax)
+	}
+	if s.period == old.period && s.phase == old.phase {
+		t.Error("star came back with the same rhythm")
+	}
+}
+
+// A twinkle: the star shines as a + for two thirds of its period, then
+// turns to an x, fades to a dot and back through the x to the +, in four
+// equal parts, whatever its period and phase.
+func TestDinoSky_TwinkleCycle(t *testing.T) {
+	plus, cross, dot := dinoArtStar, dinoArtStar+1, dinoArtStar+2
+	for _, period := range []int{dinoStarPeriodMin, 125, 197, dinoStarPeriodMax} {
+		for _, phase := range []int{0, 17, period - 1} {
+			s := dinoStar{period: period, phase: phase}
+			var runs []int
+			lit := 0
+			for k := range period {
+				f := s.frame(int64(10*period + k - phase)) // k steps into the cycle
+				if f == plus && len(runs) <= 1 {
+					lit++
+				}
+				if len(runs) == 0 || runs[len(runs)-1] != f {
+					runs = append(runs, f)
+				}
+			}
+			if want := []int{plus, cross, dot, cross, plus}; !slices.Equal(runs, want) {
+				t.Errorf("period %d phase %d: frames %v, want %v", period, phase, runs, want)
+			}
+			if lit != 2*period/3 {
+				t.Errorf("period %d phase %d: + for %d steps, want %d", period, phase, lit, 2*period/3)
+			}
+		}
 	}
 }

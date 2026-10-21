@@ -64,9 +64,9 @@
 - Modify: `internal/linux/overlay/dino_art.go`
 - Modify: `internal/linux/overlay/dino_test.go`
 
-- [ ] обновить `TestDinoArt_IsWellFormed`: `{"star", 3, 3, 3}` в списке `want` (после луны, до земли)
-- [ ] нарисовать `star0`/`star1`/`star2`, сдвинуть `dinoArtGround` на `dinoArtStar + 3`
-- [ ] прогнать `go test -race ./internal/linux/overlay` — должно пройти (кадр звезды пока всегда `star0`)
+- [x] обновить `TestDinoArt_IsWellFormed`: `{"star", 3, 3, 3}` в списке `want` (после луны, до земли)
+- [x] нарисовать `star0`/`star1`/`star2`, сдвинуть `dinoArtGround` на `dinoArtStar + 3`
+- [x] прогнать `go test -race ./internal/linux/overlay` — должно пройти (кадр звезды пока всегда `star0`)
 
 ### Task 2: Шесть звёзд со своим ритмом
 
@@ -74,11 +74,11 @@
 - Modify: `internal/linux/overlay/dino.go`
 - Modify: `internal/linux/overlay/dino_test.go`
 
-- [ ] перенести `TestDinoSky_StartsOnScreen` и `TestDinoSky_DriftsAndWraps` на `dinoStar` и `dinoStars = 6`
-- [ ] написать тест: у каждой звезды после `init` `period` в `[120, 240]`, `phase` в `[0, period)`; не все шесть с одинаковой парой `period/phase`
-- [ ] написать тест: звезда, ушедшая за левый край, появляется справа с новой высотой и новыми `period/phase` в диапазонах
-- [ ] ввести `dinoStar`, `newStar`, `dinoStars = 6`; вернуть doc-комментарий `dinoCloud` к облакам
-- [ ] прогнать тесты — должно пройти
+- [x] перенести `TestDinoSky_StartsOnScreen` и `TestDinoSky_DriftsAndWraps` на `dinoStar` и `dinoStars = 6`
+- [x] написать тест: у каждой звезды после `init` `period` в `[120, 240]`, `phase` в `[0, period)`; не все шесть с одинаковой парой `period/phase`
+- [x] написать тест: звезда, ушедшая за левый край, появляется справа с новой высотой и новыми `period/phase` в диапазонах
+- [x] ввести `dinoStar`, `newStar`, `dinoStars = 6`; вернуть doc-комментарий `dinoCloud` к облакам
+- [x] прогнать тесты — должно пройти
 
 ### Task 3: Цикл мерцания и отрисовка
 
@@ -86,23 +86,23 @@
 - Modify: `internal/linux/overlay/dino.go`
 - Modify: `internal/linux/overlay/dino_test.go`
 
-- [ ] написать тест цикла: за один период кадры идут строго «+» → «×» → «·» → «×» → «+» (сжатая последовательность), «+» занимает первые `2·period/3` шагов; для нескольких `period/phase`, включая не кратные 12
-- [ ] обновить `TestDinoView_FrameBlits`: кадры звёзд в диапазоне `[dinoArtStar, dinoArtStar+3)`, по-прежнему раньше облаков
-- [ ] реализовать `dinoStar.frame(steps)` и рисовать его в `frame()`
-- [ ] прогнать тесты — должно пройти
+- [x] написать тест цикла: за один период кадры идут строго «+» → «×» → «·» → «×» → «+» (сжатая последовательность), «+» занимает первые `2·period/3` шагов; для нескольких `period/phase`, включая не кратные 12
+- [x] обновить `TestDinoView_FrameBlits`: кадры звёзд в диапазоне `[dinoArtStar, dinoArtStar+3)`, по-прежнему раньше облаков
+- [x] реализовать `dinoStar.frame(steps)` и рисовать его в `frame()`
+- [x] прогнать тесты — должно пройти
 
 ### Task 4: Проверка критериев приёмки
-- [ ] все требования из Overview реализованы
-- [ ] `make test`
-- [ ] `make lint` — без новых замечаний (4 старых вне задачи остаются)
-- [ ] `make build-linux`
-- [ ] превью нескольких кадров неба в PNG временным manual-тестом, затем удалить его
+- [x] все требования из Overview реализованы
+- [x] `make test`
+- [x] `make lint` — без новых замечаний (4 старых вне задачи остаются)
+- [x] `make build-linux`
+- [x] превью нескольких кадров неба в PNG временным manual-тестом, затем удалить его
 
 ### Task 5: [Final] Документация
-- [ ] `dino.go`: комментарии про «two stars» (описание стиля, блок констант неба)
-- [ ] `internal/config/config.go`: doc-комментарий `OverlayStyleDino` и шаблон конфига — «a moon and twinkling stars»
-- [ ] README: копия шаблона, строка `dino` в таблице стилей, раздел `dino`
-- [ ] перенести план в `docs/plans/completed/`
+- [x] `dino.go`: комментарии про «two stars» (описание стиля, блок констант неба)
+- [x] `internal/config/config.go`: doc-комментарий `OverlayStyleDino` и шаблон конфига — «a moon and twinkling stars»
+- [x] README: копия шаблона, строка `dino` в таблице стилей, раздел `dino`
+- [x] перенести план в `docs/plans/completed/`
 
 ## Post-Completion
 *Ручные шаги, без чекбоксов*
