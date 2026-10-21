@@ -596,8 +596,8 @@ func TestDinoView_Changed(t *testing.T) {
 	}
 }
 
-// The frame starts with the opaque back over the whole canvas (the canvas
-// is never cleared), draws only sprites of the current shade at their size
+// The frame starts with the opaque back over the whole canvas and past its
+// edges (the canvas is never cleared), draws only sprites of the current shade at their size
 // and only where the canvas is, the stars and the moon behind the clouds,
 // and puts five digits at the top right while they are lit.
 func TestDinoView_FrameBlits(t *testing.T) {
@@ -610,8 +610,11 @@ func TestDinoView_FrameBlits(t *testing.T) {
 		t.Helper()
 		v.r.shade = shade
 		bs := v.frame()
-		if len(bs) == 0 || bs[0] != (bambooBlit{shade*dinoSheetN + dinoArtBack, 0, 0, fw, fh, 255}) {
-			t.Fatalf("shade %d: first blit %+v, want the shade's back over the %dx%d frame", shade, bs[0], fw, fh)
+		// The back overhangs the canvas by a pixel on every side: a stretched
+		// 1x1 image only partly covers its outermost pixels, and the canvas is
+		// never cleared.
+		if len(bs) == 0 || bs[0] != (bambooBlit{shade*dinoSheetN + dinoArtBack, -1, -1, fw + 2, fh + 2, 255}) {
+			t.Fatalf("shade %d: first blit %+v, want the shade's back over the %dx%d frame and a pixel beyond", shade, bs[0], fw, fh)
 		}
 		digits, firstCloud, lastSky := 0, -1, -1
 		for i, b := range bs[1:] {

@@ -571,7 +571,12 @@ func (v *dinoView) blit(art, x, y int) {
 func (v *dinoView) frame() []bambooBlit {
 	r := &v.r
 	fw, fh := v.frameSize()
-	v.blits = append(v.blits[:0], bambooBlit{r.shade*dinoSheetN + dinoArtBack, 0, 0, fw, fh, 255})
+	// The canvas is never cleared, so the back must cover every pixel of it.
+	// A 1x1 image stretched by cairo covers its outermost pixels only in
+	// part, which left the trails of cacti and clouds passing the edges in
+	// the first and last columns; one pixel of overhang on every side keeps
+	// those partial pixels off the canvas.
+	v.blits = append(v.blits[:0], bambooBlit{r.shade*dinoSheetN + dinoArtBack, -1, -1, fw + 2, fh + 2, 255})
 	for _, s := range r.stars {
 		v.blit(dinoArtStar, int(math.Round(s.x)), s.y)
 	}
