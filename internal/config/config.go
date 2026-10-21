@@ -121,8 +121,8 @@ const (
 	// OverlayStyleDino renders an endless run after the Chrome offline T-Rex
 	// game over an opaque shield: a pixel-art dino jumps cacti and
 	// pterodactyls on its own, never missing, while the score counts up; it
-	// starts at night under a moon and twinkling stars and fades to day and
-	// back every 700 points.
+	// starts at night under a moon, twinkling stars and now and then a
+	// shooting star, and fades to day and back every 700 points.
 	// Linux only: the macOS build accepts the value here (one config grammar)
 	// but refuses to start with it. Cosmetic only — opaque, every blocking
 	// guarantee identical to black. One run per display. Ambient only: it
@@ -1022,9 +1022,10 @@ unlock_code: %s
 #            opaque, every blocking guarantee is identical to black.
 #   dino   : Linux only. The Chrome offline T-Rex game, playing itself:
 #            the dino jumps cacti and pterodactyls, never misses, and the
-#            score counts up. Starts at night under a moon and twinkling
-#            stars and fades to day and back every 700 points. Cosmetic
-#            only; opaque, every blocking guarantee is identical to black.
+#            score counts up. Starts at night under a moon, twinkling
+#            stars and now and then a shooting star, and fades to day and
+#            back every 700 points. Cosmetic only; opaque, every blocking
+#            guarantee is identical to black.
 #   glass  : TRANSPARENT frosted glass — the blurred desktop shows through.
 #            Trades the no-bleed-through guarantee for the look; keyboard and
 #            trackpad are still fully blocked. Blur strength = glass_blur below.

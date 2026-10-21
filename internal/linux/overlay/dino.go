@@ -10,10 +10,11 @@ import (
 
 // The dino style: an endless run after the Chrome offline T-Rex game,
 // fading from night to day and back every 700 points like the runner,
-// starting at night under a moon and twinkling stars. The dino plays
-// itself: it jumps cacti and low pterodactyls, ducks under middle ones and
-// runs under high ones, never misses, and speeds up to the runner's cap.
-// Linux only, no macOS twin. Cosmetic only; the shield stays opaque.
+// starting at night under a moon, twinkling stars and now and then a
+// shooting star. The dino plays itself: it jumps cacti and low
+// pterodactyls, ducks under middle ones and runs under high ones, never
+// misses, and speeds up to the runner's cap. Linux only, no macOS twin.
+// Cosmetic only; the shield stays opaque.
 //
 // The world is a strip of the Chrome runner's height in frame pixels (y
 // down), centred on the screen; the frame is painted at one pixel per frame
@@ -104,6 +105,44 @@ type dinoCloud struct {
 	y int
 }
 
+// Now and then at full night a shooting star: the first within the first
+// night, then one every 10..20 s, flying down to the left for 0.5..0.7 s
+// and going out high above the cacti.
+const (
+	dinoMeteorFirstMin = 300
+	dinoMeteorFirstMax = 900
+	dinoMeteorGapMin   = 600
+	dinoMeteorGapMax   = 1200
+	dinoMeteorLifeMin  = 30
+	dinoMeteorLifeMax  = 42
+	dinoMeteorVX       = 2.5  // frame pixels left per step
+	dinoMeteorVY       = 1.25 // and down, the slope of its tail
+	dinoMeteorTop      = 20   // the lowest top it starts at
+	dinoMeteorFloor    = 90   // it never comes down past here (the cacti's tops)
+	dinoMeteorFade     = 6    // steps per fading frame at the end
+)
+
+// dinoMeteor is the shooting star, if one is flying: its top-left corner,
+// its age and life in steps.
+type dinoMeteor struct {
+	on        bool
+	x, y      float64
+	age, life int
+}
+
+// frame is the art frame for the meteor's age: the full tail, then two
+// fading frames over its last steps.
+func (m *dinoMeteor) frame() int {
+	switch left := m.life - m.age; {
+	case left > 2*dinoMeteorFade:
+		return dinoArtMeteor
+	case left > dinoMeteorFade:
+		return dinoArtMeteor + 1
+	default:
+		return dinoArtMeteor + 2
+	}
+}
+
 // dinoStar is a star's left edge and top and its own twinkle: the period in
 // steps and where in it the star started.
 type dinoStar struct {
@@ -168,6 +207,9 @@ type dinoRun struct {
 	moonX     float64
 	moonPhase int // 0 crescent .. dinoMoonFull, one more each night
 	stars     []dinoStar
+
+	meteor     dinoMeteor
+	meteorWait int // steps until the next shooting star may start
 }
 
 func (r *dinoRun) init(seed uint64, w float64) {
@@ -181,6 +223,12 @@ func (r *dinoRun) init(seed uint64, w float64) {
 	for range dinoStars {
 		r.stars = append(r.stars, r.newStar(goldUniform(&r.cloudRng)*(w-dinoStarW)))
 	}
+	r.meteorWait = r.skyInt(dinoMeteorFirstMin, dinoMeteorFirstMax)
+}
+
+// skyInt is a random whole number in lo..hi from the sky's generator.
+func (r *dinoRun) skyInt(lo, hi int) int {
+	return lo + min(int(goldUniform(&r.cloudRng)*float64(hi-lo+1)), hi-lo)
 }
 
 // frame is the star's art frame at a step: a + for two thirds of its
@@ -370,6 +418,35 @@ func (r *dinoRun) move() {
 			*s = r.newStar(r.w + dinoSpawnAt)
 		}
 	}
+	r.fly()
+}
+
+// fly moves the shooting star and puts it out at the end of its life, and
+// starts the next one once its wait is over, at full night and with no
+// other one flying; a wait over by day holds until the night.
+func (r *dinoRun) fly() {
+	m := &r.meteor
+	if m.on {
+		m.x -= dinoMeteorVX
+		m.y += dinoMeteorVY
+		if m.age++; m.age >= m.life {
+			m.on = false
+		}
+	}
+	if r.meteorWait > 0 {
+		r.meteorWait--
+	}
+	if r.meteorWait > 0 || m.on || r.shade != 0 {
+		return
+	}
+	w := float64(dinoArt[dinoArtMeteor].w * dinoArtScale)
+	*m = dinoMeteor{
+		on:   true,
+		x:    r.w/3 + goldUniform(&r.cloudRng)*(r.w*2/3-w),
+		y:    goldUniform(&r.cloudRng) * dinoMeteorTop,
+		life: r.skyInt(dinoMeteorLifeMin, dinoMeteorLifeMax),
+	}
+	r.meteorWait = r.skyInt(dinoMeteorGapMin, dinoMeteorGapMax)
 }
 
 // spawn makes the next obstacle at x, after the runner: any kind the speed
@@ -604,7 +681,7 @@ func (v *dinoView) blit(art, x, y int) {
 }
 
 // frame lists the blits of the whole strip, back to front: the back, the
-// stars and the moon, the clouds, the ground, the obstacles, the dino and
+// stars, the moon and a shooting star, the clouds, the ground, the obstacles, the dino and
 // the score.
 func (v *dinoView) frame() []bambooBlit {
 	r := &v.r
@@ -620,6 +697,9 @@ func (v *dinoView) frame() []bambooBlit {
 		v.blit(s.frame(r.steps), int(math.Round(s.x)), s.y)
 	}
 	v.blit(dinoArtMoon+r.moonPhase, int(math.Round(r.moonX)), dinoMoonY)
+	if m := &r.meteor; m.on {
+		v.blit(m.frame(), int(math.Round(m.x)), int(math.Round(m.y)))
+	}
 	for _, c := range r.clouds {
 		v.blit(dinoArtCloud, int(math.Round(c.x)), c.y)
 	}

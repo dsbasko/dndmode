@@ -13,7 +13,7 @@ package overlay
 // to the other. By day the moon and the stars take the background colour,
 // so they fade out with the night.
 
-const dinoPalette = "agms"
+const dinoPalette = "agmstu"
 
 // dinoShades is the number of baked shades: 0 is night, dinoShades-1 day.
 const dinoShades = 9
@@ -22,7 +22,9 @@ var dinoNight = []dvdRGB{
 	{172.0 / 255, 172.0 / 255, 172.0 / 255}, // a dino, obstacles, ground line and score (#ACACAC)
 	{95.0 / 255, 95.0 / 255, 95.0 / 255},    // g clouds and pebbles (#5F5F5F)
 	{240.0 / 255, 240.0 / 255, 240.0 / 255}, // m moon (#F0F0F0)
-	{218.0 / 255, 218.0 / 255, 218.0 / 255}, // s stars (#DADADA)
+	{218.0 / 255, 218.0 / 255, 218.0 / 255}, // s stars and a shooting star's head (#DADADA)
+	{138.0 / 255, 138.0 / 255, 138.0 / 255}, // t a shooting star's tail (#8A8A8A)
+	{74.0 / 255, 74.0 / 255, 74.0 / 255},    // u the tail's end (#4A4A4A)
 }
 
 var dinoDay = []dvdRGB{
@@ -30,6 +32,8 @@ var dinoDay = []dvdRGB{
 	{218.0 / 255, 218.0 / 255, 218.0 / 255}, // g (#DADADA)
 	dinoDayBack,                             // m gone into the sky
 	dinoDayBack,                             // s gone into the sky
+	dinoDayBack,                             // t gone into the sky
+	dinoDayBack,                             // u gone into the sky
 }
 
 var (
@@ -40,10 +44,11 @@ var (
 // dinoMix is shade steps of the way from night to day.
 func dinoMix(night, day dvdRGB, shade int) dvdRGB {
 	t := float64(shade) / (dinoShades - 1)
+	// Weighted rather than night + (day-night)*t, so both ends are exact.
 	return dvdRGB{
-		night.r + (day.r-night.r)*t,
-		night.g + (day.g-night.g)*t,
-		night.b + (day.b-night.b)*t,
+		night.r*(1-t) + day.r*t,
+		night.g*(1-t) + day.g*t,
+		night.b*(1-t) + day.b*t,
 	}
 }
 
@@ -74,7 +79,8 @@ const (
 	dinoArtCloud  = dinoArtBird + 2   // 1 frame
 	dinoArtMoon   = dinoArtCloud + 1  // 4 phases: crescent, half, gibbous, full
 	dinoArtStar   = dinoArtMoon + 4   // 3 frames of a twinkle: +, x, dot
-	dinoArtGround = dinoArtStar + 3   // 3 ground tiles
+	dinoArtMeteor = dinoArtStar + 3   // 3 frames: flying, fading, almost out
+	dinoArtGround = dinoArtMeteor + 3 // 3 ground tiles
 	dinoArtDigit  = dinoArtGround + 3 // 0..9
 	dinoArtCount  = dinoArtDigit + 10
 )
@@ -372,6 +378,9 @@ var dinoArt = [dinoArtCount]dinoArtFrame{
 	{"star0", 3, 3, ".s." + "sss" + ".s."},
 	{"star1", 3, 3, "s.s" + ".s." + "s.s"},
 	{"star2", 3, 3, "..." + ".s." + "..."},
+	{"meteor0", 8, 4, "......uu" + "....tt.." + "..ss...." + "ss......"},
+	{"meteor1", 8, 4, "........" + "....uu.." + "..tt...." + "ss......"},
+	{"meteor2", 8, 4, "........" + "........" + "........" + "uu......"},
 	{"ground0", 50, 5,
 		"...........aa.......................a............." +
 			"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" +

@@ -27,7 +27,7 @@ func TestDinoArt_IsWellFormed(t *testing.T) {
 	}{
 		{"run", 2, 22, 24}, {"jump", 1, 22, 24}, {"duck", 2, 30, 13},
 		{"cactus", 3, 9, 18}, {"big", 3, 13, 25}, {"bird", 2, 23, 20},
-		{"cloud", 1, 23, 7}, {"moon", 4, 10, 10}, {"star", 3, 3, 3},
+		{"cloud", 1, 23, 7}, {"moon", 4, 10, 10}, {"star", 3, 3, 3}, {"meteor", 3, 8, 4},
 		{"ground", 3, 50, 5}, {"digit", 10, 5, 7},
 	}
 	i := 0
@@ -120,7 +120,7 @@ func TestDinoPalette_NightToDay(t *testing.T) {
 	for i := range len(dinoPalette) {
 		check(dinoPalette[i:i+1], func(s int) dvdRGB { return dinoShade(i, s) }, dinoNight[i], dinoDay[i])
 	}
-	for _, ch := range "ms" {
+	for _, ch := range "mstu" {
 		if c := dinoShade(strings.IndexRune(dinoPalette, ch), last); c != dinoBackground(last) {
 			t.Errorf("%c by day is %v, want the day background %v", ch, c, dinoBackground(last))
 		}
@@ -895,5 +895,107 @@ func TestDinoSky_TwinkleCycle(t *testing.T) {
 				t.Errorf("period %d phase %d: + for %d steps, want %d", period, phase, lit, 2*period/3)
 			}
 		}
+	}
+}
+
+// A shooting star now and then: the first within the first night, then one
+// every 10..20 s, never two at once, and only at full night.
+func TestDinoMeteor_NowAndThenAtNight(t *testing.T) {
+	for seed := range uint64(5) {
+		r := newDinoTestRun(seed + 1)
+		var starts []int
+		for i := 1; i <= 60*dinoFPS; i++ { // the first night lasts about a minute
+			was := r.meteor.on
+			r.step()
+			if r.meteor.on && !was {
+				if r.shade != 0 {
+					t.Fatalf("seed %d step %d: meteor at shade %d, want only at full night", seed+1, i, r.shade)
+				}
+				starts = append(starts, i)
+			}
+		}
+		if len(starts) < 2 {
+			t.Fatalf("seed %d: %d meteors in a minute of night, want several", seed+1, len(starts))
+		}
+		if starts[0] < dinoMeteorFirstMin || starts[0] > dinoMeteorFirstMax {
+			t.Errorf("seed %d: first meteor at step %d, want %d..%d", seed+1, starts[0], dinoMeteorFirstMin, dinoMeteorFirstMax)
+		}
+		for i := 1; i < len(starts); i++ {
+			if gap := starts[i] - starts[i-1]; gap < dinoMeteorGapMin || gap > dinoMeteorGapMax {
+				t.Errorf("seed %d: %d steps between meteors, want %d..%d", seed+1, gap, dinoMeteorGapMin, dinoMeteorGapMax)
+			}
+		}
+	}
+}
+
+// By day no shooting star starts.
+func TestDinoMeteor_NotByDay(t *testing.T) {
+	r := newDinoTestRun(1)
+	r.day, r.shade = true, dinoShades-1
+	for i := range 2000 {
+		r.step()
+		if r.meteor.on {
+			t.Fatalf("step %d: a meteor by day", i)
+		}
+	}
+}
+
+// A shooting star flies down to the left at a fixed pace for 0.5..0.7 s,
+// fades through its three frames and goes out well above the cacti.
+func TestDinoMeteor_Flight(t *testing.T) {
+	for seed := range uint64(8) {
+		r := newDinoTestRun(seed + 1)
+		r.meteorWait = 1
+		for !r.meteor.on {
+			r.step()
+		}
+		m := r.meteor
+		if m.life < dinoMeteorLifeMin || m.life > dinoMeteorLifeMax {
+			t.Fatalf("seed %d: life %d steps, want %d..%d", seed+1, m.life, dinoMeteorLifeMin, dinoMeteorLifeMax)
+		}
+		if m.x < r.w/3 || m.y < 0 || m.y > dinoMeteorTop {
+			t.Fatalf("seed %d: starts at %g,%g, want x in the right two thirds of %g and y in 0..%d", seed+1, m.x, m.y, r.w, dinoMeteorTop)
+		}
+		var frames []int
+		for steps := 0; r.meteor.on; steps++ {
+			if steps > dinoMeteorLifeMax {
+				t.Fatalf("seed %d: still flying after %d steps", seed+1, steps)
+			}
+			p := r.meteor
+			f := p.frame()
+			if len(frames) == 0 || frames[len(frames)-1] != f {
+				frames = append(frames, f)
+			}
+			if bottom := p.y + float64(dinoArt[dinoArtMeteor].h*dinoArtScale); bottom > dinoMeteorFloor {
+				t.Fatalf("seed %d: meteor down to %g, want above %d", seed+1, bottom, dinoMeteorFloor)
+			}
+			r.step()
+			if dx, dy := r.meteor.x-p.x, r.meteor.y-p.y; r.meteor.on && (math.Abs(dx+dinoMeteorVX) > 1e-9 || math.Abs(dy-dinoMeteorVY) > 1e-9) {
+				t.Fatalf("seed %d: moved %g,%g, want %g,%g", seed+1, r.meteor.x-p.x, r.meteor.y-p.y, -dinoMeteorVX, dinoMeteorVY)
+			}
+		}
+		if want := []int{dinoArtMeteor, dinoArtMeteor + 1, dinoArtMeteor + 2}; !slices.Equal(frames, want) {
+			t.Errorf("seed %d: frames %v, want %v", seed+1, frames, want)
+		}
+	}
+}
+
+// The shooting star is drawn over the moon and under the clouds.
+func TestDinoMeteor_Drawn(t *testing.T) {
+	v := newDinoTestView()
+	v.r.meteor = dinoMeteor{on: true, x: 200, y: 10, life: dinoMeteorLifeMax}
+	moon, meteor, cloud := -1, -1, -1
+	for i, b := range v.frame() {
+		switch art := b.sprite % dinoSheetN; {
+		case art >= dinoArtMoon && art < dinoArtMoon+dinoMoonPhases && moon < 0:
+			moon = i
+		case art >= dinoArtMeteor && art < dinoArtMeteor+3:
+			meteor = i
+		case art == dinoArtCloud && cloud < 0:
+			cloud = i
+		}
+	}
+	if meteor < 0 || moon < 0 || meteor < moon || cloud >= 0 && meteor > cloud {
+		t.Errorf("moon blit %d, meteor %d, first cloud %d: want the meteor after the moon, before the clouds", moon, meteor, cloud)
 	}
 }
