@@ -1310,7 +1310,7 @@ Only the platform layer is different:
 
 | Layer | macOS | Linux |
 | --- | --- | --- |
-| Shield | `NSWindow` per display | GTK4 fullscreen window per monitor (`black`, or the animated `dvd`, `matrix` and `terminal`) |
+| Shield | `NSWindow` per display | GTK4 fullscreen window per monitor (`black`, or the animated `dvd`, `matrix`, `terminal` and `gold`) |
 | Input lock | `CGEventTap` | exclusive `EVIOCGRAB` of every `/dev/input/event*` |
 | Awake lock | IOPMAssertion / `caffeinate` | `systemd-inhibit` + `gnome-session-inhibit`, tied to dndmode's PID |
 | Mute | `osascript` | `wpctl` (PipeWire), `pactl` as fallback |
@@ -1333,7 +1333,7 @@ Differences worth knowing:
   position: `option` is Alt, `cmd` is Super. The default code is therefore
   `Ctrl+Alt+Super+X`, the default `activate_hotkey` `Ctrl+Alt+Super+D`. A
   digest written by `--set-password` on one platform works on the other.
-- **Styles.** `black`, `dvd`, `matrix`, `terminal` (every `terminal:<lang>`) and `none`; `gold`, `bamboo` and `glass` exit `1`.
+- **Styles.** `black`, `dvd`, `matrix`, `terminal` (every `terminal:<lang>`), `gold` and `none`; `bamboo` and `glass` exit `1`.
 - **Everything is grabbed**, including VT switching and SysRq, for the length
   of the session. The way out without the code is `--timer`, SSH (`dndmode
   --kill` / `pkill dndmode`) or a power cycle — the same as on macOS.
@@ -1380,7 +1380,7 @@ internal/macos/
   focus/              Do Not Disturb via the Shortcuts CLI
   permissions/        Accessibility, Input Monitoring, platform, secure-input gates
 internal/linux/
-  overlay/            GTK4 per-monitor shield, black, dvd, matrix and terminal styles
+  overlay/            GTK4 per-monitor shield, black, dvd, matrix, terminal and gold styles
   evdev/              EVIOCGRAB input lock + unlock matching + capture
   inhibit/            idle / suspend inhibitor chain
   audio/              wpctl / pactl mute and restore

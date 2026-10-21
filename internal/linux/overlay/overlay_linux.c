@@ -263,6 +263,178 @@ void overlay_fill_rect(cairo_t *cr, double x, double y, double w, double h, doub
 	cairo_fill(cr);
 }
 
+// --- gold ---------------------------------------------------------------
+
+static cairo_surface_t **gold_sprites;
+static int gold_sprite_n, gold_sprite_px;
+
+void overlay_gold_sprites(const uint32_t *argb, int n, int px) {
+	if (gold_sprites != NULL) {
+		return;
+	}
+	cairo_surface_t **s = g_new0(cairo_surface_t *, n);
+	for (int i = 0; i < n; i++) {
+		cairo_surface_t *img = cairo_image_surface_create(CAIRO_FORMAT_ARGB32, px, px);
+		cairo_surface_flush(img);
+		int stride = cairo_image_surface_get_stride(img);
+		unsigned char *dst = cairo_image_surface_get_data(img);
+		for (int y = 0; y < px; y++) {
+			memcpy(dst + (size_t)y * stride, argb + ((size_t)i * px + y) * px, (size_t)px * 4);
+		}
+		cairo_surface_mark_dirty(img);
+		s[i] = img;
+	}
+	gold_sprites = s;
+	gold_sprite_n = n;
+	gold_sprite_px = px;
+}
+
+void overlay_gold_coins(cairo_t *cr, const double *xys, const int *sprite, int n) {
+	if (gold_sprites == NULL) {
+		return;
+	}
+	double px = gold_sprite_px;
+	for (int i = 0; i < n; i++) {
+		if (sprite[i] < 0 || sprite[i] >= gold_sprite_n) {
+			continue;
+		}
+		cairo_save(cr);
+		cairo_translate(cr, xys[3 * i], xys[3 * i + 1]);
+		cairo_scale(cr, xys[3 * i + 2] / px, xys[3 * i + 2] / px);
+		cairo_set_source_surface(cr, gold_sprites[sprite[i]], 0, 0);
+		cairo_pattern_set_filter(cairo_get_source(cr), CAIRO_FILTER_NEAREST);
+		cairo_rectangle(cr, 0, 0, px, px);
+		cairo_fill(cr);
+		cairo_restore(cr);
+	}
+}
+
+void overlay_line(cairo_t *cr, double x0, double y0, double x1, double y1, double width,
+	double r, double g, double b, double a, double dash) {
+	cairo_save(cr);
+	cairo_set_source_rgba(cr, r, g, b, a);
+	cairo_set_line_width(cr, width);
+	if (dash > 0) {
+		cairo_set_dash(cr, &dash, 1, 0);
+	}
+	cairo_move_to(cr, x0, y0);
+	cairo_line_to(cr, x1, y1);
+	cairo_stroke(cr);
+	cairo_restore(cr);
+}
+
+void overlay_polyline(cairo_t *cr, const double *xy, int n, double width, double r, double g, double b, double a) {
+	if (n < 2) {
+		return;
+	}
+	cairo_save(cr);
+	cairo_set_source_rgba(cr, r, g, b, a);
+	cairo_set_line_width(cr, width);
+	cairo_set_line_join(cr, CAIRO_LINE_JOIN_ROUND);
+	cairo_move_to(cr, xy[0], xy[1]);
+	for (int i = 1; i < n; i++) {
+		cairo_line_to(cr, xy[2 * i], xy[2 * i + 1]);
+	}
+	cairo_stroke(cr);
+	cairo_restore(cr);
+}
+
+void overlay_round_rect(cairo_t *cr, double x, double y, double w, double h, double radius,
+	double r, double g, double b) {
+	cairo_new_sub_path(cr);
+	cairo_arc(cr, x + w - radius, y + radius, radius, -G_PI / 2, 0);
+	cairo_arc(cr, x + w - radius, y + h - radius, radius, 0, G_PI / 2);
+	cairo_arc(cr, x + radius, y + h - radius, radius, G_PI / 2, G_PI);
+	cairo_arc(cr, x + radius, y + radius, radius, G_PI, 3 * G_PI / 2);
+	cairo_close_path(cr);
+	cairo_set_source_rgb(cr, r, g, b);
+	cairo_fill(cr);
+}
+
+void overlay_clip(cairo_t *cr, double x, double y, double w, double h) {
+	cairo_save(cr);
+	cairo_rectangle(cr, x, y, w, h);
+	cairo_clip(cr);
+}
+
+void overlay_unclip(cairo_t *cr) { cairo_restore(cr); }
+
+// --- text ---------------------------------------------------------------
+
+typedef struct {
+	PangoFontDescription *desc;
+	PangoAttrList *attrs; // tabular digits, so changing prices do not jitter
+} font;
+
+static PangoContext *text_ctx;
+
+void *overlay_font_new(const char *family, int weight, double size) {
+	if (text_ctx == NULL) {
+		text_ctx = pango_font_map_create_context(pango_cairo_font_map_get_default());
+	}
+	font *f = g_new0(font, 1);
+	f->desc = pango_font_description_new();
+	pango_font_description_set_family(f->desc, family);
+	pango_font_description_set_weight(f->desc, (PangoWeight)weight);
+	pango_font_description_set_absolute_size(f->desc, size * PANGO_SCALE);
+	f->attrs = pango_attr_list_new();
+	pango_attr_list_insert(f->attrs, pango_attr_font_features_new("tnum"));
+	return f;
+}
+
+void overlay_font_free(void *fp) {
+	font *f = fp;
+	if (f == NULL) {
+		return;
+	}
+	pango_font_description_free(f->desc);
+	pango_attr_list_unref(f->attrs);
+	g_free(f);
+}
+
+static PangoLayout *text_layout(font *f, const char *text) {
+	PangoLayout *l = pango_layout_new(text_ctx);
+	pango_layout_set_font_description(l, f->desc);
+	pango_layout_set_attributes(l, f->attrs);
+	pango_layout_set_text(l, text, -1);
+	return l;
+}
+
+void overlay_text_size(void *fp, const char *text, double *w, double *h) {
+	PangoLayout *l = text_layout(fp, text);
+	PangoRectangle logical;
+	pango_layout_get_extents(l, NULL, &logical);
+	*w = (double)logical.width / PANGO_SCALE;
+	*h = (double)logical.height / PANGO_SCALE;
+	g_object_unref(l);
+}
+
+// cairo has no blur, so the macOS shadow halo is approximated by a few
+// strokes of the glyph outlines, wide and faint to narrow and darker.
+void overlay_text(cairo_t *cr, void *fp, const char *text, double x, double y,
+	double r, double g, double b, double halo) {
+	PangoLayout *l = text_layout(fp, text);
+	cairo_save(cr);
+	if (halo > 0) {
+		static const double widths[] = {1.5, 1.0, 0.5};
+		static const double alphas[] = {0.15, 0.25, 0.4};
+		cairo_move_to(cr, x, y);
+		pango_cairo_layout_path(cr, l);
+		cairo_set_line_join(cr, CAIRO_LINE_JOIN_ROUND);
+		for (int i = 0; i < 3; i++) {
+			cairo_set_source_rgba(cr, 0, 0, 0, alphas[i]);
+			cairo_set_line_width(cr, halo * widths[i]);
+			cairo_stroke_preserve(cr);
+		}
+		cairo_new_path(cr);
+	}
+	cairo_set_source_rgb(cr, r, g, b);
+	cairo_move_to(cr, x, y);
+	pango_cairo_show_layout(cr, l);
+	cairo_restore(cr);
+	g_object_unref(l);
+}
+
 void *overlay_window_create(int i, const char *startup_id, uintptr_t animation) {
 	GListModel *mons = gdk_display_get_monitors(gdk_display_get_default());
 	GdkMonitor *mon = g_list_model_get_item(mons, (guint)i);

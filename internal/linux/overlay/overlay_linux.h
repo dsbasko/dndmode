@@ -53,6 +53,32 @@ void overlay_term_draw(cairo_t *cr, void *layout, double x, double y, double cli
 void overlay_term_free(void *layout);
 void overlay_fill_rect(cairo_t *cr, double x, double y, double w, double h, double r, double g, double b);
 
+// gold: installs the coin sprites once (n premultiplied ARGB32 images of
+// px*px pixels), then draws n coins in one call, far to near: xys holds the
+// top-left and side of each, sprite its sprite index. Nearest-neighbour, so
+// the pixel art stays crisp.
+void overlay_gold_sprites(const uint32_t *argb, int n, int px);
+void overlay_gold_coins(cairo_t *cr, const double *xys, const int *sprite, int n);
+
+// Shapes. dash 0 strokes a solid line; xy holds n points.
+void overlay_line(cairo_t *cr, double x0, double y0, double x1, double y1, double width,
+	double r, double g, double b, double a, double dash);
+void overlay_polyline(cairo_t *cr, const double *xy, int n, double width, double r, double g, double b, double a);
+void overlay_round_rect(cairo_t *cr, double x, double y, double w, double h, double radius,
+	double r, double g, double b);
+// overlay_clip saves the context and clips to the box; overlay_unclip restores it.
+void overlay_clip(cairo_t *cr, double x, double y, double w, double h);
+void overlay_unclip(cairo_t *cr);
+
+// Text in a font of one family, weight (PangoWeight) and absolute size,
+// with tabular digits. Drawn with its top-left at (x, y); halo > 0 first
+// strokes a dark glow that wide around the glyphs.
+void *overlay_font_new(const char *family, int weight, double size);
+void overlay_font_free(void *font);
+void overlay_text_size(void *font, const char *text, double *w, double *h);
+void overlay_text(cairo_t *cr, void *font, const char *text, double x, double y,
+	double r, double g, double b, double halo);
+
 void overlay_window_destroy(void *w);
 
 // Starts / stops forwarding monitor changes (debounced) to
