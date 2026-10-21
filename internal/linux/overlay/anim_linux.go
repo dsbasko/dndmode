@@ -55,6 +55,8 @@ func newAnimation(style, lang string, log *slog.Logger) animation {
 		return &goldAnim{}
 	case "bamboo":
 		return &bambooAnim{}
+	case "dino":
+		return &dinoAnim{}
 	}
 	return nil
 }
@@ -599,6 +601,89 @@ func (a *bambooAnim) freeC() {
 // free releases the sprite set and the canvas; called when the window goes
 // away.
 func (a *bambooAnim) free() { a.freeC() }
+
+// --- dino ---
+
+// dinoAnim paints a dinoView into a canvas the size of the strip when the
+// run steps, and shows it scaled up across the middle of the widget on
+// every repaint; the rest of the widget is already black. The sprite set
+// and the canvas are rebuilt on a resize.
+type dinoAnim struct {
+	dinoView
+	sprites unsafe.Pointer
+	canvas  unsafe.Pointer
+	stale   bool // the canvas no longer matches the view
+	painted bool // the canvas holds the current frame
+	ops     []C.int
+}
+
+func (a *dinoAnim) tick(w, h, dt float64) {
+	seeded, bw, bh := a.seeded, a.boundsW, a.boundsH
+	a.dinoView.tick(w, h, dt)
+	if a.seeded && (!seeded || bw != a.boundsW || bh != a.boundsH) {
+		a.stale = true
+	}
+	if a.changed {
+		a.painted = false
+	}
+}
+
+// still reports a frame the canvas already shows.
+func (a *dinoAnim) still() bool {
+	changed := a.changed
+	a.changed = false
+	return !changed
+}
+
+// upload hands the sprite set to C and makes a canvas the size of the strip.
+func (a *dinoAnim) upload() {
+	a.freeC()
+	wh := make([]C.int, 0, 2*len(a.images))
+	n := 0
+	for _, im := range a.images {
+		wh = append(wh, C.int(im.w), C.int(im.h))
+		n += len(im.px)
+	}
+	px := make([]C.uint32_t, 0, n)
+	for _, im := range a.images {
+		for _, p := range im.px {
+			px = append(px, C.uint32_t(p))
+		}
+	}
+	a.sprites = C.overlay_sprites_new(&px[0], &wh[0], C.int(len(a.images)))
+	fw, fh := a.frameSize()
+	a.canvas = C.overlay_canvas_new(C.int(fw), C.int(fh))
+	a.stale = false
+}
+
+func (a *dinoAnim) draw(cr *C.cairo_t) {
+	if !a.seeded {
+		return
+	}
+	if a.stale {
+		a.upload()
+		a.painted = false
+	}
+	if !a.painted {
+		a.ops = a.ops[:0]
+		for _, b := range a.frame() {
+			a.ops = append(a.ops, C.int(b.sprite), C.int(b.x), C.int(b.y), C.int(b.w), C.int(b.h), C.int(b.alpha))
+		}
+		C.overlay_canvas_paint(a.canvas, a.sprites, &a.ops[0], C.int(len(a.ops)/6))
+		a.painted = true
+	}
+	C.overlay_canvas_show(cr, a.canvas, 0, C.double(a.yOffset()), C.double(a.unit()))
+}
+
+func (a *dinoAnim) freeC() {
+	C.overlay_sprites_free(a.sprites)
+	C.overlay_canvas_free(a.canvas)
+	a.sprites, a.canvas = nil, nil
+}
+
+// free releases the sprite set and the canvas; called when the window goes
+// away.
+func (a *dinoAnim) free() { a.freeC() }
 
 // --- glass ---
 

@@ -13,7 +13,7 @@
 //	watch key   GNOME custom shortcut + SIGUSR1   (internal/linux/gnomekeys)
 //
 // Every overlay_style is available: black, dvd, matrix, terminal, gold,
-// bamboo, glass and none.
+// bamboo, glass, none, and dino, which is drawn on Linux only.
 package main
 
 import (
@@ -201,7 +201,7 @@ func run() int {
 		if styleSource == "flag" {
 			_, _ = fmt.Fprintf(errW, "dndmode: invalid --style %q: %v.\n", overlayStyle, err)
 		} else {
-			_, _ = fmt.Fprintf(errW, "dndmode: invalid overlay_style %q: %v. Fix overlay_style in %s (valid on Linux: black, dvd, matrix, terminal, gold, bamboo, glass, none).\n", overlayStyle, err, cfgPath)
+			_, _ = fmt.Fprintf(errW, "dndmode: invalid overlay_style %q: %v. Fix overlay_style in %s (valid on Linux: black, dvd, matrix, terminal, gold, bamboo, dino, glass, none).\n", overlayStyle, err, cfgPath)
 		}
 		return exitConfigErr
 	}
@@ -211,7 +211,7 @@ func run() int {
 		if styleSource == "flag" {
 			src = "--style"
 		}
-		_, _ = fmt.Fprintf(errW, "dndmode: overlay style %q is not available on Linux (use black, dvd, matrix, terminal, gold, bamboo, glass or none). Fix %s.\n", overlayStyle, src)
+		_, _ = fmt.Fprintf(errW, "dndmode: overlay style %q is not available on Linux (use black, dvd, matrix, terminal, gold, bamboo, dino, glass or none). Fix %s.\n", overlayStyle, src)
 		return exitConfigErr
 	}
 

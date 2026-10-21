@@ -450,6 +450,16 @@ func run() int {
 		return exitConfigErr
 	}
 	overlayStyle = config.NormalizeOverlayStyle(overlayStyle)
+	// dino is drawn on Linux only. The shared config grammar accepts it, so it
+	// is refused here with the fix instead of quietly drawing black.
+	if overlayStyle == config.OverlayStyleDino {
+		src := "overlay_style in ~/.config/dndmode/config.yml"
+		if styleSource == "flag" {
+			src = "--style"
+		}
+		_, _ = fmt.Fprintf(errW, "dndmode: overlay style %q is not available on macOS (use black, matrix, terminal, dvd, gold, bamboo, glass or none). Fix %s.\n", overlayStyle, src)
+		return exitConfigErr
+	}
 
 	// Resolve the glass blur radius (only meaningful for overlay_style glass): a
 	// --style glass:N suffix (blurOverride, already validated in parseStyleFlag)
