@@ -128,6 +128,15 @@ const (
 	// guarantee identical to black. One run per display. Ambient only: it
 	// never reacts to input.
 	OverlayStyleDino = "dino"
+	// OverlayStyleSpark draws a terracotta spark over the opaque black
+	// shield: a glowing twelve-ray star that slowly turns and breathes, with
+	// a whimsical verb under it ("Pondering…") typing itself in under a
+	// shimmer and a line
+	// counting the time locked and made-up tokens. The group drifts slowly
+	// so nothing burns in. Linux only, like dino. Cosmetic only — opaque,
+	// every blocking guarantee identical to black. One spark per display.
+	// Ambient only: it never reacts to input.
+	OverlayStyleSpark = "spark"
 	// OverlayStyleGlass makes the shield TRANSPARENT and frosts it: an
 	// NSVisualEffectView blurs whatever is behind the window (frosted glass).
 	// Unlike black/matrix/terminal it is intentionally non-opaque — the desktop shows
@@ -282,7 +291,7 @@ type Config struct {
 	ActivateHotkey *string `yaml:"activate_hotkey"`
 	// OverlayStyle selects the overlay look. Absent/empty => "black" (v1
 	// default, via NormalizeOverlayStyle); the only valid non-empty values are
-	// "black", "matrix", "terminal", "dvd", "gold", "bamboo", "dino", "glass" and "none" ("none" = caffeinate-only
+	// "black", "matrix", "terminal", "dvd", "gold", "bamboo", "dino", "spark", "glass" and "none" ("none" = caffeinate-only
 	// mode, no overlay/DND/input-block — see OverlayStyleNone). The VALUE is validated by the caller
 	// (main.go via ValidateOverlayStyle), NOT by yaml.Strict() — Strict only
 	// guards unknown KEYS, so a known key with a junk value parses fine (QUICK-gh8).
@@ -356,17 +365,17 @@ func NormalizeMute(m *bool) bool {
 }
 
 // ValidateOverlayStyle accepts "" (treated as black), "black", "matrix",
-// "terminal", "dvd", "gold", "bamboo", "dino", "glass" and "none"; anything else returns a non-nil error whose
+// "terminal", "dvd", "gold", "bamboo", "dino", "spark", "glass" and "none"; anything else returns a non-nil error whose
 // message is suitable for embedding in main.go's stderr template. yaml.Strict()
 // cannot catch a bad VALUE (only unknown keys), so this is the real gate before
 // any window is created (T-gh8-01). "none" is accepted here but routes to the
 // caffeinate-only path in main.go — it never reaches the overlay controller.
 func ValidateOverlayStyle(s string) error {
 	switch s {
-	case "", OverlayStyleBlack, OverlayStyleMatrix, OverlayStyleTerminal, OverlayStyleDVD, OverlayStyleGold, OverlayStyleBamboo, OverlayStyleDino, OverlayStyleGlass, OverlayStyleNone:
+	case "", OverlayStyleBlack, OverlayStyleMatrix, OverlayStyleTerminal, OverlayStyleDVD, OverlayStyleGold, OverlayStyleBamboo, OverlayStyleDino, OverlayStyleSpark, OverlayStyleGlass, OverlayStyleNone:
 		return nil
 	default:
-		return fmt.Errorf("unknown overlay_style %q (valid: black, matrix, terminal, dvd, gold, bamboo, dino, glass, none)", s)
+		return fmt.Errorf("unknown overlay_style %q (valid: black, matrix, terminal, dvd, gold, bamboo, dino, spark, glass, none)", s)
 	}
 }
 
@@ -1025,6 +1034,11 @@ unlock_code: %s
 #            score counts up. Starts at night under a moon, twinkling
 #            stars and now and then a shooting star, and fades to day and
 #            back every 700 points. Cosmetic only; opaque, every blocking
+#            guarantee is identical to black.
+#   spark  : Linux only. A glowing terracotta spark slowly turning and
+#            breathing, a verb under it ("Pondering…") typing itself in
+#            under a shimmer, and the time locked with a made-up token count. The group drifts so
+#            nothing burns in. Cosmetic only; opaque, every blocking
 #            guarantee is identical to black.
 #   glass  : TRANSPARENT frosted glass — the blurred desktop shows through.
 #            Trades the no-bleed-through guarantee for the look; keyboard and

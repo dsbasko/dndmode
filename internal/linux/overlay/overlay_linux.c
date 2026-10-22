@@ -443,6 +443,47 @@ void overlay_polyline(cairo_t *cr, const double *xy, int n, double width, double
 	cairo_restore(cr);
 }
 
+void overlay_fill_polys(cairo_t *cr, const double *xy, int npoly, int nverts, double cx, double cy, double radius,
+	double r0, double g0, double b0, double r1, double g1, double b1) {
+	if (npoly < 1 || nverts < 3 || radius <= 0) {
+		return;
+	}
+	cairo_save(cr);
+	cairo_pattern_t *pat = cairo_pattern_create_radial(cx, cy, 0, cx, cy, radius);
+	cairo_pattern_add_color_stop_rgb(pat, 0, r0, g0, b0);
+	cairo_pattern_add_color_stop_rgb(pat, 1, r1, g1, b1);
+	cairo_pattern_set_extend(pat, CAIRO_EXTEND_PAD);
+	cairo_set_source(cr, pat);
+	cairo_pattern_destroy(pat);
+	cairo_set_fill_rule(cr, CAIRO_FILL_RULE_WINDING);
+	for (int p = 0; p < npoly; p++) {
+		const double *v = xy + 2 * p * nverts;
+		cairo_move_to(cr, v[0], v[1]);
+		for (int i = 1; i < nverts; i++) {
+			cairo_line_to(cr, v[2 * i], v[2 * i + 1]);
+		}
+		cairo_close_path(cr);
+	}
+	cairo_fill(cr);
+	cairo_restore(cr);
+}
+
+void overlay_glow(cairo_t *cr, double cx, double cy, double radius, double r, double g, double b, double a) {
+	if (radius <= 0 || a <= 0) {
+		return;
+	}
+	cairo_save(cr);
+	cairo_pattern_t *pat = cairo_pattern_create_radial(cx, cy, 0, cx, cy, radius);
+	cairo_pattern_add_color_stop_rgba(pat, 0, r, g, b, a);
+	cairo_pattern_add_color_stop_rgba(pat, 0.4, r, g, b, a * 0.35);
+	cairo_pattern_add_color_stop_rgba(pat, 1, r, g, b, 0);
+	cairo_set_source(cr, pat);
+	cairo_pattern_destroy(pat);
+	cairo_arc(cr, cx, cy, radius, 0, 2 * G_PI);
+	cairo_fill(cr);
+	cairo_restore(cr);
+}
+
 void overlay_round_rect(cairo_t *cr, double x, double y, double w, double h, double radius,
 	double r, double g, double b) {
 	cairo_new_sub_path(cr);

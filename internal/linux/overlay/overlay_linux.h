@@ -79,6 +79,14 @@ void overlay_canvas_show(cairo_t *cr, void *canvas, double x, double y, double s
 void overlay_line(cairo_t *cr, double x0, double y0, double x1, double y1, double width,
 	double r, double g, double b, double a, double dash);
 void overlay_polyline(cairo_t *cr, const double *xy, int n, double width, double r, double g, double b, double a);
+// Fills npoly closed polygons of nverts points each (xy back to back) as one
+// shape, overlaps filled once, with a radial gradient from rgb0 at (cx, cy)
+// to rgb1 at radius and beyond.
+void overlay_fill_polys(cairo_t *cr, const double *xy, int npoly, int nverts, double cx, double cy, double radius,
+	double r0, double g0, double b0, double r1, double g1, double b1);
+// A soft round glow of rgb centred at (cx, cy), alpha a at the centre fading
+// to nothing at radius.
+void overlay_glow(cairo_t *cr, double cx, double cy, double radius, double r, double g, double b, double a);
 void overlay_round_rect(cairo_t *cr, double x, double y, double w, double h, double radius,
 	double r, double g, double b);
 // overlay_clip saves the context and clips to the box; overlay_unclip restores it.

@@ -25,7 +25,7 @@ Usage:
 
 Flags (per run; omitted = the config value):
   --style <look>    black | dvd | matrix | terminal[:<lang>] | gold | bamboo |
-                    dino | glass[:radius] | none;
+                    dino | spark | glass[:radius] | none;
                     <lang> = go|python|typescript|rust|ys|sql|psql|mysql|oracle|
                              varaq|elvish|php
   --mute <bool>     mute the default audio output for the session (true|false)

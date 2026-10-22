@@ -583,6 +583,21 @@ func TestLoader_Load_OverlayStyle(t *testing.T) {
 			},
 		},
 		{
+			name:     "overlay_style: spark present",
+			yamlBody: "hotkey: Ctrl+Shift+Q\noverlay_style: spark\n",
+			validateResp: func(t *testing.T, cfg config.Config, created bool, err error) {
+				if err != nil {
+					t.Fatalf("unexpected error: %v", err)
+				}
+				if created {
+					t.Errorf("created = true, want false (file pre-existed)")
+				}
+				if cfg.OverlayStyle != config.OverlayStyleSpark {
+					t.Errorf("cfg.OverlayStyle = %q, want %q", cfg.OverlayStyle, config.OverlayStyleSpark)
+				}
+			},
+		},
+		{
 			name:     "overlay_style: glass present",
 			yamlBody: "hotkey: Ctrl+Shift+Q\noverlay_style: glass\n",
 			validateResp: func(t *testing.T, cfg config.Config, created bool, err error) {
@@ -691,6 +706,7 @@ func TestValidateOverlayStyle(t *testing.T) {
 		config.OverlayStyleGold,
 		config.OverlayStyleBamboo,
 		config.OverlayStyleDino,
+		config.OverlayStyleSpark,
 		config.OverlayStyleGlass,
 		config.OverlayStyleNone,
 	}
@@ -720,6 +736,10 @@ func TestValidateOverlayStyle(t *testing.T) {
 	if config.OverlayStyleDino != "dino" {
 		t.Errorf("OverlayStyleDino = %q, want %q", config.OverlayStyleDino, "dino")
 	}
+	// spark is explicitly a valid style (constant value round-trips).
+	if config.OverlayStyleSpark != "spark" {
+		t.Errorf("OverlayStyleSpark = %q, want %q", config.OverlayStyleSpark, "spark")
+	}
 
 	// An unknown value errors and the message must name the full valid set,
 	// including the newly-added terminal, so main.go's stderr stays accurate.
@@ -727,7 +747,7 @@ func TestValidateOverlayStyle(t *testing.T) {
 	if err == nil {
 		t.Fatalf("ValidateOverlayStyle(%q) = nil, want error", "neon")
 	}
-	for _, want := range []string{"black", "matrix", "terminal", "dvd", "gold", "bamboo", "dino", "glass", "none"} {
+	for _, want := range []string{"black", "matrix", "terminal", "dvd", "gold", "bamboo", "dino", "spark", "glass", "none"} {
 		if !strings.Contains(err.Error(), want) {
 			t.Errorf("error %q missing valid style %q", err.Error(), want)
 		}

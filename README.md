@@ -328,7 +328,7 @@ when omitted.
 
 | Flag | Values | Default | Effect |
 | --- | --- | --- | --- |
-| `--style` | `black` \| `matrix` \| `terminal`[`:go`\|`python`\|`typescript`\|`rust`\|`ys`\|`sql`\|`psql`\|`mysql`\|`oracle`\|`varaq`\|`elvish`\|`php`] \| `dvd` \| `gold` \| `bamboo` \| `dino` \| `glass`[`:radius`] \| `none` | config | Overlay look for this run; wins over `overlay_style`. `terminal:<lang>` picks the source language (default `go`). `dino` is Linux only, `glass` macOS only. |
+| `--style` | `black` \| `matrix` \| `terminal`[`:go`\|`python`\|`typescript`\|`rust`\|`ys`\|`sql`\|`psql`\|`mysql`\|`oracle`\|`varaq`\|`elvish`\|`php`] \| `dvd` \| `gold` \| `bamboo` \| `dino` \| `spark` \| `glass`[`:radius`] \| `none` | config | Overlay look for this run; wins over `overlay_style`. `terminal:<lang>` picks the source language (default `go`). `dino` and `spark` are Linux only. |
 | `--mute` | `true` \| `false` | config | Mute system audio for this run. |
 | `--focus` | `true` \| `false` | config | Toggle Do Not Disturb for this run. |
 | `--timer` | Go duration (`30m`, `1h30m`, `90s`) | off | Auto-unlock after the duration, then exit `0`. |
@@ -576,6 +576,11 @@ unlock_code: Ctrl+Option+Cmd+X
 #            score counts up. Starts at night under a moon, twinkling
 #            stars and now and then a shooting star, and fades to day and
 #            back every 700 points. Cosmetic only; opaque, every blocking
+#            guarantee is identical to black.
+#   spark  : Linux only. A glowing terracotta spark slowly turning and
+#            breathing, a verb under it ("Pondering…") typing itself in
+#            under a shimmer, and the time locked with a made-up token count. The group drifts so
+#            nothing burns in. Cosmetic only; opaque, every blocking
 #            guarantee is identical to black.
 #   glass  : TRANSPARENT frosted glass — the blurred desktop shows through.
 #            Trades the no-bleed-through guarantee for the look; keyboard and
@@ -972,6 +977,7 @@ off (see [Known limitations](#known-limitations)).
 | `gold` | A candlestick chart of a gold price climbing steadily, with pixel-art gold coins falling behind it, over an opaque black shield. Cosmetic. | No | Yes |
 | `bamboo` | A dim pixel-art walk through a moonlit bamboo forest, in parallax layers, with a panda wandering far off, over an opaque black shield. Cosmetic. | No | Yes |
 | `dino` | Linux only. The Chrome offline T-Rex game, playing itself: a pixel-art dino jumps cacti and pterodactyls and never misses, fading from night (moon, twinkling stars, a shooting star now and then) to day and back every 700 points, over an opaque shield. Cosmetic. | No | Yes |
+| `spark` | Linux only. A glowing terracotta twelve-ray spark that slowly turns and breathes, a whimsical verb under it typing itself in under a shimmer, and the time locked with a made-up token count, drifting slowly over an opaque black shield. Cosmetic. | No | Yes |
 | `glass` | The desktop as it was when the shield went up, blurred and slightly darkened. | Yes, by design | Yes |
 | `none` | No overlay. Awake-only mode - see below. | n/a | No |
 
@@ -1103,6 +1109,22 @@ of an opaque shield (black at night, near-white by day), so every blocking
 guarantee is identical to `black`, and the animation is ambient - it never
 reacts to input. The macOS build refuses it with exit `1`. There are no knobs:
 `dndmode --style dino` (or `overlay_style: dino`).
+
+**`spark`** (Linux only). A thinking spinner at rest: a terracotta star of twelve
+slightly uneven rays, lighter at the hub and wrapped in a softly pulsing glow,
+turns once every 40 seconds while its rays breathe in two waves running round
+it. Under it a whimsical verb ("Pondering…", "Noodling…", "Reticulating…")
+types itself in behind a caret and fades out for the next every six seconds,
+with a light shimmer sweeping across its letters; a dim line under the verb shows how long
+the machine has been locked and a made-up token count that keeps climbing,
+like `(1m 12s · ↓ 3.4k tokens)`. The clock counts real time, so it stays right
+across a suspend. The whole group drifts on a slow Lissajous path that keeps it
+on screen, so nothing burns in. The star is filled from its outline and the
+text drawn with Pango, every refresh. Like `dvd`, it is a purely cosmetic
+content swap on top of the same opaque black shield, so every blocking
+guarantee is identical to `black`, and the animation is ambient - it never
+reacts to input. The macOS build refuses it with exit `1`. There are no knobs:
+`dndmode --style spark` (or `overlay_style: spark`).
 
 **Awake-only mode (`none`).** `overlay_style: none` (or `dndmode --style none`) turns
 dndmode into a thin [`caffeinate(8)`](https://ss64.com/mac/caffeinate.html) wrapper.
@@ -1341,7 +1363,7 @@ Only the platform layer is different:
 
 | Layer | macOS | Linux |
 | --- | --- | --- |
-| Shield | `NSWindow` per display | GTK4 fullscreen window per monitor (`black`, `glass`, or the animated `dvd`, `matrix`, `terminal`, `gold`, `bamboo` and the Linux-only `dino`) |
+| Shield | `NSWindow` per display | GTK4 fullscreen window per monitor (`black`, `glass`, or the animated `dvd`, `matrix`, `terminal`, `gold`, `bamboo` and the Linux-only `dino` and `spark`) |
 | Input lock | `CGEventTap` | exclusive `EVIOCGRAB` of every `/dev/input/event*` |
 | Awake lock | IOPMAssertion / `caffeinate` | `systemd-inhibit` + `gnome-session-inhibit`, tied to dndmode's PID |
 | Mute | `osascript` | `wpctl` (PipeWire), `pactl` as fallback |
@@ -1364,7 +1386,7 @@ Differences worth knowing:
   position: `option` is Alt, `cmd` is Super. The default code is therefore
   `Ctrl+Alt+Super+X`, the default `activate_hotkey` `Ctrl+Alt+Super+D`. A
   digest written by `--set-password` on one platform works on the other.
-- **Styles.** Every style: `black`, `dvd`, `matrix`, `terminal` (every `terminal:<lang>`), `gold`, `bamboo`, `glass`, `none`, and `dino` (Linux only).
+- **Styles.** Every style: `black`, `dvd`, `matrix`, `terminal` (every `terminal:<lang>`), `gold`, `bamboo`, `glass`, `none`, and `dino` and `spark` (Linux only).
 - **`glass`** takes its still through `org.freedesktop.portal.Screenshot`, before
   the shield appears and before input is grabbed. The first time GNOME asks
   whether to allow screenshots; the answer is remembered and covers every
@@ -1421,7 +1443,7 @@ internal/macos/
   focus/              Do Not Disturb via the Shortcuts CLI
   permissions/        Accessibility, Input Monitoring, platform, secure-input gates
 internal/linux/
-  overlay/            GTK4 per-monitor shield, black, dvd, matrix, terminal, gold, bamboo, dino and glass styles
+  overlay/            GTK4 per-monitor shield, black, dvd, matrix, terminal, gold, bamboo, dino, spark and glass styles
   evdev/              EVIOCGRAB input lock + unlock matching + capture
   inhibit/            idle / suspend inhibitor chain
   audio/              wpctl / pactl mute and restore

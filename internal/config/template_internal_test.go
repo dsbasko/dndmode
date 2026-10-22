@@ -17,7 +17,7 @@ func TestTemplate_DocumentsEveryStyle(t *testing.T) {
 	}
 	for _, style := range []string{
 		OverlayStyleBlack, OverlayStyleMatrix, OverlayStyleTerminal, OverlayStyleDVD,
-		OverlayStyleGold, OverlayStyleBamboo, OverlayStyleDino, OverlayStyleGlass, OverlayStyleNone,
+		OverlayStyleGold, OverlayStyleBamboo, OverlayStyleDino, OverlayStyleSpark, OverlayStyleGlass, OverlayStyleNone,
 	} {
 		if ValidateOverlayStyle(style) != nil {
 			t.Errorf("%q is listed here but not valid", style)

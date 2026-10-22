@@ -450,9 +450,10 @@ func run() int {
 		return exitConfigErr
 	}
 	overlayStyle = config.NormalizeOverlayStyle(overlayStyle)
-	// dino is drawn on Linux only. The shared config grammar accepts it, so it
-	// is refused here with the fix instead of quietly drawing black.
-	if overlayStyle == config.OverlayStyleDino {
+	// dino and spark are drawn on Linux only. The shared config grammar
+	// accepts them, so they are refused here with the fix instead of quietly
+	// drawing black.
+	if overlayStyle == config.OverlayStyleDino || overlayStyle == config.OverlayStyleSpark {
 		src := "overlay_style in ~/.config/dndmode/config.yml"
 		if styleSource == "flag" {
 			src = "--style"

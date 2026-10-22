@@ -57,6 +57,8 @@ func newAnimation(style, lang string, log *slog.Logger) animation {
 		return &bambooAnim{}
 	case "dino":
 		return &dinoAnim{}
+	case "spark":
+		return &sparkAnim{}
 	}
 	return nil
 }
@@ -692,6 +694,121 @@ func (a *dinoAnim) freeC() {
 // free releases the sprite set and the canvas; called when the window goes
 // away.
 func (a *dinoAnim) free() { a.freeC() }
+
+// --- spark ---
+
+// sparkFonts are the two lines' fonts at one star size, with the heights
+// of their lines and the widest the text block gets.
+type sparkFonts struct {
+	size         float64
+	verb, stat   unsafe.Pointer
+	verbH, statH float64
+	wide         float64
+}
+
+// sparkAnim draws a sparkView: the glow, the star, then the typed part of
+// the verb rune by rune so each takes its shimmer colour, with a caret
+// while it types, then the stats line. The verb's rune offsets are measured
+// once per verb.
+type sparkAnim struct {
+	sparkView
+	fonts    sparkFonts
+	measured string    // the verb runeX holds
+	runes    []string  // its runes
+	runeX    []float64 // each rune's left edge, from the verb's
+	verbW    float64
+	outline  []float64
+	pts      []C.double
+}
+
+// ensureFonts (re)creates the fonts when the star size changes.
+func (a *sparkAnim) ensureFonts() {
+	size := a.verbSize()
+	if a.fonts.verb != nil && a.fonts.size == size {
+		return
+	}
+	a.freeFonts()
+	family := C.CString("Sans")
+	defer C.free(unsafe.Pointer(family))
+	f := &a.fonts
+	f.size = size
+	f.verb = C.overlay_font_new(family, C.int(goldMedium), C.double(size))
+	f.stat = C.overlay_font_new(family, C.int(goldRegular), C.double(a.statSize()))
+	_, f.verbH = goldTextSize(f.verb, "Pg…")
+	_, f.statH = goldTextSize(f.stat, sparkStatsWidest)
+	f.wide, _ = goldTextSize(f.stat, sparkStatsWidest)
+	for _, verb := range sparkVerbs {
+		w, _ := goldTextSize(f.verb, verb+"…")
+		f.wide = max(f.wide, w)
+	}
+	a.measured = ""
+}
+
+// measure splits the verb on screen into runes and finds where each starts.
+func (a *sparkAnim) measure() {
+	text := a.verbText()
+	if text == a.measured {
+		return
+	}
+	a.measured = text
+	a.runes, a.runeX = a.runes[:0], a.runeX[:0]
+	for i, r := range text {
+		w, _ := goldTextSize(a.fonts.verb, text[:i])
+		a.runes = append(a.runes, string(r))
+		a.runeX = append(a.runeX, w)
+	}
+	a.verbW, _ = goldTextSize(a.fonts.verb, text)
+}
+
+func (a *sparkAnim) draw(cr *C.cairo_t) {
+	if !a.seeded {
+		return
+	}
+	a.ensureFonts()
+	a.measure()
+	f := &a.fonts
+	x, starY, verbY, statY := a.group(f.wide, f.verbH, f.statH)
+
+	r := a.radius()
+	c, core := sparkColor, sparkCore
+	C.overlay_glow(cr, C.double(x), C.double(starY), C.double(r*sparkGlowReach),
+		C.double(c.r), C.double(c.g), C.double(c.b), C.double(a.glow()))
+	a.outline = a.rays(x, starY, r, a.outline[:0])
+	a.pts = a.pts[:0]
+	for _, p := range a.outline {
+		a.pts = append(a.pts, C.double(p))
+	}
+	C.overlay_fill_polys(cr, &a.pts[0], C.int(sparkRays), C.int(sparkRayPoints),
+		C.double(x), C.double(starY), C.double(r*sparkCoreReach),
+		C.double(core.r), C.double(core.g), C.double(core.b), C.double(c.r), C.double(c.g), C.double(c.b))
+
+	// The verb is centred on its full width, so it types in from a fixed
+	// left edge.
+	vx := math.Round(x - a.verbW/2)
+	n := len(a.runes)
+	typed := a.typed(n)
+	for i := range typed {
+		goldText(cr, f.verb, a.runes[i], vx+a.runeX[i], verbY, a.runeColor(i, n), 0)
+	}
+	if typed < n {
+		caretW := max(2, math.Round(f.size*0.08))
+		C.overlay_fill_rect(cr, C.double(vx+a.runeX[typed]), C.double(verbY+f.verbH*0.12),
+			C.double(caretW), C.double(f.verbH*0.76), C.double(c.r), C.double(c.g), C.double(c.b))
+	}
+
+	stats := a.stats()
+	sw, _ := goldTextSize(f.stat, stats)
+	goldText(cr, f.stat, stats, math.Round(x-sw/2), statY, sparkDim, 0)
+}
+
+func (a *sparkAnim) freeFonts() {
+	C.overlay_font_free(a.fonts.verb)
+	C.overlay_font_free(a.fonts.stat)
+	a.fonts = sparkFonts{}
+}
+
+// free releases the fonts; called when the window goes away.
+func (a *sparkAnim) free() { a.freeFonts() }
 
 // --- glass ---
 
