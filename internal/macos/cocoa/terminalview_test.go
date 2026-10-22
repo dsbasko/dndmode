@@ -651,3 +651,77 @@ func TestTerminalView_Tokenize_VaraqElvish(t *testing.T) {
 		})
 	}
 }
+
+// TestTerminalView_Tokenize_PHP pins what the PHP syntax adds: `$` is
+// punctuation, so `$this` lights `this` as a keyword while other variables
+// stay idents; both quote styles are strings; `//` and `#` are comments.
+func TestTerminalView_Tokenize_PHP(t *testing.T) {
+	tests := []struct {
+		name string
+		line string
+		want []termSegment
+	}{
+		{
+			name: "variables and $this",
+			line: "$this->total = $sum;",
+			want: []termSegment{
+				{start: 0, length: 1, cls: termClassPunct},   // $
+				{start: 1, length: 4, cls: termClassKeyword}, // this
+				{start: 5, length: 2, cls: termClassPunct},   // ->
+				{start: 7, length: 5, cls: termClassIdent},   // total
+				{start: 12, length: 4, cls: termClassPunct},  // " = $"
+				{start: 16, length: 3, cls: termClassIdent},  // sum
+				{start: 19, length: 1, cls: termClassPunct},  // ;
+			},
+		},
+		{
+			name: "match arm with a single-quoted string",
+			line: "'eur' => fn",
+			want: []termSegment{
+				{start: 0, length: 5, cls: termClassString},
+				{start: 5, length: 4, cls: termClassPunct},
+				{start: 9, length: 2, cls: termClassKeyword}, // fn
+			},
+		},
+		{
+			name: "hash comment",
+			line: "return 1; # done",
+			want: []termSegment{
+				{start: 0, length: 6, cls: termClassKeyword},
+				{start: 6, length: 1, cls: termClassPunct},
+				{start: 7, length: 1, cls: termClassNumber},
+				{start: 8, length: 2, cls: termClassPunct},
+				{start: 10, length: 6, cls: termClassComment},
+			},
+		},
+		{
+			name: "slash comment after typed signature",
+			line: "public function id(): int // key",
+			want: []termSegment{
+				{start: 0, length: 6, cls: termClassKeyword}, // public
+				{start: 6, length: 1, cls: termClassPunct},
+				{start: 7, length: 8, cls: termClassKeyword}, // function
+				{start: 15, length: 1, cls: termClassPunct},
+				{start: 16, length: 2, cls: termClassIdent},   // id
+				{start: 18, length: 4, cls: termClassPunct},   // "(): "
+				{start: 22, length: 3, cls: termClassKeyword}, // int
+				{start: 25, length: 1, cls: termClassPunct},
+				{start: 26, length: 6, cls: termClassComment},
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cols := tokenizeLineColsForTest(tt.line, "php")
+			got := make([]termSegment, len(cols))
+			for i, s := range cols {
+				got[i] = termSegment{start: s.start, length: s.length, cls: s.cls}
+			}
+			if !equalSegments(got, tt.want) {
+				t.Fatalf("tokenize(%q, php):\n got  %s\n want %s",
+					tt.line, formatSegments(got), formatSegments(tt.want))
+			}
+		})
+	}
+}

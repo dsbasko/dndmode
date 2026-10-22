@@ -1,4 +1,4 @@
-//go:build darwin
+//go:build darwin || linux
 
 // Package matcher compares a tail of synthetic KeyEvent values against a
 // configured unlock code ([]hotkey.Spec). It is intentionally pure-Go

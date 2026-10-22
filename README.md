@@ -56,6 +56,7 @@ and all eight overlay styles.
 - [Threat model](#threat-model)
 - [Troubleshooting](#troubleshooting)
 - [Uninstall](#uninstall)
+- [Linux (Ubuntu 24.04)](#linux-ubuntu-2404)
 - [Building from source](#building-from-source)
 - [Known limitations](#known-limitations)
 - [License](#license)
@@ -327,7 +328,7 @@ when omitted.
 
 | Flag | Values | Default | Effect |
 | --- | --- | --- | --- |
-| `--style` | `black` \| `matrix` \| `terminal`[`:go`\|`python`\|`typescript`\|`rust`\|`ys`\|`sql`\|`psql`\|`mysql`\|`oracle`\|`varaq`\|`elvish`] \| `dvd` \| `gold` \| `bamboo` \| `glass`[`:radius`] \| `none` | config | Overlay look for this run; wins over `overlay_style`. `terminal:<lang>` picks the source language (default `go`). |
+| `--style` | `black` \| `matrix` \| `terminal`[`:go`\|`python`\|`typescript`\|`rust`\|`ys`\|`sql`\|`psql`\|`mysql`\|`oracle`\|`varaq`\|`elvish`\|`php`] \| `dvd` \| `gold` \| `bamboo` \| `glass`[`:radius`] \| `none` | config | Overlay look for this run; wins over `overlay_style`. `terminal:<lang>` picks the source language (default `go`). |
 | `--mute` | `true` \| `false` | config | Mute system audio for this run. |
 | `--focus` | `true` \| `false` | config | Toggle Do Not Disturb for this run. |
 | `--timer` | Go duration (`30m`, `1h30m`, `90s`) | off | Auto-unlock after the duration, then exit `0`. |
@@ -575,6 +576,8 @@ unlock_code: Ctrl+Option+Cmd+X
 #            trackpad are still fully blocked. Blur strength = glass_blur below.
 #            Captures + blurs the desktop, so it needs the Screen Recording
 #            permission; without it, falls back to a plain system frost.
+#            Linux: the capture goes through the GNOME screenshot portal,
+#            which asks once; if it fails, the shield is plain black.
 #   none   : awake-only mode. NO overlay, NO input blocking, NO Focus, NO audio
 #            mute — dndmode just holds the machine awake (like caffeinate).
 #            Needs no Accessibility permission; exit with Ctrl-C only (there is
@@ -595,7 +598,7 @@ unlock_code: Ctrl+Option+Cmd+X
 
 # --- terminal_language -------------------------------------------------------
 # Source language rendered by overlay_style 'terminal': go (default), python,
-# typescript, rust, ys, sql, psql, mysql, oracle, varaq or elvish. Each has
+# typescript, rust, ys, sql, psql, mysql, oracle, varaq, elvish or php. Each has
 # its own compiled-in corpus + syntax highlighting. Only used by 'terminal';
 # ignored otherwise.
 #   ys     : YoptaScript (yopta.space) - JavaScript as spoken by the gopniks of
@@ -608,6 +611,7 @@ unlock_code: Ctrl+Option+Cmd+X
 #   oracle : Oracle - PL/SQL blocks, sequences, CONNECT BY.
 #   varaq  : var'aq - a stack language with Klingon keywords. Qapla'!
 #   elvish : the Elvish shell (elv.sh). Not Tolkien's; same name, though.
+#   php    : modern PHP 8 - enums, match, readonly classes.
 # Per-run override: the --style terminal:<lang> flag (e.g. --style terminal:rust).
 # terminal_language: go
 
@@ -961,11 +965,13 @@ off (see [Known limitations](#known-limitations)).
 | `dvd` | A "DVD VIDEO" logo bounces around an opaque black shield, changing color on every edge hit. Cosmetic. | No | Yes |
 | `gold` | A candlestick chart of a gold price climbing steadily, with pixel-art gold coins falling behind it, over an opaque black shield. Cosmetic. | No | Yes |
 | `bamboo` | A dim pixel-art walk through a moonlit bamboo forest, in parallax layers, with a panda wandering far off, over an opaque black shield. Cosmetic. | No | Yes |
-| `glass` | Frosted `NSVisualEffectView`; the blurred desktop shows through. | Yes, by design | Yes |
+| `glass` | The desktop as it was when the shield went up, blurred and slightly darkened. | Yes, by design | Yes |
 | `none` | No overlay. Awake-only mode - see below. | n/a | No |
 
 `glass` is the only style that is not opaque. It trades the no-bleed-through
-guarantee for the look; input is still fully blocked underneath.
+guarantee for the look; input is still fully blocked underneath. It is a still
+taken before the shield appears (ScreenCaptureKit on macOS, the screenshot portal
+on Linux), so nothing that happens on screen afterwards shows through.
 
 **`terminal`.** A second animated style for anyone who finds `matrix` too loud. It
 renders a scrolling stream of fake source code - lines type out one character at a
@@ -982,7 +988,7 @@ Pick the language two ways (same precedence as glass `glass_blur` vs
 `--style glass:<radius>`): set `terminal_language:` in `config.yml` for the
 default, and/or append `--style terminal:<lang>` to override it for a single run.
 Valid values are `go` (default), `python`, `typescript`, `rust`, `ys`, `sql`,
-`psql`, `mysql`, `oracle`, `varaq`, and `elvish`; a bare `--style terminal` with no
+`psql`, `mysql`, `oracle`, `varaq`, `elvish`, and `php`; a bare `--style terminal` with no
 config key renders Go. Each language has its own compiled-in corpus, large enough that the stream does
 not repeat for over two hours, and its own syntax highlighting.
 
@@ -995,6 +1001,7 @@ dndmode --style terminal:ys         # YoptaScript
 dndmode --style terminal:psql       # PostgreSQL
 dndmode --style terminal:varaq      # var'aq (Klingon)
 dndmode --style terminal:elvish     # Elvish shell
+dndmode --style terminal:php        # PHP 8
 ```
 
 The four SQL values are dialects, not one corpus with a different label: `sql` is
@@ -1008,6 +1015,8 @@ with Klingon keywords (`latlh` is `dup`, `pong` names a procedure, `HIja'chugh` 
 `if`), written in the Latin transliteration its interpreters read; the apostrophe is
 a letter there, so `ghobe'chugh` highlights as one word. `elvish` is the
 [Elvish shell](https://elv.sh/) - ordinary shell scripting, Tolkien not included.
+`php` is modern PHP 8 (typed properties, backed enums, `match`, readonly classes);
+like every corpus it never shows an opening `<?php` tag or a `namespace` / `use` line.
 
 `ys` is [YoptaScript](https://yopta.space/) - a real joke language that transpiles
 to JavaScript, written entirely in the slang of the Russian courtyard (`йопта` is
@@ -1298,6 +1307,56 @@ dndmode is installed), `watch.json` (written for the life of a background `--wat
 process and deleted when it exits) and `watch.log` (that process's output,
 truncated on every `--watch` start).
 
+## Linux (Ubuntu 24.04)
+
+The same CLI, config file and exit codes run on Linux (GNOME, Wayland or X11).
+Only the platform layer is different:
+
+| Layer | macOS | Linux |
+| --- | --- | --- |
+| Shield | `NSWindow` per display | GTK4 fullscreen window per monitor (`black`, `glass`, or the animated `dvd`, `matrix`, `terminal`, `gold` and `bamboo`) |
+| Input lock | `CGEventTap` | exclusive `EVIOCGRAB` of every `/dev/input/event*` |
+| Awake lock | IOPMAssertion / `caffeinate` | `systemd-inhibit` + `gnome-session-inhibit`, tied to dndmode's PID |
+| Mute | `osascript` | `wpctl` (PipeWire), `pactl` as fallback |
+| `focus` | Shortcuts `dndmode-on/off` | GNOME `show-banners` off, previous value restored |
+| `--watch` trigger | Carbon hotkey | GNOME custom shortcut running `dndmode --activate` |
+
+```bash
+sudo apt install golang libgtk-4-dev      # build deps (Go 1.26+)
+make install-linux                        # build + /usr/local/bin/dndmode
+sudo usermod -aG input $USER              # once; log out and back in
+```
+
+Differences worth knowing:
+
+- **Access.** The input lock reads `/dev/input`, so the user must be in the
+  `input` group. Without it dndmode exits `3` and prints the command above.
+  Exit `4` means another program already holds an exclusive grab (a remapper
+  such as keyd or another locker).
+- **Keys.** The unlock-code grammar is unchanged and matched by physical
+  position: `option` is Alt, `cmd` is Super. The default code is therefore
+  `Ctrl+Alt+Super+X`, the default `activate_hotkey` `Ctrl+Alt+Super+D`. A
+  digest written by `--set-password` on one platform works on the other.
+- **Styles.** Every style: `black`, `dvd`, `matrix`, `terminal` (every `terminal:<lang>`), `gold`, `bamboo`, `glass` and `none`.
+- **`glass`** takes its still through `org.freedesktop.portal.Screenshot`, before
+  the shield appears and before input is grabbed. The first time GNOME asks
+  whether to allow screenshots; the answer is remembered and covers every
+  unsandboxed app, not just dndmode. The portal saves the shot among your
+  pictures and dndmode deletes it right after reading it. If screenshots are
+  denied or the portal does not answer (5 s, or 30 s while the dialog is up),
+  the shield is plain black. To be asked again: `gdbus call --session --dest
+  org.freedesktop.impl.portal.PermissionStore --object-path
+  /org/freedesktop/impl/portal/PermissionStore --method
+  org.freedesktop.impl.portal.PermissionStore.Delete screenshot screenshot`.
+- **Everything is grabbed**, including VT switching and SysRq, for the length
+  of the session. The way out without the code is `--timer`, SSH (`dndmode
+  --kill` / `pkill dndmode`) or a power cycle — the same as on macOS.
+- **`--watch`** adds an entry named `dndmode` to Settings → Keyboard → Custom
+  Shortcuts and removes it on exit. If the watch process was killed with `-9`,
+  the next press of the combination removes the leftover entry.
+- **`focus`** needs no setup; exit `6` means the GNOME notification settings
+  could not be read.
+
 ## Building from source
 
 The project is Go 1.26 with cgo bridging into AppKit, Quartz, IOKit, and
@@ -1334,6 +1393,13 @@ internal/macos/
   audiomute/          system audio mute and restore
   focus/              Do Not Disturb via the Shortcuts CLI
   permissions/        Accessibility, Input Monitoring, platform, secure-input gates
+internal/linux/
+  overlay/            GTK4 per-monitor shield, black, dvd, matrix, terminal, gold, bamboo and glass styles
+  evdev/              EVIOCGRAB input lock + unlock matching + capture
+  inhibit/            idle / suspend inhibitor chain
+  audio/              wpctl / pactl mute and restore
+  notify/             GNOME notification banners (focus)
+  gnomekeys/          watch-mode GNOME custom shortcut
 internal/state/       teardown registry + runtime.json crash recovery
 internal/supervisor/  single-point shutdown fan-in
 ```

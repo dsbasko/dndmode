@@ -1,4 +1,4 @@
-//go:build darwin
+//go:build darwin || linux
 
 package config_test
 
@@ -384,7 +384,7 @@ func TestValidateTerminalLanguage(t *testing.T) {
 		config.TerminalLangYopta,
 		config.TerminalLangSQL, config.TerminalLangPostgres,
 		config.TerminalLangMySQL, config.TerminalLangOracle,
-		config.TerminalLangVaraq, config.TerminalLangElvish,
+		config.TerminalLangVaraq, config.TerminalLangElvish, config.TerminalLangPHP,
 		"yc", // deprecated spelling of YoptaScript; see the doc comment
 	} {
 		if err := config.ValidateTerminalLanguage(s); err != nil {
@@ -393,7 +393,7 @@ func TestValidateTerminalLanguage(t *testing.T) {
 	}
 	for _, s := range []string{"ruby", "golang", "py", "ts", "Go", "PYTHON", "c++", "yopta", "YC", "YS",
 		"SQL", "postgres", "postgresql", "pg", "my", "ora", "plsql", "mssql",
-		"klingon", "var'aq", "elv", "quenya", "sindarin"} {
+		"klingon", "var'aq", "elv", "quenya", "sindarin", "PHP", "php8"} {
 		if err := config.ValidateTerminalLanguage(s); err == nil {
 			t.Errorf("ValidateTerminalLanguage(%q) = nil, want error", s)
 		}
@@ -430,7 +430,7 @@ func TestNormalizeTerminalLanguage(t *testing.T) {
 		config.TerminalLangYopta,
 		config.TerminalLangSQL, config.TerminalLangPostgres,
 		config.TerminalLangMySQL, config.TerminalLangOracle,
-		config.TerminalLangVaraq, config.TerminalLangElvish,
+		config.TerminalLangVaraq, config.TerminalLangElvish, config.TerminalLangPHP,
 	} {
 		if got := config.NormalizeTerminalLanguage(s); got != s {
 			t.Errorf("NormalizeTerminalLanguage(%q) = %q, want unchanged", s, got)
@@ -456,7 +456,7 @@ func TestNormalizeTerminalLanguage_NeverEmitsALegacySpelling(t *testing.T) {
 		config.TerminalLangYopta,
 		config.TerminalLangSQL, config.TerminalLangPostgres,
 		config.TerminalLangMySQL, config.TerminalLangOracle,
-		config.TerminalLangVaraq, config.TerminalLangElvish,
+		config.TerminalLangVaraq, config.TerminalLangElvish, config.TerminalLangPHP,
 	}
 	// Every spelling the validator accepts, including the empty default and the
 	// deprecated ones — the exhaustive list, not a sample.
@@ -466,7 +466,7 @@ func TestNormalizeTerminalLanguage_NeverEmitsALegacySpelling(t *testing.T) {
 		config.TerminalLangYopta,
 		config.TerminalLangSQL, config.TerminalLangPostgres,
 		config.TerminalLangMySQL, config.TerminalLangOracle,
-		config.TerminalLangVaraq, config.TerminalLangElvish,
+		config.TerminalLangVaraq, config.TerminalLangElvish, config.TerminalLangPHP,
 		"yc",
 	} {
 		if err := config.ValidateTerminalLanguage(s); err != nil {
