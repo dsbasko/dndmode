@@ -1,4 +1,4 @@
-//go:build darwin
+//go:build darwin || linux
 
 // Package supervisor implements the dndmode shutdown fan-in. A single
 // goroutine select's on three trigger sources — POSIX signals (SIGINT,

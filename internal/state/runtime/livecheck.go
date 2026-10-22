@@ -1,4 +1,4 @@
-//go:build darwin
+//go:build darwin || linux
 
 package runtime
 
@@ -7,8 +7,6 @@ import (
 	"fmt"
 	"io/fs"
 	"log/slog"
-
-	"github.com/dsbasko/dndmode/internal/macos/powerassert"
 )
 
 // IsLiveInstance reports whether another live dndmode instance owns
@@ -58,12 +56,12 @@ import (
 //     S4 deviation).
 //
 // Reuses Phase 5 Manager.Read (stateless, sync, bounded) + Phase 3
-// powerassert.LiveChecker. No new abstractions.
+// LiveChecker (seams.go; powerassert.NewKernLiveChecker on macOS).
 //
 // Logger fallback: nil → slog.Default() (same convention as recovery.go
 // and powerassert.Acquire). Caller in main.go passes the structured
 // stderr logger.
-func IsLiveInstance(mgr *Manager, live powerassert.LiveChecker, log *slog.Logger) (alive bool, pid int, err error) {
+func IsLiveInstance(mgr *Manager, live LiveChecker, log *slog.Logger) (alive bool, pid int, err error) {
 	if log == nil {
 		log = slog.Default()
 	}

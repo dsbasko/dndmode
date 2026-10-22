@@ -1,4 +1,4 @@
-.PHONY: build test test-cover lint generate tools clean acceptance install audit-net audit-net-runtime audit-deps release release-check version-check package release-publish
+.PHONY: build build-linux install-linux test test-cover lint generate tools clean acceptance install audit-net audit-net-runtime audit-deps release release-check version-check package release-publish
 
 GO         ?= go
 PKG        := ./...
@@ -13,6 +13,16 @@ build:
 	CGO_ENABLED=1 GOOS=darwin GOARCH=arm64 $(GO) build -o $(BIN) ./cmd/dndmode
 	@codesign --force --sign - --identifier com.dsbasko.dndmode ./$(BIN)
 	@echo "Built $(BIN) with ad-hoc codesign (identifier=com.dsbasko.dndmode)"
+
+# Linux (Ubuntu 24.04+): needs libgtk-4-dev for the overlay. No codesign; the
+# input lock needs the user in the 'input' group instead of TCC grants.
+build-linux:
+	CGO_ENABLED=1 GOOS=linux $(GO) build -o $(BIN) ./cmd/dndmode
+	@echo "Built $(BIN) for linux/$$($(GO) env GOARCH)"
+
+install-linux: build-linux
+	sudo install -m 0755 ./$(BIN) /usr/local/bin/$(BIN)
+	@id -nG | tr ' ' '\n' | grep -qx input || echo "NOTE: add yourself to the input group: sudo usermod -aG input $$USER (then log out and back in)"
 
 test:
 	$(GO) test -race $(PKG)

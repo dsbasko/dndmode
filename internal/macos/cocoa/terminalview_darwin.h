@@ -25,6 +25,7 @@
 // --style terminal:<lang> suffix): "go" (default / NULL), "python", "typescript",
 // "rust", "ys" (YoptaScript, the one Cyrillic corpus), or one of the SQL
 // dialects "sql", "psql", "mysql", "oracle", or "varaq" (Klingon) / "elvish"
+// (the elv.sh shell) / "php"
 // (the elv.sh shell). Each picks its own
 // compiled-in corpus + syntax highlighting. Plain
 // initWithFrame: defaults to Go.
