@@ -7,6 +7,9 @@ Thumbs.db
 /dist/
 coverage.out
 
+# Local agent notes
+/CLAUDE.md
+
 # Generated mocks (mockgen via `make generate`; removed by `make clean`)
 internal/*/mocks/
 internal/*/*/mocks/

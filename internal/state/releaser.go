@@ -1,4 +1,4 @@
-//go:build darwin
+//go:build darwin || linux
 
 // Package state provides the Releaser contract, RestoreState LIFO cleanup
 // registry, and the dndmode lifecycle state machine.
