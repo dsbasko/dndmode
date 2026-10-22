@@ -14,6 +14,7 @@ import (
 	"math"
 	"runtime/cgo"
 	"sync"
+	"time"
 	"unsafe"
 )
 
@@ -598,3 +599,141 @@ func (a *bambooAnim) freeC() {
 // free releases the sprite set and the canvas; called when the window goes
 // away.
 func (a *bambooAnim) free() { a.freeC() }
+
+// --- glass ---
+
+const (
+	// glassDefaultBlur stands in for an unset (non-positive) radius, like
+	// kGlassBlurRadius on macOS.
+	glassDefaultBlur = 16.0
+	// The portal answers in about half a second once screenshots are
+	// allowed; the first time it shows a dialog, which waits for a person.
+	glassWaitGranted = 5 * time.Second
+	glassWaitAsk     = 30 * time.Second
+)
+
+// glassShot is the desktop the portal captured, covering bounds.
+type glassShot struct {
+	surf   unsafe.Pointer
+	bounds glassRect
+	w, h   int
+}
+
+// captureGlass takes the desktop shot for the monitors attached now, or
+// returns nil, and the shield draws black. It blocks the UI thread until
+// the portal answers, so it runs before any window is shown and before
+// input is grabbed: the shot holds no shield, and the first-run permission
+// dialog can still be clicked.
+func captureGlass(log *slog.Logger) *glassShot {
+	mons := monitorRects()
+	if len(mons) == 0 {
+		return nil
+	}
+	wait := glassWaitGranted
+	switch C.overlay_glass_permission() {
+	case -1:
+		log.Warn("glass: screenshots are denied in the portal permission store, drawing a black shield")
+		return nil
+	case 0:
+		wait = glassWaitAsk
+		log.Info("glass: asking for the screenshot permission", slog.Duration("timeout", wait))
+	}
+	var surf unsafe.Pointer
+	if rc := C.overlay_glass_capture(C.int(wait.Milliseconds()), &surf); rc != C.GLASS_OK {
+		log.Warn("glass: desktop capture failed, drawing a black shield", slog.String("reason", glassReason(rc)))
+		return nil
+	}
+	var w, h C.int
+	C.overlay_surface_size(surf, &w, &h)
+	return &glassShot{surf: surf, bounds: glassBounds(mons), w: int(w), h: int(h)}
+}
+
+// glassReason names a GLASS_* failure code.
+func glassReason(rc C.int) string {
+	switch rc {
+	case C.GLASS_NO_BUS:
+		return "no session bus"
+	case C.GLASS_CALL_FAILED:
+		return "the screenshot portal is unavailable"
+	case C.GLASS_TIMEOUT:
+		return "the screenshot portal did not answer in time"
+	case C.GLASS_REFUSED:
+		return "the screenshot was refused"
+	case C.GLASS_BAD_IMAGE:
+		return "the screenshot could not be read"
+	}
+	return fmt.Sprintf("code %d", int(rc))
+}
+
+// monitor returns the animation for monitor m: its part of the shot,
+// blurred by radius, or nil when the shot does not cover it.
+func (s *glassShot) monitor(m glassRect, radius float64) animation {
+	x, y, w, h, ok := glassCrop(m, s.bounds, s.w, s.h)
+	if !ok {
+		return nil
+	}
+	if radius <= 0 {
+		radius = glassDefaultBlur
+	}
+	ww, wh, sigma := glassWork(m.w, m.h, radius)
+	img := C.overlay_glass_crop(s.surf, C.double(x), C.double(y), C.double(w), C.double(h), C.int(ww), C.int(wh))
+	var stride C.int
+	data := C.overlay_surface_data(img, &stride)
+	glassBlur(unsafe.Slice((*byte)(data), int(stride)*wh), ww, wh, int(stride), sigma)
+	C.overlay_surface_dirty(img)
+	return &glassAnim{img: img}
+}
+
+func (s *glassShot) free() {
+	C.overlay_surface_free(s.surf)
+	s.surf = nil
+}
+
+// monitorRects lists the logical geometry of every attached monitor.
+func monitorRects() []glassRect {
+	n := monitorCount()
+	rects := make([]glassRect, 0, n)
+	for i := range n {
+		if r, ok := monitorRect(i); ok {
+			rects = append(rects, r)
+		}
+	}
+	return rects
+}
+
+func monitorRect(i int) (glassRect, bool) {
+	var x, y, w, h C.int
+	if C.overlay_monitor_geometry(C.int(i), &x, &y, &w, &h) != 0 {
+		return glassRect{}, false
+	}
+	return glassRect{int(x), int(y), int(w), int(h)}, true
+}
+
+// glassAnim shows one monitor's blurred shot. It never changes, so it is
+// painted again only when the window is resized.
+type glassAnim struct {
+	img     unsafe.Pointer
+	w, h    float64
+	painted bool
+}
+
+func (a *glassAnim) tick(w, h, _ float64) {
+	if w != a.w || h != a.h {
+		a.w, a.h, a.painted = w, h, false
+	}
+}
+
+func (a *glassAnim) still() bool { return a.painted }
+
+func (a *glassAnim) draw(cr *C.cairo_t) {
+	if a.w <= 0 || a.h <= 0 {
+		return
+	}
+	C.overlay_glass_show(cr, a.img, C.double(a.w), C.double(a.h), glassTint)
+	a.painted = true
+}
+
+func (a *glassAnim) free() {
+	C.overlay_surface_free(a.img)
+	a.img = nil
+}

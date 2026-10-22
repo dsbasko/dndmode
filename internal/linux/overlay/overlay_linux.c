@@ -1,7 +1,9 @@
+#include <glib/gstdio.h>
 #include <gtk/gtk.h>
 #include <pango/pangocairo.h>
 #include <pthread.h>
 #include <string.h>
+#include <unistd.h>
 
 #include "overlay_linux.h"
 #include "_cgo_export.h"
@@ -535,6 +537,242 @@ void overlay_text(cairo_t *cr, void *fp, const char *text, double x, double y,
 	pango_cairo_show_layout(cr, l);
 	cairo_restore(cr);
 	g_object_unref(l);
+}
+
+// --- glass --------------------------------------------------------------
+
+#define PORTAL_BUS "org.freedesktop.portal.Desktop"
+#define PERMISSION_STORE "org.freedesktop.impl.portal.PermissionStore"
+
+int overlay_glass_permission(void) {
+	GDBusConnection *bus = g_bus_get_sync(G_BUS_TYPE_SESSION, NULL, NULL);
+	if (bus == NULL) {
+		return 0;
+	}
+	// The screenshot portal keeps its answers in table "screenshot", entry
+	// "screenshot", keyed by app id; unsandboxed apps share the id "".
+	GVariant *r = g_dbus_connection_call_sync(bus, PERMISSION_STORE, "/org/freedesktop/impl/portal/PermissionStore",
+		PERMISSION_STORE, "Lookup", g_variant_new("(ss)", "screenshot", "screenshot"),
+		G_VARIANT_TYPE("(a{sas}v)"), G_DBUS_CALL_FLAGS_NONE, 1000, NULL, NULL);
+	g_object_unref(bus);
+	if (r == NULL) {
+		return 0; // no entry yet, or no store
+	}
+	int res = 0;
+	GVariant *perms = g_variant_get_child_value(r, 0);
+	GVariant *v = g_variant_lookup_value(perms, "", G_VARIANT_TYPE("as"));
+	if (v != NULL) {
+		gsize n = 0;
+		const gchar **vals = g_variant_get_strv(v, &n);
+		if (n > 0 && strcmp(vals[0], "yes") == 0) {
+			res = 1;
+		} else if (n > 0 && strcmp(vals[0], "no") == 0) {
+			res = -1;
+		}
+		g_free(vals);
+		g_variant_unref(v);
+	}
+	g_variant_unref(perms);
+	g_variant_unref(r);
+	return res;
+}
+
+// The answer to one Screenshot request. Heap-owned by the signal
+// subscription, so a late delivery after the wait gave up stays harmless.
+typedef struct {
+	gboolean done;
+	guint32 code;
+	gchar *uri;
+} shot_reply;
+
+static void shot_reply_free(gpointer data) {
+	shot_reply *r = data;
+	g_free(r->uri);
+	g_free(r);
+}
+
+static void shot_response(GDBusConnection *c, const gchar *sender, const gchar *path, const gchar *iface,
+	const gchar *signal, GVariant *params, gpointer data) {
+	(void)c;
+	(void)sender;
+	(void)path;
+	(void)iface;
+	(void)signal;
+	shot_reply *r = data;
+	GVariant *results = NULL;
+	g_variant_get(params, "(u@a{sv})", &r->code, &results);
+	g_free(r->uri);
+	r->uri = NULL;
+	g_variant_lookup(results, "uri", "s", &r->uri);
+	g_variant_unref(results);
+	r->done = TRUE;
+}
+
+static gboolean shot_timeout(gpointer data) {
+	*(gboolean *)data = TRUE;
+	return G_SOURCE_REMOVE;
+}
+
+static guint shot_subscribe(GDBusConnection *bus, const char *path, shot_reply *r) {
+	return g_dbus_connection_signal_subscribe(bus, PORTAL_BUS, "org.freedesktop.portal.Request", "Response", path,
+		NULL, G_DBUS_SIGNAL_FLAGS_NONE, shot_response, r, shot_reply_free);
+}
+
+int overlay_glass_capture(int timeout_ms, void **shot) {
+	static int seq;
+	*shot = NULL;
+	GDBusConnection *bus = g_bus_get_sync(G_BUS_TYPE_SESSION, NULL, NULL);
+	if (bus == NULL) {
+		return GLASS_NO_BUS;
+	}
+	// The Response signal is delivered on the context that was the thread
+	// default at subscription: a private one, so waiting for it runs no
+	// shield or dispatch callbacks of the UI loop.
+	GMainContext *ctx = g_main_context_new();
+	g_main_context_push_thread_default(ctx);
+
+	// Subscribe before calling, on the request path the token predicts, so
+	// a fast answer cannot slip past.
+	gchar *token = g_strdup_printf("dndmode_glass_%d_%d", (int)getpid(), ++seq);
+	gchar *sender = g_strdup(g_dbus_connection_get_unique_name(bus) + 1);
+	g_strdelimit(sender, ".", '_');
+	gchar *path = g_strdup_printf("/org/freedesktop/portal/desktop/request/%s/%s", sender, token);
+	shot_reply *reply = g_new0(shot_reply, 1);
+	guint sub = shot_subscribe(bus, path, reply);
+
+	GVariantBuilder opts;
+	g_variant_builder_init(&opts, G_VARIANT_TYPE_VARDICT);
+	g_variant_builder_add(&opts, "{sv}", "handle_token", g_variant_new_string(token));
+	g_variant_builder_add(&opts, "{sv}", "interactive", g_variant_new_boolean(FALSE));
+	GVariant *r = g_dbus_connection_call_sync(bus, PORTAL_BUS, "/org/freedesktop/portal/desktop",
+		"org.freedesktop.portal.Screenshot", "Screenshot", g_variant_new("(sa{sv})", "", &opts),
+		G_VARIANT_TYPE("(o)"), G_DBUS_CALL_FLAGS_NONE, timeout_ms, NULL, NULL);
+
+	int rc = GLASS_OK;
+	gchar *uri = NULL;
+	if (r == NULL) {
+		rc = GLASS_CALL_FAILED;
+	} else {
+		const gchar *handle = NULL;
+		g_variant_get(r, "(&o)", &handle);
+		if (strcmp(handle, path) != 0) {
+			// An old portal that ignores handle_token: follow its path.
+			g_dbus_connection_signal_unsubscribe(bus, sub);
+			reply = g_new0(shot_reply, 1);
+			sub = shot_subscribe(bus, handle, reply);
+		}
+		g_variant_unref(r);
+
+		gboolean timed_out = FALSE;
+		GSource *t = g_timeout_source_new((guint)timeout_ms);
+		g_source_set_callback(t, shot_timeout, &timed_out, NULL);
+		g_source_attach(t, ctx);
+		while (!reply->done && !timed_out) {
+			g_main_context_iteration(ctx, TRUE);
+		}
+		g_source_destroy(t);
+		g_source_unref(t);
+
+		if (!reply->done) {
+			rc = GLASS_TIMEOUT;
+		} else if (reply->code != 0 || reply->uri == NULL) {
+			rc = GLASS_REFUSED;
+		} else {
+			uri = g_steal_pointer(&reply->uri);
+		}
+	}
+	g_dbus_connection_signal_unsubscribe(bus, sub);
+	while (g_main_context_iteration(ctx, FALSE)) {
+		// drain, so the subscription frees its reply here
+	}
+	g_main_context_pop_thread_default(ctx);
+	g_main_context_unref(ctx);
+	g_free(path);
+	g_free(sender);
+	g_free(token);
+	g_object_unref(bus);
+
+	if (uri != NULL) {
+		gchar *file = g_filename_from_uri(uri, NULL, NULL);
+		g_free(uri);
+		if (file == NULL) {
+			return GLASS_BAD_IMAGE;
+		}
+		cairo_surface_t *img = cairo_image_surface_create_from_png(file);
+		// The portal saved the shot among the user's pictures; it is ours
+		// alone and must not outlive the read.
+		g_unlink(file);
+		g_free(file);
+		if (cairo_surface_status(img) != CAIRO_STATUS_SUCCESS) {
+			cairo_surface_destroy(img);
+			return GLASS_BAD_IMAGE;
+		}
+		*shot = img;
+	}
+	return rc;
+}
+
+void *overlay_glass_crop(void *shot, double sx, double sy, double sw, double sh, int dw, int dh) {
+	cairo_surface_t *dst = cairo_image_surface_create(CAIRO_FORMAT_ARGB32, dw > 0 ? dw : 1, dh > 0 ? dh : 1);
+	cairo_t *cr = cairo_create(dst);
+	cairo_scale(cr, dw / sw, dh / sh);
+	cairo_set_source_surface(cr, shot, -sx, -sy);
+	cairo_pattern_set_filter(cairo_get_source(cr), CAIRO_FILTER_GOOD);
+	cairo_pattern_set_extend(cairo_get_source(cr), CAIRO_EXTEND_PAD);
+	cairo_paint(cr);
+	cairo_destroy(cr);
+	cairo_surface_flush(dst);
+	return dst;
+}
+
+void overlay_glass_show(cairo_t *cr, void *img, double w, double h, double tint) {
+	if (img == NULL || w <= 0 || h <= 0) {
+		return;
+	}
+	cairo_save(cr);
+	cairo_scale(cr, w / cairo_image_surface_get_width(img), h / cairo_image_surface_get_height(img));
+	cairo_set_source_surface(cr, img, 0, 0);
+	cairo_pattern_set_filter(cairo_get_source(cr), CAIRO_FILTER_GOOD);
+	cairo_pattern_set_extend(cairo_get_source(cr), CAIRO_EXTEND_PAD);
+	cairo_paint(cr);
+	cairo_restore(cr);
+	cairo_set_source_rgba(cr, 0, 0, 0, tint);
+	cairo_paint(cr);
+}
+
+void overlay_surface_size(void *s, int *w, int *h) {
+	*w = cairo_image_surface_get_width(s);
+	*h = cairo_image_surface_get_height(s);
+}
+
+unsigned char *overlay_surface_data(void *s, int *stride) {
+	cairo_surface_flush(s);
+	*stride = cairo_image_surface_get_stride(s);
+	return cairo_image_surface_get_data(s);
+}
+
+void overlay_surface_dirty(void *s) { cairo_surface_mark_dirty(s); }
+
+void overlay_surface_free(void *s) {
+	if (s != NULL) {
+		cairo_surface_destroy(s);
+	}
+}
+
+int overlay_monitor_geometry(int i, int *x, int *y, int *w, int *h) {
+	GListModel *mons = gdk_display_get_monitors(gdk_display_get_default());
+	GdkMonitor *mon = g_list_model_get_item(mons, (guint)i);
+	if (mon == NULL) {
+		return -1;
+	}
+	GdkRectangle r;
+	gdk_monitor_get_geometry(mon, &r);
+	g_object_unref(mon);
+	*x = r.x;
+	*y = r.y;
+	*w = r.width;
+	*h = r.height;
+	return 0;
 }
 
 void *overlay_window_create(int i, const char *startup_id, uintptr_t animation) {

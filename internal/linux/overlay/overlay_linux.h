@@ -94,6 +94,31 @@ void overlay_text_size(void *font, const char *text, double *w, double *h);
 void overlay_text(cairo_t *cr, void *font, const char *text, double x, double y,
 	double r, double g, double b, double halo);
 
+// glass: the desktop shot. overlay_glass_permission reports what the
+// permission store holds for screenshots by unsandboxed apps: 1 granted,
+// -1 denied, 0 not asked yet (the portal will show a dialog).
+// overlay_glass_capture asks xdg-desktop-portal for a non-interactive
+// screenshot of the whole desktop, waits at most timeout_ms for the answer
+// on a private main context (the UI loop is not re-entered), loads the
+// PNG into *shot and deletes the file. Returns one of the GLASS_* codes.
+enum { GLASS_OK = 0, GLASS_NO_BUS, GLASS_CALL_FAILED, GLASS_TIMEOUT, GLASS_REFUSED, GLASS_BAD_IMAGE };
+int overlay_glass_permission(void);
+int overlay_glass_capture(int timeout_ms, void **shot);
+// A dw x dh ARGB32 copy of the box (sx, sy, sw, sh) of shot, smoothly scaled.
+void *overlay_glass_crop(void *shot, double sx, double sy, double sw, double sh, int dw, int dh);
+// Paints img stretched over w x h, then black at alpha tint over it.
+void overlay_glass_show(cairo_t *cr, void *img, double w, double h, double tint);
+
+// Image surfaces handed to Go: overlay_surface_data flushes and returns the
+// pixels, overlay_surface_dirty tells cairo they were changed.
+void overlay_surface_size(void *s, int *w, int *h);
+unsigned char *overlay_surface_data(void *s, int *stride);
+void overlay_surface_dirty(void *s);
+void overlay_surface_free(void *s);
+
+// Monitor i's logical geometry; -1 when the monitor has gone away.
+int overlay_monitor_geometry(int i, int *x, int *y, int *w, int *h);
+
 void overlay_window_destroy(void *w);
 
 // Starts / stops forwarding monitor changes (debounced) to

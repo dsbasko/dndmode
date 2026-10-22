@@ -576,6 +576,8 @@ unlock_code: Ctrl+Option+Cmd+X
 #            trackpad are still fully blocked. Blur strength = glass_blur below.
 #            Captures + blurs the desktop, so it needs the Screen Recording
 #            permission; without it, falls back to a plain system frost.
+#            Linux: the capture goes through the GNOME screenshot portal,
+#            which asks once; if it fails, the shield is plain black.
 #   none   : awake-only mode. NO overlay, NO input blocking, NO Focus, NO audio
 #            mute — dndmode just holds the machine awake (like caffeinate).
 #            Needs no Accessibility permission; exit with Ctrl-C only (there is
@@ -963,11 +965,13 @@ off (see [Known limitations](#known-limitations)).
 | `dvd` | A "DVD VIDEO" logo bounces around an opaque black shield, changing color on every edge hit. Cosmetic. | No | Yes |
 | `gold` | A candlestick chart of a gold price climbing steadily, with pixel-art gold coins falling behind it, over an opaque black shield. Cosmetic. | No | Yes |
 | `bamboo` | A dim pixel-art walk through a moonlit bamboo forest, in parallax layers, with a panda wandering far off, over an opaque black shield. Cosmetic. | No | Yes |
-| `glass` | Frosted `NSVisualEffectView`; the blurred desktop shows through. | Yes, by design | Yes |
+| `glass` | The desktop as it was when the shield went up, blurred and slightly darkened. | Yes, by design | Yes |
 | `none` | No overlay. Awake-only mode - see below. | n/a | No |
 
 `glass` is the only style that is not opaque. It trades the no-bleed-through
-guarantee for the look; input is still fully blocked underneath.
+guarantee for the look; input is still fully blocked underneath. It is a still
+taken before the shield appears (ScreenCaptureKit on macOS, the screenshot portal
+on Linux), so nothing that happens on screen afterwards shows through.
 
 **`terminal`.** A second animated style for anyone who finds `matrix` too loud. It
 renders a scrolling stream of fake source code - lines type out one character at a
@@ -1310,7 +1314,7 @@ Only the platform layer is different:
 
 | Layer | macOS | Linux |
 | --- | --- | --- |
-| Shield | `NSWindow` per display | GTK4 fullscreen window per monitor (`black`, or the animated `dvd`, `matrix`, `terminal`, `gold` and `bamboo`) |
+| Shield | `NSWindow` per display | GTK4 fullscreen window per monitor (`black`, `glass`, or the animated `dvd`, `matrix`, `terminal`, `gold` and `bamboo`) |
 | Input lock | `CGEventTap` | exclusive `EVIOCGRAB` of every `/dev/input/event*` |
 | Awake lock | IOPMAssertion / `caffeinate` | `systemd-inhibit` + `gnome-session-inhibit`, tied to dndmode's PID |
 | Mute | `osascript` | `wpctl` (PipeWire), `pactl` as fallback |
@@ -1333,7 +1337,17 @@ Differences worth knowing:
   position: `option` is Alt, `cmd` is Super. The default code is therefore
   `Ctrl+Alt+Super+X`, the default `activate_hotkey` `Ctrl+Alt+Super+D`. A
   digest written by `--set-password` on one platform works on the other.
-- **Styles.** `black`, `dvd`, `matrix`, `terminal` (every `terminal:<lang>`), `gold`, `bamboo` and `none`; `glass` exits `1`.
+- **Styles.** Every style: `black`, `dvd`, `matrix`, `terminal` (every `terminal:<lang>`), `gold`, `bamboo`, `glass` and `none`.
+- **`glass`** takes its still through `org.freedesktop.portal.Screenshot`, before
+  the shield appears and before input is grabbed. The first time GNOME asks
+  whether to allow screenshots; the answer is remembered and covers every
+  unsandboxed app, not just dndmode. The portal saves the shot among your
+  pictures and dndmode deletes it right after reading it. If screenshots are
+  denied or the portal does not answer (5 s, or 30 s while the dialog is up),
+  the shield is plain black. To be asked again: `gdbus call --session --dest
+  org.freedesktop.impl.portal.PermissionStore --object-path
+  /org/freedesktop/impl/portal/PermissionStore --method
+  org.freedesktop.impl.portal.PermissionStore.Delete screenshot screenshot`.
 - **Everything is grabbed**, including VT switching and SysRq, for the length
   of the session. The way out without the code is `--timer`, SSH (`dndmode
   --kill` / `pkill dndmode`) or a power cycle — the same as on macOS.
@@ -1380,7 +1394,7 @@ internal/macos/
   focus/              Do Not Disturb via the Shortcuts CLI
   permissions/        Accessibility, Input Monitoring, platform, secure-input gates
 internal/linux/
-  overlay/            GTK4 per-monitor shield, black, dvd, matrix, terminal, gold and bamboo styles
+  overlay/            GTK4 per-monitor shield, black, dvd, matrix, terminal, gold, bamboo and glass styles
   evdev/              EVIOCGRAB input lock + unlock matching + capture
   inhibit/            idle / suspend inhibitor chain
   audio/              wpctl / pactl mute and restore

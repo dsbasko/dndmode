@@ -13,8 +13,8 @@
 // other goroutines reach it through DispatchMain.
 //
 // overlay_style black, dvd (dvd.go), matrix (matrix.go), terminal
-// (terminal.go), gold (gold.go) and bamboo (bamboo.go) are implemented on
-// Linux; anim_linux.go connects the animated ones to GTK.
+// (terminal.go), gold (gold.go), bamboo (bamboo.go) and glass (glass.go) are
+// implemented on Linux; anim_linux.go connects the animated ones to GTK.
 package overlay
 
 /*
@@ -169,28 +169,36 @@ func goOverlayMonitorsChanged() {
 type Controller struct {
 	log       *slog.Logger
 	style     string
+	glassBlur float64
 	lang      string
 	startupID string
 
 	mu       sync.Mutex
 	windows  []unsafe.Pointer
 	released bool
+	// glass is the desktop shot, taken once at the first build: a rebuild
+	// after a monitor change cuts the same shot, since a new one would
+	// show the shield itself. glassTried keeps a failed capture from being
+	// retried.
+	glass      *glassShot
+	glassTried bool
 }
 
 // Styles lists the overlay styles this package draws.
-var Styles = []string{"black", "dvd", "matrix", "terminal", "gold", "bamboo"}
+var Styles = []string{"black", "dvd", "matrix", "terminal", "gold", "bamboo", "glass"}
 
 // NewController returns a controller with no windows yet. style is one of
-// Styles; anything else draws black. lang is the terminal style's source
-// language (ignored by the others). startupID is an xdg-activation token
+// Styles; anything else draws black. glassBlur is the glass style's blur
+// radius in logical pixels (non-positive means the default), lang the
+// terminal style's source language; each is ignored by the other styles. startupID is an xdg-activation token
 // (may be empty); passing the one GNOME gave the `--activate` command lets
 // the compositor raise the shield above the focused window without a
 // focus-stealing refusal.
-func NewController(style, lang, startupID string, log *slog.Logger) *Controller {
+func NewController(style string, glassBlur float64, lang, startupID string, log *slog.Logger) *Controller {
 	if log == nil {
 		log = slog.Default()
 	}
-	return &Controller{log: log, style: style, lang: lang, startupID: startupID}
+	return &Controller{log: log, style: style, glassBlur: glassBlur, lang: lang, startupID: startupID}
 }
 
 // Name implements state.Releaser.
@@ -220,12 +228,16 @@ func (c *Controller) build() {
 		sid = C.CString(c.startupID)
 		defer C.free(unsafe.Pointer(sid))
 	}
+	if c.style == "glass" && !c.glassTried {
+		c.glassTried = true
+		c.glass = captureGlass(c.log)
+	}
 	n := int(C.overlay_monitor_count())
 	for i := range n {
 		// Each monitor gets its own animation state, so logos and rain
 		// move independently per screen.
 		var h cgo.Handle
-		if a := newAnimation(c.style, c.lang, c.log); a != nil {
+		if a := c.animation(i); a != nil {
 			h = cgo.NewHandle(a)
 		}
 		w := C.overlay_window_create(C.int(i), sid, C.uintptr_t(h))
@@ -238,6 +250,21 @@ func (c *Controller) build() {
 		c.windows = append(c.windows, w)
 	}
 	c.log.Debug("shield windows created", slog.Int("monitors", n), slog.Int("windows", len(c.windows)))
+}
+
+// animation returns monitor i's animation, or nil for plain black.
+func (c *Controller) animation(i int) animation {
+	if c.style != "glass" {
+		return newAnimation(c.style, c.lang, c.log)
+	}
+	if c.glass == nil {
+		return nil
+	}
+	m, ok := monitorRect(i)
+	if !ok {
+		return nil
+	}
+	return c.glass.monitor(m, c.glassBlur)
 }
 
 // destroy closes every window. UI thread only.
@@ -283,6 +310,12 @@ func (c *Controller) Release() error {
 	dispatchSync(func() {
 		C.overlay_watch_monitors(0)
 		c.destroy()
+		c.mu.Lock()
+		if c.glass != nil {
+			c.glass.free()
+			c.glass = nil
+		}
+		c.mu.Unlock()
 	})
 	return nil
 }

@@ -12,8 +12,8 @@
 //	focus       GNOME show-banners                (internal/linux/notify)
 //	watch key   GNOME custom shortcut + SIGUSR1   (internal/linux/gnomekeys)
 //
-// Only overlay_style black, dvd, matrix, terminal, gold, bamboo and none are
-// available.
+// Every overlay_style is available: black, dvd, matrix, terminal, gold,
+// bamboo, glass and none.
 package main
 
 import (
@@ -184,14 +184,16 @@ func run() int {
 	// --- Step 5b.1: overlay style ---
 	overlayStyle := cfg.OverlayStyle
 	styleSource := "config"
-	var langOverride string // set only by a --style terminal:<lang> suffix
+	var blurOverride *float64 // set only by a --style glass:N suffix
+	var langOverride string   // set only by a --style terminal:<lang> suffix
 	if *fl.style != "" {
-		base, _, lo, perr := parseStyleFlag(*fl.style)
+		base, bo, lo, perr := parseStyleFlag(*fl.style)
 		if perr != nil {
 			_, _ = fmt.Fprintf(errW, "dndmode: invalid --style %q: %v.\n", *fl.style, perr)
 			return exitConfigErr
 		}
 		overlayStyle = base
+		blurOverride = bo
 		langOverride = lo
 		styleSource = "flag"
 	}
@@ -199,7 +201,7 @@ func run() int {
 		if styleSource == "flag" {
 			_, _ = fmt.Fprintf(errW, "dndmode: invalid --style %q: %v.\n", overlayStyle, err)
 		} else {
-			_, _ = fmt.Fprintf(errW, "dndmode: invalid overlay_style %q: %v. Fix overlay_style in %s (valid on Linux: black, dvd, matrix, terminal, gold, bamboo, none).\n", overlayStyle, err, cfgPath)
+			_, _ = fmt.Fprintf(errW, "dndmode: invalid overlay_style %q: %v. Fix overlay_style in %s (valid on Linux: black, dvd, matrix, terminal, gold, bamboo, glass, none).\n", overlayStyle, err, cfgPath)
 		}
 		return exitConfigErr
 	}
@@ -209,7 +211,18 @@ func run() int {
 		if styleSource == "flag" {
 			src = "--style"
 		}
-		_, _ = fmt.Fprintf(errW, "dndmode: overlay style %q is not available on Linux (use black, dvd, matrix, terminal, gold, bamboo or none). Fix %s.\n", overlayStyle, src)
+		_, _ = fmt.Fprintf(errW, "dndmode: overlay style %q is not available on Linux (use black, dvd, matrix, terminal, gold, bamboo, glass or none). Fix %s.\n", overlayStyle, src)
+		return exitConfigErr
+	}
+
+	// Glass blur radius, resolved like on macOS: the --style glass:N suffix
+	// (validated by parseStyleFlag) wins, then glass_blur from the config
+	// (validated here so a junk value fails fast), default 16.
+	glassBlur := config.NormalizeGlassBlur(cfg.GlassBlur)
+	if blurOverride != nil {
+		glassBlur = *blurOverride
+	} else if err := config.ValidateGlassBlur(glassBlur); err != nil {
+		_, _ = fmt.Fprintf(errW, "dndmode: invalid glass_blur %g: %v. Fix glass_blur in %s.\n", glassBlur, err, cfgPath)
 		return exitConfigErr
 	}
 
@@ -265,7 +278,10 @@ func run() int {
 			"dndmode: warning — the unlock code is short; %d steps or more is strongly recommended (every keypress is a fresh match attempt).\n",
 			config.WeakUnlockSteps)
 	}
-	if overlayStyle == config.OverlayStyleTerminal {
+	switch overlayStyle {
+	case config.OverlayStyleGlass:
+		_, _ = fmt.Fprintf(outW, "dndmode: glass_blur=%g\n", glassBlur)
+	case config.OverlayStyleTerminal:
 		_, _ = fmt.Fprintf(outW, "dndmode: terminal_language=%s\n", terminalLanguage)
 	}
 	if timerDur > 0 {
@@ -485,7 +501,7 @@ func run() int {
 		}
 
 		// Step 15: shield windows.
-		controller := overlay.NewController(overlayStyle, terminalLanguage, startupID, log)
+		controller := overlay.NewController(overlayStyle, glassBlur, terminalLanguage, startupID, log)
 		var createErr error
 		dispatchMainSync(func() { createErr = controller.CreateWindowsForAllScreens() })
 		if createErr != nil {

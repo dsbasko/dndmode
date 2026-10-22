@@ -1015,6 +1015,8 @@ unlock_code: %s
 #            trackpad are still fully blocked. Blur strength = glass_blur below.
 #            Captures + blurs the desktop, so it needs the Screen Recording
 #            permission; without it, falls back to a plain system frost.
+#            Linux: the capture goes through the GNOME screenshot portal,
+#            which asks once; if it fails, the shield is plain black.
 #   none   : awake-only mode. NO overlay, NO input blocking, NO Focus, NO audio
 #            mute — dndmode just holds the machine awake (like caffeinate).
 #            Needs no Accessibility permission; exit with Ctrl-C only (there is
