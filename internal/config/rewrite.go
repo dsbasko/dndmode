@@ -1,4 +1,4 @@
-//go:build darwin
+//go:build darwin || linux
 
 // This file holds the config-file SURGERY performed by `dndmode
 // --set-password`: replacing whatever plaintext unlock secret a config

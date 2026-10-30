@@ -124,6 +124,7 @@ func Test_parseStyleFlag(t *testing.T) {
 		{name: "bare dvd → no override", in: "dvd", wantBase: "dvd", wantBlur: nil},
 		{name: "bare gold → no override", in: "gold", wantBase: "gold", wantBlur: nil},
 		{name: "bare bamboo → no override", in: "bamboo", wantBase: "bamboo", wantBlur: nil},
+		{name: "bare sharks → no override", in: "sharks", wantBase: "sharks", wantBlur: nil},
 		{name: "unknown base passes through (validated later)", in: "neon", wantBase: "neon", wantBlur: nil},
 		{name: "glass:24 → 24", in: "glass:24", wantBase: "glass", wantBlur: fptr(24)},
 		{name: "glass:8.5 float → 8.5", in: "glass:8.5", wantBase: "glass", wantBlur: fptr(8.5)},
@@ -133,6 +134,7 @@ func Test_parseStyleFlag(t *testing.T) {
 		{name: "suffix on dvd rejected", in: "dvd:foo", wantErr: true},
 		{name: "suffix on gold rejected", in: "gold:foo", wantErr: true},
 		{name: "suffix on bamboo rejected", in: "bamboo:foo", wantErr: true},
+		{name: "suffix on sharks rejected", in: "sharks:foo", wantErr: true},
 		{name: "suffix on unknown base rejected", in: "neon:10", wantErr: true},
 		{name: "non-numeric radius rejected", in: "glass:abc", wantErr: true},
 		{name: "empty radius rejected", in: "glass:", wantErr: true},
@@ -151,6 +153,7 @@ func Test_parseStyleFlag(t *testing.T) {
 		{name: "terminal:oracle", in: "terminal:oracle", wantBase: "terminal", wantLang: "oracle"},
 		{name: "terminal:varaq", in: "terminal:varaq", wantBase: "terminal", wantLang: "varaq"},
 		{name: "terminal:elvish", in: "terminal:elvish", wantBase: "terminal", wantLang: "elvish"},
+		{name: "terminal:php", in: "terminal:php", wantBase: "terminal", wantLang: "php"},
 		// parseStyleFlag hands the suffix back VERBATIM — the deprecated
 		// spelling is folded into "ys" one step later, by the single
 		// config.NormalizeTerminalLanguage call that both the flag and the

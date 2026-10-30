@@ -51,7 +51,7 @@ func TestSmoke_Terminal_CreateClose(t *testing.T) {
 	// Exercise every terminal language (each selects a different corpus table +
 	// tokenizer syntax); "" is the bare-terminal Go default.
 	for _, lang := range []string{"", "go", "python", "typescript", "rust", "ys",
-		"sql", "psql", "mysql", "oracle", "varaq", "elvish"} {
+		"sql", "psql", "mysql", "oracle", "varaq", "elvish", "php"} {
 		w, err := createOverlayWindowStyled(id, "terminal", 0, lang)
 		if err != nil {
 			t.Fatalf("createOverlayWindowStyled(%d, terminal:%q): %v", id, lang, err)
