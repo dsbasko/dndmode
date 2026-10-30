@@ -1,4 +1,4 @@
-//go:build darwin
+//go:build darwin || linux
 
 package main
 
@@ -303,7 +303,7 @@ func checkReadyFD(fd int) error {
 // do not change.
 func redirectFDs(f *os.File, fds ...int) error {
 	for _, fd := range fds {
-		if err := unix.Dup2(int(f.Fd()), fd); err != nil {
+		if err := dupOnto(int(f.Fd()), fd); err != nil {
 			return fmt.Errorf("dup2 onto fd %d: %w", fd, err)
 		}
 	}

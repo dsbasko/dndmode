@@ -1,4 +1,4 @@
-//go:build darwin
+//go:build darwin || linux
 
 package watch_test
 
@@ -376,8 +376,8 @@ func TestKernProber_Self(t *testing.T) {
 	if err != nil || !again.Equal(start) {
 		t.Errorf("second StartTime(self) = %v, %v; want %v", again, err, start)
 	}
-	// PID_MAX on Darwin is 99998; anything above cannot exist.
-	if _, err := p.StartTime(1 << 20); !errors.Is(err, watch.ErrNoProcess) {
+	// PID_MAX is 99998 on Darwin and at most 1<<22 on Linux; anything above cannot exist.
+	if _, err := p.StartTime(1 << 30); !errors.Is(err, watch.ErrNoProcess) {
 		t.Errorf("StartTime(impossible pid) err = %v, want ErrNoProcess", err)
 	}
 	for _, bad := range []int{0, -5} {

@@ -1,4 +1,4 @@
-//go:build darwin
+//go:build darwin || linux
 
 package config_test
 
@@ -384,7 +384,7 @@ func TestValidateTerminalLanguage(t *testing.T) {
 		config.TerminalLangYopta,
 		config.TerminalLangSQL, config.TerminalLangPostgres,
 		config.TerminalLangMySQL, config.TerminalLangOracle,
-		config.TerminalLangVaraq, config.TerminalLangElvish,
+		config.TerminalLangVaraq, config.TerminalLangElvish, config.TerminalLangPHP,
 		"yc", // deprecated spelling of YoptaScript; see the doc comment
 	} {
 		if err := config.ValidateTerminalLanguage(s); err != nil {
@@ -393,7 +393,7 @@ func TestValidateTerminalLanguage(t *testing.T) {
 	}
 	for _, s := range []string{"ruby", "golang", "py", "ts", "Go", "PYTHON", "c++", "yopta", "YC", "YS",
 		"SQL", "postgres", "postgresql", "pg", "my", "ora", "plsql", "mssql",
-		"klingon", "var'aq", "elv", "quenya", "sindarin"} {
+		"klingon", "var'aq", "elv", "quenya", "sindarin", "PHP", "php8"} {
 		if err := config.ValidateTerminalLanguage(s); err == nil {
 			t.Errorf("ValidateTerminalLanguage(%q) = nil, want error", s)
 		}
@@ -430,7 +430,7 @@ func TestNormalizeTerminalLanguage(t *testing.T) {
 		config.TerminalLangYopta,
 		config.TerminalLangSQL, config.TerminalLangPostgres,
 		config.TerminalLangMySQL, config.TerminalLangOracle,
-		config.TerminalLangVaraq, config.TerminalLangElvish,
+		config.TerminalLangVaraq, config.TerminalLangElvish, config.TerminalLangPHP,
 	} {
 		if got := config.NormalizeTerminalLanguage(s); got != s {
 			t.Errorf("NormalizeTerminalLanguage(%q) = %q, want unchanged", s, got)
@@ -456,7 +456,7 @@ func TestNormalizeTerminalLanguage_NeverEmitsALegacySpelling(t *testing.T) {
 		config.TerminalLangYopta,
 		config.TerminalLangSQL, config.TerminalLangPostgres,
 		config.TerminalLangMySQL, config.TerminalLangOracle,
-		config.TerminalLangVaraq, config.TerminalLangElvish,
+		config.TerminalLangVaraq, config.TerminalLangElvish, config.TerminalLangPHP,
 	}
 	// Every spelling the validator accepts, including the empty default and the
 	// deprecated ones — the exhaustive list, not a sample.
@@ -466,7 +466,7 @@ func TestNormalizeTerminalLanguage_NeverEmitsALegacySpelling(t *testing.T) {
 		config.TerminalLangYopta,
 		config.TerminalLangSQL, config.TerminalLangPostgres,
 		config.TerminalLangMySQL, config.TerminalLangOracle,
-		config.TerminalLangVaraq, config.TerminalLangElvish,
+		config.TerminalLangVaraq, config.TerminalLangElvish, config.TerminalLangPHP,
 		"yc",
 	} {
 		if err := config.ValidateTerminalLanguage(s); err != nil {
@@ -564,6 +564,36 @@ func TestLoader_Load_OverlayStyle(t *testing.T) {
 				}
 				if cfg.OverlayStyle != config.OverlayStyleBamboo {
 					t.Errorf("cfg.OverlayStyle = %q, want %q", cfg.OverlayStyle, config.OverlayStyleBamboo)
+				}
+			},
+		},
+		{
+			name:     "overlay_style: dino present",
+			yamlBody: "hotkey: Ctrl+Shift+Q\noverlay_style: dino\n",
+			validateResp: func(t *testing.T, cfg config.Config, created bool, err error) {
+				if err != nil {
+					t.Fatalf("unexpected error: %v", err)
+				}
+				if created {
+					t.Errorf("created = true, want false (file pre-existed)")
+				}
+				if cfg.OverlayStyle != config.OverlayStyleDino {
+					t.Errorf("cfg.OverlayStyle = %q, want %q", cfg.OverlayStyle, config.OverlayStyleDino)
+				}
+			},
+		},
+		{
+			name:     "overlay_style: spark present",
+			yamlBody: "hotkey: Ctrl+Shift+Q\noverlay_style: spark\n",
+			validateResp: func(t *testing.T, cfg config.Config, created bool, err error) {
+				if err != nil {
+					t.Fatalf("unexpected error: %v", err)
+				}
+				if created {
+					t.Errorf("created = true, want false (file pre-existed)")
+				}
+				if cfg.OverlayStyle != config.OverlayStyleSpark {
+					t.Errorf("cfg.OverlayStyle = %q, want %q", cfg.OverlayStyle, config.OverlayStyleSpark)
 				}
 			},
 		},
@@ -675,6 +705,8 @@ func TestValidateOverlayStyle(t *testing.T) {
 		config.OverlayStyleDVD,
 		config.OverlayStyleGold,
 		config.OverlayStyleBamboo,
+		config.OverlayStyleDino,
+		config.OverlayStyleSpark,
 		config.OverlayStyleGlass,
 		config.OverlayStyleNone,
 	}
@@ -700,6 +732,14 @@ func TestValidateOverlayStyle(t *testing.T) {
 	if config.OverlayStyleBamboo != "bamboo" {
 		t.Errorf("OverlayStyleBamboo = %q, want %q", config.OverlayStyleBamboo, "bamboo")
 	}
+	// dino is explicitly a valid style (constant value round-trips).
+	if config.OverlayStyleDino != "dino" {
+		t.Errorf("OverlayStyleDino = %q, want %q", config.OverlayStyleDino, "dino")
+	}
+	// spark is explicitly a valid style (constant value round-trips).
+	if config.OverlayStyleSpark != "spark" {
+		t.Errorf("OverlayStyleSpark = %q, want %q", config.OverlayStyleSpark, "spark")
+	}
 
 	// An unknown value errors and the message must name the full valid set,
 	// including the newly-added terminal, so main.go's stderr stays accurate.
@@ -707,7 +747,7 @@ func TestValidateOverlayStyle(t *testing.T) {
 	if err == nil {
 		t.Fatalf("ValidateOverlayStyle(%q) = nil, want error", "neon")
 	}
-	for _, want := range []string{"black", "matrix", "terminal", "dvd", "gold", "bamboo", "glass", "none"} {
+	for _, want := range []string{"black", "matrix", "terminal", "dvd", "gold", "bamboo", "dino", "spark", "glass", "none"} {
 		if !strings.Contains(err.Error(), want) {
 			t.Errorf("error %q missing valid style %q", err.Error(), want)
 		}
