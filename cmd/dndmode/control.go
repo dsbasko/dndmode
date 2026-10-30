@@ -1,4 +1,4 @@
-//go:build darwin
+//go:build darwin || linux
 
 package main
 
@@ -13,7 +13,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/dsbasko/dndmode/internal/macos/powerassert"
 	runtimepkg "github.com/dsbasko/dndmode/internal/state/runtime"
 	watchpkg "github.com/dsbasko/dndmode/internal/state/watch"
 )
@@ -84,7 +83,7 @@ type controlDeps struct {
 	watch   *watchpkg.Manager
 	runtime *runtimepkg.Manager
 	prober  watchpkg.Prober
-	live    powerassert.LiveChecker
+	live    runtimepkg.LiveChecker
 	sig     watchpkg.Signaller
 	now     func() time.Time
 	stop    watchpkg.StopOptions
@@ -111,7 +110,7 @@ func runWatchControl(fl controlFlags, outW, errW io.Writer, log *slog.Logger) in
 		watch:   watchpkg.NewManager(filepath.Join(home, watchRecordRelPath), log),
 		runtime: runtimepkg.NewManager(filepath.Join(home, runtimeRelPath), log),
 		prober:  watchpkg.NewKernProber(),
-		live:    powerassert.NewKernLiveChecker(),
+		live:    runtimepkg.NewKernLiveChecker(),
 		sig:     watchpkg.NewKernSignaller(),
 		now:     time.Now,
 	}

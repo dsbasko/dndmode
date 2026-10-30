@@ -1,4 +1,4 @@
-//go:build darwin
+//go:build darwin || linux
 
 // Package hotkey parses macOS unlock codes into a sequence of Specs
 // (modifier mask + virtual keyCode per step).
