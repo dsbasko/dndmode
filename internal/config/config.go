@@ -1,4 +1,4 @@
-//go:build darwin
+//go:build darwin || linux
 
 // Package config loads and writes the dndmode YAML configuration. The
 // config schema in v1 is intentionally minimal (the unlock secret plus a
@@ -135,7 +135,7 @@ const (
 	OverlayStyleNone = "none"
 
 	// TerminalLangGo / Python / TypeScript / Rust / Yopta / SQL / Postgres /
-	// MySQL / Oracle / Varaq / Elvish are the languages the
+	// MySQL / Oracle / Varaq / Elvish / PHP are the languages the
 	// `terminal` overlay style can render, selected by the --style terminal:<lang>
 	// flag suffix (mirrors --style glass:N). Each maps to its own compiled-in
 	// source corpus with language-appropriate syntax highlighting. A bare
@@ -156,6 +156,9 @@ const (
 	// and TerminalLangElvish is the elv.sh shell — not Tolkien: the name is the
 	// joke, the corpus is ordinary shell scripting. The apostrophe is dropped
 	// from `varaq` so the suffix survives a shell without quoting.
+	//
+	// TerminalLangPHP is modern PHP (8.x): typed properties, enums, match and
+	// readonly classes, with no opening tag or namespace line in sight.
 	TerminalLangGo         = "go"
 	TerminalLangPython     = "python"
 	TerminalLangTypeScript = "typescript"
@@ -167,6 +170,7 @@ const (
 	TerminalLangOracle     = "oracle"
 	TerminalLangVaraq      = "varaq"
 	TerminalLangElvish     = "elvish"
+	TerminalLangPHP        = "php"
 
 	// legacyTerminalLangYopta is the spelling YoptaScript shipped under before it
 	// became `ys` — it read as an abbreviation of the language's own name rather
@@ -281,7 +285,7 @@ type Config struct {
 	GlassBlur *float64 `yaml:"glass_blur"`
 	// TerminalLanguage selects the source language for overlay_style "terminal":
 	// "go" (default / absent), "python", "typescript", "rust", "ys", "sql",
-	// "psql", "mysql", "oracle", "varaq" or "elvish". Only meaningful
+	// "psql", "mysql", "oracle", "varaq", "elvish" or "php". Only meaningful
 	// for terminal; ignored for every other style. Per-run override: the
 	// --style terminal:<lang> flag suffix (main.go) WINS over this. A plain string
 	// so an ABSENT/empty key defaults to Go via NormalizeTerminalLanguage;
@@ -693,7 +697,7 @@ func NormalizeTerminalLanguage(s string) string {
 	}
 }
 
-// ValidateTerminalLanguage accepts "" (treated as the default, Go), the eleven
+// ValidateTerminalLanguage accepts "" (treated as the default, Go), the twelve
 // supported languages and the deprecated `yc` spelling of YoptaScript; anything
 // else returns a non-nil error suitable for main.go's stderr template. Gates the
 // --style terminal:<lang> flag suffix.
@@ -708,10 +712,11 @@ func ValidateTerminalLanguage(s string) error {
 	case "", TerminalLangGo, TerminalLangPython, TerminalLangTypeScript,
 		TerminalLangRust, TerminalLangYopta, TerminalLangSQL, TerminalLangPostgres,
 		TerminalLangMySQL, TerminalLangOracle, TerminalLangVaraq, TerminalLangElvish,
+		TerminalLangPHP,
 		legacyTerminalLangYopta:
 		return nil
 	default:
-		return fmt.Errorf("unknown terminal language %q (valid: go, python, typescript, rust, ys, sql, psql, mysql, oracle, varaq, elvish)", s)
+		return fmt.Errorf("unknown terminal language %q (valid: go, python, typescript, rust, ys, sql, psql, mysql, oracle, varaq, elvish, php)", s)
 	}
 }
 
@@ -1010,6 +1015,8 @@ unlock_code: %s
 #            trackpad are still fully blocked. Blur strength = glass_blur below.
 #            Captures + blurs the desktop, so it needs the Screen Recording
 #            permission; without it, falls back to a plain system frost.
+#            Linux: the capture goes through the GNOME screenshot portal,
+#            which asks once; if it fails, the shield is plain black.
 #   none   : awake-only mode. NO overlay, NO input blocking, NO Focus, NO audio
 #            mute — dndmode just holds the machine awake (like caffeinate).
 #            Needs no Accessibility permission; exit with Ctrl-C only (there is
@@ -1030,7 +1037,7 @@ unlock_code: %s
 
 # --- terminal_language -------------------------------------------------------
 # Source language rendered by overlay_style 'terminal': go (default), python,
-# typescript, rust, ys, sql, psql, mysql, oracle, varaq or elvish. Each has
+# typescript, rust, ys, sql, psql, mysql, oracle, varaq, elvish or php. Each has
 # its own compiled-in corpus + syntax highlighting. Only used by 'terminal';
 # ignored otherwise.
 #   ys     : YoptaScript (yopta.space) — JavaScript as spoken by the gopniks of
@@ -1043,6 +1050,7 @@ unlock_code: %s
 #   oracle : Oracle — PL/SQL blocks, sequences, CONNECT BY.
 #   varaq  : var'aq — a stack language with Klingon keywords. Qapla'!
 #   elvish : the Elvish shell (elv.sh). Not Tolkien's; same name, though.
+#   php    : modern PHP 8 - enums, match, readonly classes.
 # Per-run override: the --style terminal:<lang> flag (e.g. --style terminal:rust).
 # terminal_language: go
 
