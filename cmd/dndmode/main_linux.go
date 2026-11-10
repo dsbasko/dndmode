@@ -10,6 +10,7 @@
 //	awake lock  systemd-inhibit + gnome-session   (internal/linux/inhibit)
 //	mute        wpctl / pactl                     (internal/linux/audio)
 //	banners     GNOME show-banners, every session (internal/linux/notify)
+//	overview    GNOME Activities closed first     (internal/linux/overview)
 //	watch key   GNOME custom shortcut + SIGUSR1   (internal/linux/gnomekeys)
 //
 // Every overlay_style is available: black, dvd, matrix, terminal, gold,
@@ -43,6 +44,7 @@ import (
 	"github.com/dsbasko/dndmode/internal/linux/inhibit"
 	"github.com/dsbasko/dndmode/internal/linux/notify"
 	"github.com/dsbasko/dndmode/internal/linux/overlay"
+	"github.com/dsbasko/dndmode/internal/linux/overview"
 	"github.com/dsbasko/dndmode/internal/state"
 	runtimepkg "github.com/dsbasko/dndmode/internal/state/runtime"
 	watchpkg "github.com/dsbasko/dndmode/internal/state/watch"
@@ -499,6 +501,13 @@ func run() int {
 		if initErr != nil {
 			_, _ = fmt.Fprintf(errW, "dndmode: overlay init failed: %v.\n", initErr)
 			return exitPlatformErr
+		}
+
+		// Step 14.5: close the GNOME overview. Over it the shield would be a
+		// thumbnail with the desktop open around it, and the input grab
+		// leaves no way to close it by hand. Best-effort: not GNOME, no harm.
+		if err := overview.Hide(ctx, overview.NewRunner()); err != nil {
+			log.Warn("close GNOME overview failed", slog.Any("err", err))
 		}
 
 		// Step 15: shield windows.

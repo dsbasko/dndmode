@@ -1322,6 +1322,7 @@ Only the platform layer is different:
 | Awake lock | IOPMAssertion / `caffeinate` | `systemd-inhibit` + `gnome-session-inhibit`, tied to dndmode's PID |
 | Mute | `osascript` | `wpctl` (PipeWire), `pactl` as fallback |
 | Banners | shield above Notification Center | GNOME `show-banners` off for every session, previous value restored |
+| Overview | shield above Mission Control | GNOME Activities closed before the shield goes up (`OverviewActive` over D-Bus) |
 | `focus` | Shortcuts `dndmode-on/off` | only makes unreadable GNOME notification settings fatal (exit `6`) |
 | `--watch` trigger | Carbon hotkey | GNOME custom shortcut running `dndmode --activate` |
 
@@ -1411,6 +1412,7 @@ internal/linux/
   inhibit/            idle / suspend inhibitor chain
   audio/              wpctl / pactl mute and restore
   notify/             GNOME notification banners
+  overview/           closes GNOME Activities before the shield
   gnomekeys/          watch-mode GNOME custom shortcut
 internal/state/       teardown registry + runtime.json crash recovery
 internal/supervisor/  single-point shutdown fan-in
