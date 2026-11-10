@@ -7,6 +7,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"runtime"
 	"syscall"
 	"testing"
 	"time"
@@ -368,8 +369,13 @@ func TestKernProber_Self(t *testing.T) {
 	if err != nil {
 		t.Fatalf("StartTime(self): %v", err)
 	}
-	if start.IsZero() || start.After(time.Now().Add(time.Minute)) {
-		t.Errorf("start time of self = %v, implausible", start)
+	if start.IsZero() {
+		t.Error("start time of self is zero")
+	}
+	// Only the darwin value is a real time. The linux one is an identity
+	// (boot_id hash as seconds + start ticks) that may lie anywhere up to 2106.
+	if runtime.GOOS == "darwin" && start.After(time.Now().Add(time.Minute)) {
+		t.Errorf("start time of self = %v, in the future", start)
 	}
 	// Stable across calls — the comparison in Inspect depends on it.
 	again, err := p.StartTime(os.Getpid())
