@@ -240,7 +240,7 @@ func TestGoldRain_FillsScreenFromFirstFrame(t *testing.T) {
 func TestGoldRain_CountScalesWithScreen(t *testing.T) {
 	count := func(w, h float64) int { return len(newGoldRain(1, w, h, h/900.0).d) }
 	small, laptop, large := count(800, 500), count(goldRainW, goldRainH), count(5120, 2880)
-	if !(small < laptop && laptop <= large) {
+	if small >= laptop || laptop > large {
 		t.Errorf("drops: 800x500 = %d, laptop = %d, 5K = %d; want more drops on a bigger screen", small, laptop, large)
 	}
 	if large > goldRainCap {

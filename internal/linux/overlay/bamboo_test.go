@@ -34,12 +34,6 @@ func newBambooForest(seed uint64, w, h float64) *bambooForest {
 // skip moves the forest n frames on without stepping the particles.
 func (f *bambooForest) skip(n uint64) { f.frame += n }
 
-func (f *bambooForest) stepN(n int) {
-	for range n {
-		f.step()
-	}
-}
-
 type bambooLayerView struct {
 	px, speed, base, spacing, light, fog float64
 }
@@ -436,7 +430,7 @@ func TestBambooParticles_CountScalesWithScreen(t *testing.T) {
 	sl, sf := count(800, 500)
 	ll, lf := count(bambooW, bambooH)
 	bl, bf := count(5120, 2880)
-	if !(sl < ll && ll <= bl) || !(sf <= lf && lf <= bf) {
+	if sl >= ll || ll > bl || sf > lf || lf > bf {
 		t.Errorf("leaves/fireflies: 800x500 = %d/%d, laptop = %d/%d, 5K = %d/%d; want more on a bigger screen", sl, sf, ll, lf, bl, bf)
 	}
 	if tl, tf := count(0, 0); tl < 1 || tf < 1 {
@@ -661,7 +655,7 @@ func TestBambooStatics(t *testing.T) {
 	}
 	mist := paintBambooMist(bambooW, bambooH, 1)
 	top, mid, bottom := mist.px[0]>>24, mist.px[int(float64(mist.h)*0.72)*mist.w]>>24, mist.px[(mist.h-1)*mist.w]>>24
-	if !(mid > top && mid > bottom) || mid > 0x50 {
+	if mid <= top || mid <= bottom || mid > 0x50 {
 		t.Errorf("mist alpha top %d, densest %d, bottom %d: want a faint band, densest low down", top, mid, bottom)
 	}
 }

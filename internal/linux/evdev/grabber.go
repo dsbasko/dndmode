@@ -159,7 +159,7 @@ func openDevice(path string) (*device, error) {
 		return nil, err
 	}
 	caps, err := bitmap(fd, func(n uintptr) uintptr { return eviocgbit(0, n) }, evMax)
-	if err != nil || !(testBit(caps, evKey) || testBit(caps, evRel) || testBit(caps, evAbs)) {
+	if err != nil || !testBit(caps, evKey) && !testBit(caps, evRel) && !testBit(caps, evAbs) {
 		_ = unix.Close(fd)
 		return nil, errNotInput
 	}
