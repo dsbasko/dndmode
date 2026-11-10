@@ -1,4 +1,4 @@
-//go:build darwin
+//go:build darwin || linux
 
 package watch
 
@@ -25,6 +25,7 @@ import (
 //     Informational — `--status` prints it and an uptime derived from it.
 //   - ProcStartedAt: the process start time as the KERNEL reports it, so a
 //     reused PID can be told apart from the process that wrote the record.
+//     On Linux it is an identity, not a clock reading (see probe_linux.go).
 //     Zero (omitted from the JSON) when the process could not read its own
 //     start time; Inspect then falls back to the PID alone.
 //   - ActivateHotkey: the combination the process is waiting for, in the

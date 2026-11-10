@@ -1,4 +1,4 @@
-//go:build darwin
+//go:build darwin || linux
 
 package runtime
 
@@ -41,7 +41,9 @@ import (
 //     written before this field existed) ⇒ recovery falls back to the
 //     legacy UNCONDITIONAL deactivation. false ⇒ session never touched
 //     Focus ⇒ recovery skips it. true ⇒ session enabled Focus ⇒ recovery
-//     deactivates. Nullable from day one ⇒ no migration.
+//     deactivates. Nullable from day one ⇒ no migration. On Linux it
+//     records whether the session turned GNOME banners off (done on
+//     every session they were on), so recovery turns them back on.
 //
 // The JSON tags are stable user-facing contract. Renaming a tag is a
 // breaking schema change requiring migration logic.

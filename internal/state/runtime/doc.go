@@ -1,4 +1,4 @@
-//go:build darwin
+//go:build darwin || linux
 
 // Package runtime owns the lifecycle of `~/.config/dndmode/runtime.json` —
 // the per-process snapshot file that the dndmode lifecycle writes after

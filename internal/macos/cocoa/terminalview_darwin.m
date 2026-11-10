@@ -205,6 +205,23 @@ static const char *const kElvKeywords[] = {
     "nop", "sleep", "time", "styled", "true", "false", "nil", "ok",
 };
 
+// PHP (terminal:php) — modern PHP 8. `$` is punctuation, so `$this` lights
+// `this` as a keyword and every other variable stays an ident. `#` opens a
+// comment as in PHP itself (the corpus only writes `//`, and no attributes,
+// whose `#[` would color as one). Type names are listed so signatures read
+// typed at a glance, as in the other tables.
+static const char *const kPhpKeywords[] = {
+    "function", "fn", "return", "if", "else", "elseif", "foreach", "for",
+    "while", "do", "switch", "case", "default", "break", "continue", "match",
+    "class", "interface", "trait", "enum", "extends", "implements", "abstract",
+    "final", "readonly", "public", "private", "protected", "static", "const",
+    "new", "clone", "instanceof", "throw", "try", "catch", "finally", "yield",
+    "from", "as", "echo", "print", "isset", "unset", "empty", "list", "array",
+    "string", "int", "float", "bool", "void", "mixed", "never", "null", "true",
+    "false", "self", "parent", "this", "iterable", "callable", "object", "and",
+    "or", "xor", "global",
+};
+
 // Comment markers a language accepts, as a bitmask: Go/TS/Rust '//', Python
 // and Elvish '#', SQL '--'. MySQL is the one language with two (`--` and `#`),
 // which is why this is a mask and not a choice of one. var'aq's `(* ... *)` is
@@ -545,6 +562,7 @@ typedef enum {
     TermLangOracle,
     TermLangVaraq,
     TermLangElvish,
+    TermLangPhp,
 } TermLang;
 
 // TermLangSpec bundles everything language-specific: the corpus block table (from
@@ -579,6 +597,7 @@ static TermLang term_lang_from_string(const char *s) {
     if (strcmp(s, "oracle") == 0)     { return TermLangOracle; }
     if (strcmp(s, "varaq") == 0)      { return TermLangVaraq; }
     if (strcmp(s, "elvish") == 0)     { return TermLangElvish; }
+    if (strcmp(s, "php") == 0)        { return TermLangPhp; }
     return TermLangGo;
 }
 
@@ -592,7 +611,7 @@ static TermLang term_lang_from_string(const char *s) {
 // there, which the tokenizer would color as a string, so the SQL corpora simply
 // never use one. var'aq: `(* *)` comments, double-quoted strings only (' is a
 // letter), apostrophes inside words. Elvish: '#' comments, both quote styles,
-// hyphens inside words.
+// hyphens inside words. PHP: '//' and '#' comments, both quote styles.
 static TermLangSpec term_lang_spec(TermLang lang) {
 #define TERM_SQL_SYNTAX(extra, marks)                                          \
     { .keywords = kSqlKeywords, .keywordCount = TERM_KWCOUNT(kSqlKeywords),   \
@@ -638,6 +657,10 @@ static TermLangSpec term_lang_spec(TermLang lang) {
                 { .keywords = kElvKeywords, .keywordCount = TERM_KWCOUNT(kElvKeywords),
                   .comments = TermCommentHash, .singleQuoteString = YES,
                   .identCharExtra = "-" } };
+        case TermLangPhp:
+            return (TermLangSpec){ kPhpBlocks, kPhpBlocksCount,
+                { .keywords = kPhpKeywords, .keywordCount = TERM_KWCOUNT(kPhpKeywords),
+                  .comments = TermCommentSlash | TermCommentHash, .singleQuoteString = YES } };
         case TermLangGo:
         default:
             return (TermLangSpec){ kGoBlocks, kGoBlocksCount,

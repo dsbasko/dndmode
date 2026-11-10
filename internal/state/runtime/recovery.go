@@ -1,4 +1,4 @@
-//go:build darwin
+//go:build darwin || linux
 
 package runtime
 
@@ -10,10 +10,6 @@ import (
 	"log/slog"
 	"os"
 	"time"
-
-	"github.com/dsbasko/dndmode/internal/macos/audiomute"
-	"github.com/dsbasko/dndmode/internal/macos/focus"
-	"github.com/dsbasko/dndmode/internal/macos/powerassert"
 )
 
 // minValidPID is the smallest PID value RecoverFromCrash will accept for a
@@ -119,10 +115,10 @@ const recoveryMuteTimeout = 5 * time.Second
 func RecoverFromCrash(
 	_ context.Context,
 	mgr *Manager,
-	rel powerassert.AssertionReleaser,
-	runner focus.ShortcutsRunner,
-	vol audiomute.VolumeRunner,
-	live powerassert.LiveChecker,
+	rel AssertionReleaser,
+	runner FocusRunner,
+	vol VolumeSetter,
+	live LiveChecker,
 	log *slog.Logger,
 ) error {
 	if log == nil {
